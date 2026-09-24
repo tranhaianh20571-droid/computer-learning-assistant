@@ -1,0 +1,23 @@
+@startdot
+digraph G {
+  graph [rankdir=TB, bgcolor="transparent", pad=0.15, nodesep=0.36, ranksep=0.55, splines=polyline]
+  node [fontname="Microsoft YaHei", fontsize=15, color="#334155", fontcolor="#0f172a", penwidth=1, style="filled", fillcolor="#ffffff", margin="0.18,0.12"]
+  edge [fontname="Microsoft YaHei", fontsize=13, color="#475569", fontcolor="#334155", arrowsize=0.7]
+  start [label="用户进入个人学习空间", shape=ellipse]
+  task [label="选择任务与学习场景", shape=box]
+  kind [label="规划课程？", shape=diamond]
+  material [label="按需选用个人资料与网络内容", shape=box]
+  route [label="生成、确认学习路线", shape=box]
+  teach [label="分步教学：文字、板书、语音", shape=box]
+  ask [label="即时提问", shape=box]
+  chat [label="纯文字对话与连续追问", shape=box]
+  follow [label="课程按需追问、暂停、回看与恢复", shape=box]
+  save [label="保存个人学习记录", shape=ellipse]
+  start -> task -> kind
+  kind -> material [label="是"]
+  kind -> ask [label="否：即时对话"]
+  material -> route -> teach
+  ask -> chat -> save
+  teach -> follow -> save
+}
+@enddot

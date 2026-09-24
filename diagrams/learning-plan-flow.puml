@@ -1,0 +1,27 @@
+@startdot
+digraph G {
+  graph [rankdir=TB, bgcolor="transparent", pad=0.12, nodesep=0.32, ranksep=0.45, splines=polyline]
+  node [fontname="Microsoft YaHei", fontsize=15, color="#333333", fontcolor="#111111", penwidth=1, style="filled", fillcolor="#FFFFFF", margin="0.16,0.10"]
+  edge [fontname="Microsoft YaHei", fontsize=13, color="#333333", fontcolor="#111111", arrowsize=0.7]
+  start [label="提交学习目标与场景", shape=ellipse]
+  info [label="必要信息足够？", shape=diamond]
+  ask [label="提示补充目标、基础或课程信息", shape=box]
+  search [label="尝试网络搜索并结合选定资料", shape=box]
+  online [label="搜索成功？", shape=diamond]
+  route [label="生成路线预览", shape=box]
+  choose [label="选择离线继续？", shape=diamond]
+  wait [label="结束：等待补充信息", shape=ellipse]
+  retry [label="结束：等待用户重试", shape=ellipse]
+  end [label="结束：可查看路线", shape=ellipse]
+  start -> info
+  info -> ask [label="不足"]
+  ask -> wait
+  info -> search [label="足够"]
+  search -> online
+  online:w -> route:n [label="成功"]
+  online:e -> choose:n [label="失败"]
+  choose -> route [label="是：离线继续"]
+  choose -> retry [label="否：重试"]
+  route -> end
+}
+@enddot

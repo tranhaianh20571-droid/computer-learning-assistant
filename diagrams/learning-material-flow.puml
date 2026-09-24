@@ -1,0 +1,41 @@
+@startdot
+digraph G {
+  graph [rankdir=TB, bgcolor="transparent", pad=0.12, nodesep=0.32, ranksep=0.45, splines=polyline]
+  node [fontname="Microsoft YaHei", fontsize=15, color="#333333", fontcolor="#111111", penwidth=1, style="filled", fillcolor="#FFFFFF", margin="0.16,0.10"]
+  edge [fontname="Microsoft YaHei", fontsize=13, color="#333333", fontcolor="#111111", arrowsize=0.7]
+  start [label="选择文件", shape=ellipse]
+  valid [label="类型、内容与限额合规？", shape=diamond]
+  page [label="按页排队处理", shape=box]
+  layout [label="临时渲染当前页\n云端 PP-DocLayoutV3 版面分析", shape=box]
+  hasfig [label="含图或统计图？", shape=diamond]
+  crop [label="按云端版面候选从原 PDF 裁图\n关联页码、图题与相邻文字", shape=box]
+  text [label="文字区文本层可信？", shape=diamond]
+  direct [label="直接抽取文字", shape=box]
+  vl [label="扫描、乱码、手写及复杂表格公式\n调用云端 VL-1.6 完整产线", shape=box]
+  status [label="写回本页状态\n成功 / 部分可用 / 失败", shape=box]
+  more [label="还有下一页？", shape=diamond]
+  usable [label="有可用内容？", shape=diamond]
+  ready [label="汇总可用内容与图块\n准备检索", shape=box]
+  fail [label="显示原因；可重试或移除", shape=box]
+  end [label="结束：资料状态明确", shape=ellipse]
+  start -> valid
+  valid -> page [label="合规"]
+  valid -> fail [label="不合规"]
+  page -> layout
+  layout -> hasfig
+  hasfig -> crop [label="有"]
+  hasfig -> text [label="无"]
+  crop -> text
+  text -> direct [label="可信"]
+  text -> vl [label="不可信"]
+  direct -> status
+  vl -> status
+  status -> more
+  more -> page [label="有"]
+  more -> usable [label="无"]
+  usable -> ready [label="有"]
+  usable -> fail [label="无"]
+  ready -> end
+  fail -> end
+}
+@enddot

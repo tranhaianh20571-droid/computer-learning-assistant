@@ -1,0 +1,41 @@
+@startuml
+top to bottom direction
+skinparam defaultFontName Microsoft YaHei
+skinparam shadowing false
+skinparam nodesep 65
+skinparam ranksep 70
+class "账户" as Account {
+  账户状态
+}
+class "学习资料" as Material
+class "资料图块" as Figure {
+  页码
+  类型
+}
+class "学习路线" as Route
+class "路线版本" as RouteVersion
+class "学习节点" as Node
+class "学习会话" as Session
+class "消息" as Message
+class "课程讲解步骤" as Step
+class "板书" as Board
+class "音频" as Audio
+class "学习位置" as Checkpoint
+class "搜索结果" as SearchResult
+Account "1" -- "0..*" Material : 拥有
+Material "1" *-- "0..*" Figure : 裁切
+Board "0..*" --> "0..*" Figure : 引用
+Account "1" -- "0..*" Route : 拥有
+Account "1" -- "0..*" Session : 拥有
+Route "1" *-- "1..*" RouteVersion : 保留历史
+RouteVersion "1" *-- "1..*" Node : 编排
+Session "0..*" --> "0..1" RouteVersion : 依据
+Session "0..*" --> "0..1" Node : 当前节点
+Session "0..*" --> "0..*" Material : 选用
+Session "1" *-- "0..*" Message : 记录
+Session "1" *-- "0..*" Step : 展示
+Session "1" *-- "0..1" Checkpoint : 保存
+Step "1" *-- "1" Board : 对应
+Step "1" *-- "0..1" Audio : 对应
+Session "0..*" --> "0..*" SearchResult : 使用
+@enduml

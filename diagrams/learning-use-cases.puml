@@ -1,0 +1,73 @@
+@startuml
+left to right direction
+skinparam defaultFontName Microsoft YaHei
+skinparam shadowing false
+skinparam packageStyle rectangle
+actor "学习者" as Student
+actor "项目所有者（管理员）" as Admin
+actor "用户接入的内容生成模型" as Model
+actor "可选语音合成服务" as TTS
+actor "云端 OCR API" as CloudOCR
+actor "管理员配置的搜索 API" as Search
+actor "本地连接器" as Connector
+rectangle "计算机领域辅助学习伙伴" {
+  package "进入与资料" {
+    usecase "注册账户" as UC01
+    usecase "登录与退出" as UC02
+    usecase "选择学习任务" as UC03
+    usecase "准备学习资料" as UC04
+    usecase "审批注册账户" as UC16
+    usecase "找回密码" as UC17
+    usecase "配置个人模型与语音" as UC18
+    usecase "配置内置云能力" as UC19
+  }
+  package "路线与教学" {
+    usecase "规划学习路线" as UC05
+    usecase "调整学习路线" as UC06
+    usecase "开始课程学习" as UC07
+    usecase "发起即时提问" as UC08
+    usecase "接收分步讲解" as UC09
+    usecase "控制播放与回看" as UC10
+    usecase "发送追问" as UC11
+    usecase "继续课程" as UC12
+    usecase "确认节点完成" as UC13
+  }
+  package "记录与管理" {
+    usecase "恢复学习记录" as UC14
+    usecase "管理个人内容" as UC15
+  }
+}
+Student -- UC01
+Student -- UC02
+Student -- UC17
+Student -- UC18
+Admin -- UC16
+Admin -- UC19
+Student -- UC03
+Student -- UC04
+Student -- UC05
+Student -- UC06
+Student -- UC07
+Student -- UC08
+Student -- UC09
+Student -- UC10
+Student -- UC11
+Student -- UC12
+Student -- UC13
+Student -- UC14
+Student -- UC15
+UC04 -- CloudOCR
+UC05 -- Search
+UC08 -- Search
+UC05 -- Model
+UC08 -- Model
+UC09 -- Model
+UC11 -- Model
+UC09 -- TTS
+UC18 -- Model
+UC18 -- TTS
+UC18 -- Connector
+UC19 -- CloudOCR
+UC19 -- Search
+UC11 ..> UC09 : <<extend>>\n仅课程追问
+@enduml

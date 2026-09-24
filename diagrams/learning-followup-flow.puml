@@ -1,0 +1,26 @@
+@startdot
+digraph G {
+  graph [rankdir=TB, bgcolor="transparent", pad=0.12, nodesep=0.38, ranksep=0.50, splines=polyline]
+  node [fontname="Microsoft YaHei", fontsize=15, color="#333333", fontcolor="#111111", penwidth=1, style="filled", fillcolor="#FFFFFF", margin="0.16,0.10"]
+  edge [fontname="Microsoft YaHei", fontsize=13, color="#333333", fontcolor="#111111", arrowsize=0.7]
+  start [label="用户发送追问", shape=ellipse]
+  kind [label="课程追问？", shape=diamond]
+  save [label="中断讲解并保存\n课程恢复点", shape=box]
+  course [label="生成文字、板书与语音", shape=box]
+  c_again [label="再次追问？", shape=diamond]
+  c_end [label="等待用户继续课程", shape=ellipse]
+  stop [label="停止旧回答呈现", shape=box]
+  chat [label="仅生成\n文字回答", shape=box]
+  i_again [label="再次提问？", shape=diamond]
+  i_end [label="等待新文字问题", shape=ellipse]
+  start -> kind
+  kind -> save [label="课程"]
+  kind -> stop [label="即时对话"]
+  save -> course -> c_again
+  c_again -> course [label="是", constraint=false]
+  c_again -> c_end [label="否：回答结束"]
+  stop -> chat -> i_again
+  i_again -> chat [label="是", constraint=false]
+  i_again -> i_end [label="否：回答结束"]
+}
+@enddot

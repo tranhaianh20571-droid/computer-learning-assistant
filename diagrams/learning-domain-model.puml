@@ -8,34 +8,70 @@ class "账户" as Account {
   账户状态
 }
 class "学习资料" as Material
-class "资料图块" as Figure {
+class "资料页面/区域" as MaterialPage {
   页码
+  可用状态
+}
+class "资料图块" as Figure {
+  坐标
   类型
 }
 class "学习路线" as Route
 class "路线版本" as RouteVersion
-class "学习节点" as Node
-class "学习会话" as Session
+class "路线课程节点" as RouteCourse {
+  业务顺序
+  目标快照
+}
+class "课程" as Course
+class "课程大纲版本" as OutlineVersion
+class "课程单元" as Unit
+class "讲次" as Lesson
+class "讲次内容版本" as LessonContent {
+  内容版本
+}
+class "学习会话" as Session {
+  generation
+}
 class "消息" as Message
-class "课程讲解步骤" as Step
-class "板书" as Board
+class "课程教学步骤" as Step
+class "板书场景" as Board
 class "音频" as Audio
 class "学习位置" as Checkpoint
+class "讲次进度" as LessonProgress
+class "任务" as Task {
+  stage
+  status
+  attempt_id
+}
 class "搜索结果" as SearchResult
 Account "1" -- "0..*" Material : 拥有
-Material "1" *-- "0..*" Figure : 裁切
+Material "1" *-- "1..*" MaterialPage : 分页
+MaterialPage "1" *-- "0..*" Figure : 裁切
 Board "0..*" --> "0..*" Figure : 引用
 Account "1" -- "0..*" Route : 拥有
-Account "1" -- "0..*" Session : 拥有
 Route "1" *-- "1..*" RouteVersion : 保留历史
-RouteVersion "1" *-- "1..*" Node : 编排
-Session "0..*" --> "0..1" RouteVersion : 依据
-Session "0..*" --> "0..1" Node : 当前节点
-Session "0..*" --> "0..*" Material : 选用
+RouteVersion "1" *-- "1..*" RouteCourse : 编排
+RouteCourse "*" --> "1" Course : 稳定课程标识
+RouteCourse "0..*" --> "0..*" RouteCourse : 先修边
+Account "1" -- "0..*" Course : 拥有
+Course "1" *-- "0..*" OutlineVersion : 保留历史
+OutlineVersion "1" *-- "1..*" Unit : 单元
+Unit "1" *-- "1..*" Lesson : 讲次
+Lesson "1" *-- "1..*" LessonContent : 内容版本
+Lesson "0..*" --> "0..*" Lesson : 先修边
+Account "1" -- "0..*" Session : 拥有
+Session "0..*" --> "0..1" RouteVersion : 来源版本
+Session "0..*" --> "0..1" Course : 课程
+Session "0..*" --> "0..1" OutlineVersion : 固定大纲
+Session "0..*" --> "0..1" LessonContent : 当前内容版本
 Session "1" *-- "0..*" Message : 记录
 Session "1" *-- "0..*" Step : 展示
 Session "1" *-- "0..1" Checkpoint : 保存
 Step "1" *-- "1" Board : 对应
 Step "1" *-- "0..1" Audio : 对应
+Lesson "1" -- "0..*" LessonProgress : 用户进度
+Session "0..*" --> "0..*" Material : 选用快照
 Session "0..*" --> "0..*" SearchResult : 使用
+Task "0..*" --> "0..1" Session : 作用域
+Task "0..*" --> "0..1" Material : 解析对象
 @enduml

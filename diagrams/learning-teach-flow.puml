@@ -3,20 +3,33 @@ digraph G {
   graph [rankdir=TB, bgcolor="transparent", pad=0.12, nodesep=0.32, ranksep=0.45, splines=polyline]
   node [fontname="Microsoft YaHei", fontsize=15, color="#333333", fontcolor="#111111", penwidth=1, style="filled", fillcolor="#FFFFFF", margin="0.16,0.10"]
   edge [fontname="Microsoft YaHei", fontsize=13, color="#333333", fontcolor="#111111", arrowsize=0.7]
-  start [label="开始课程节点或课程追问", shape=ellipse]
-  prepare [label="生成步骤文字、板书和对应音频", shape=box]
-  ready [label="当前步骤就绪？", shape=diamond]
-  show [label="呈现当前步骤", shape=box]
-  wait [label="显示等待或失败状态", shape=box]
-  action [label="用户发送追问？", shape=diamond]
-  follow [label="保存课程位置并进入追问", shape=ellipse]
+  start [label="从课程总览选择讲次", shape=ellipse]
+  gate [label="大纲已确认且讲次可访问？", shape=diamond]
+  blocked [label="只允许编辑 / 确认大纲", shape=box]
+  prepare [label="生成当前短段文字、板书和同版音频", shape=box]
+  readable [label="文字已校验？", shape=diamond]
+  read [label="先呈现可读文字", shape=box]
+  ready [label="板书与音频就绪？", shape=diamond]
+  show [label="用户播放：板书随音频呈现", shape=box]
+  wait [label="等待、重试或选择无音频手动推进", shape=box]
+  pregen [label="播放期间预生成下一段（最多一段）", shape=box]
+  action [label="用户发送课程追问？", shape=diamond]
+  follow [label="暂停并保存一次恢复点；停止原课预生成", shape=box]
+  resume [label="回答后：用户点击继续，再点击播放", shape=ellipse]
   next [label="继续当前讲解或下一步", shape=ellipse]
-  start -> prepare -> ready
-  ready -> show [label="就绪"]
-  ready -> wait [label="未就绪"]
-  wait -> show [label="重试成功或选择手动推进"]
-  show -> action
+  start -> gate
+  gate -> blocked [label="否"]
+  gate -> prepare [label="是"]
+  prepare -> readable
+  readable -> read [label="是"]
+  readable -> wait [label="否"]
+  read -> ready
+  ready -> show [label="是"]
+  ready -> wait [label="否"]
+  wait -> show [label="重试成功 / 手动模式"]
+  show -> pregen -> action
   action -> follow [label="发送"]
+  follow -> resume
   action -> next [label="未发送"]
 }
 @enddot

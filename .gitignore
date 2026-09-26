@@ -1,3 +1,23 @@
 .backup/
+.mimocode/
+文档/
 .DS_Store
 Thumbs.db
+
+# Local environments and credentials
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+node_modules/
+
+# Generated logs, reports and test caches
+*.log
+coverage/
+.pytest_cache/
+__pycache__/
+test-results/
+playwright-report/
+文档/规范/tests/**/evidence/
+文档/规范/tests/**/reports/

@@ -24,6 +24,9 @@ rectangle "计算机领域辅助学习伙伴" {
   package "路线与教学" {
     usecase "规划学习路线" as UC05
     usecase "调整学习路线" as UC06
+    usecase "生成课程大纲" as UC20
+    usecase "编辑并确认课程大纲" as UC21
+    usecase "查看课程总览" as UC22
     usecase "开始课程学习" as UC07
     usecase "发起即时提问" as UC08
     usecase "接收分步讲解" as UC09
@@ -47,6 +50,9 @@ Student -- UC03
 Student -- UC04
 Student -- UC05
 Student -- UC06
+Student -- UC20
+Student -- UC21
+Student -- UC22
 Student -- UC07
 Student -- UC08
 Student -- UC09
@@ -70,4 +76,7 @@ UC18 -- Connector
 UC19 -- CloudOCR
 UC19 -- Search
 UC11 ..> UC09 : <<extend>>\n仅课程追问
+UC20 ..> UC05 : <<extend>>\n路线中选择课程时
+UC21 ..> UC20 : <<include>>\n生成或恢复草稿
+UC07 ..> UC22 : <<include>>\n从总览选择讲次
 @enduml

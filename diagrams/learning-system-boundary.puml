@@ -1,0 +1,44 @@
+@startdot
+digraph G {
+  graph [rankdir=LR, bgcolor="transparent", pad=0.15, nodesep=0.36, ranksep=0.55, splines=polyline]
+  node [fontname="Microsoft YaHei", fontsize=15, color="#334155", fontcolor="#0f172a", penwidth=1, style="filled", fillcolor="#ffffff", margin="0.18,0.12"]
+  edge [fontname="Microsoft YaHei", fontsize=13, color="#475569", fontcolor="#334155", arrowsize=0.7]
+  U [label="浏览器 React Web", shape=box]
+  API [label="FastAPI 模块化单体", shape=box]
+  PG [label="PostgreSQL\n业务数据、任务、索引", shape=cylinder]
+  FS [label="受控文件目录\nPDF、图块、音频", shape=cylinder]
+  W [label="Python worker\n解析/生成/清理", shape=box]
+  LFWEB [label="Langfuse Web\n受控管理/摄取", shape=box]
+  LFW [label="Langfuse worker", shape=box]
+  LFPG [label="Langfuse PostgreSQL\n元数据", shape=cylinder]
+  CH [label="ClickHouse\ntrace/评估数据", shape=cylinder]
+  REDIS [label="Redis/Valkey\n队列/缓存", shape=cylinder]
+  OBJ [label="Langfuse 对象存储", shape=cylinder]
+  MAINT [label="维护人员", shape=box]
+  OCR [label="管理员云端\nPaddleOCR-VL-1.6", shape=box]
+  SEARCH [label="管理员搜索 API", shape=box]
+  MODEL [label="用户的公网/内网\n模型及 TTS", shape=box]
+  C [label="用户电脑本地连接器", shape=box]
+  LOCAL [label="用户本机模型/TTS API", shape=box]
+  SMTP [label="邮件服务", shape=box]
+  U -> API [label="HTTPS / REST / SSE"]
+  API -> PG
+  API -> FS
+  W -> PG
+  W -> FS
+  API -> LFWEB [label="脱敏 OTel"]
+  W -> LFWEB [label="脱敏 OTel"]
+  LFWEB -> LFPG
+  LFWEB -> REDIS
+  LFW -> REDIS
+  LFW -> CH
+  LFW -> OBJ
+  MAINT -> LFWEB [label="受控管理访问"]
+  W -> OCR [label="获确认的请求"]
+  W -> SEARCH [label="获确认的请求"]
+  W -> MODEL [label="获确认的请求"]
+  W -> C [dir=both, label="账户绑定的出站 WSS 隧道"]
+  C -> LOCAL [label="仅回环地址"]
+  API -> SMTP
+}
+@enddot

@@ -5,10 +5,12 @@ digraph G {
   edge [fontname="Microsoft YaHei", fontsize=13, color="#333333", fontcolor="#111111", arrowsize=0.7]
   start [label="用户发送追问", shape=ellipse]
   kind [label="课程追问？", shape=diamond]
-  save [label="中断讲解并保存\n课程恢复点", shape=box]
-  course [label="生成文字、板书与语音", shape=box]
+  save [label="暂停音频/板书并保存\n一次性课程恢复点", shape=box]
+  stop_pregen [label="停止提交原课程下一段\n尽力取消在途调用", shape=box]
+  course [label="生成追问文字、板书与同版语音", shape=box]
   c_again [label="再次追问？", shape=diamond]
-  c_end [label="等待用户继续课程", shape=ellipse]
+  c_end [label="回答结束：等待用户点击继续课程", shape=ellipse]
+  resume [label="校验原课版本，用户再点击播放", shape=box]
   stop [label="停止旧回答呈现", shape=box]
   chat [label="仅生成\n文字回答", shape=box]
   i_again [label="再次提问？", shape=diamond]
@@ -16,9 +18,10 @@ digraph G {
   start -> kind
   kind -> save [label="课程"]
   kind -> stop [label="即时对话"]
-  save -> course -> c_again
+  save -> stop_pregen -> course -> c_again
   c_again -> course [label="是", constraint=false]
   c_again -> c_end [label="否：回答结束"]
+  c_end -> resume
   stop -> chat -> i_again
   i_again -> chat [label="是", constraint=false]
   i_again -> i_end [label="否：回答结束"]

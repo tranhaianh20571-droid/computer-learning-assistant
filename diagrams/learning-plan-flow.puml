@@ -3,25 +3,41 @@ digraph G {
   graph [rankdir=TB, bgcolor="transparent", pad=0.12, nodesep=0.32, ranksep=0.45, splines=polyline]
   node [fontname="Microsoft YaHei", fontsize=15, color="#333333", fontcolor="#111111", penwidth=1, style="filled", fillcolor="#FFFFFF", margin="0.16,0.10"]
   edge [fontname="Microsoft YaHei", fontsize=13, color="#333333", fontcolor="#111111", arrowsize=0.7]
-  start [label="提交学习目标与场景", shape=ellipse]
+  start [label="提交目标、场景与范围", shape=ellipse]
+  scope [label="范围明确？", shape=diamond]
+  clarify [label="追问用途、基础或边界", shape=box]
+  kind [label="单门课程还是多课程路线？", shape=diamond]
   info [label="必要信息足够？", shape=diamond]
   ask [label="提示补充目标、基础或课程信息", shape=box]
   search [label="尝试网络搜索并结合选定资料", shape=box]
   online [label="搜索成功？", shape=diamond]
-  route [label="生成路线预览", shape=box]
-  choose [label="选择离线继续？", shape=diamond]
+  choose [label="用户选择离线继续？", shape=diamond]
+  route [label="生成路线草稿", shape=box]
+  route_edit [label="编辑并确认路线", shape=box]
+  route_overview [label="路线总览：选择课程", shape=box]
+  outline [label="生成课程大纲草稿", shape=box]
+  outline_edit [label="编辑并确认课程大纲", shape=box]
+  course_overview [label="课程总览：选择讲次", shape=box]
   wait [label="结束：等待补充信息", shape=ellipse]
   retry [label="结束：等待用户重试", shape=ellipse]
-  end [label="结束：可查看路线", shape=ellipse]
-  start -> info
+  teach [label="进入讲次教学", shape=ellipse]
+  start -> scope
+  scope -> clarify [label="歧义会改变范围"]
+  clarify -> scope [label="补充后"]
+  scope -> kind [label="明确或用户选择"]
+  kind -> info [label="课程"]
+  kind -> info [label="路线"]
   info -> ask [label="不足"]
   ask -> wait
   info -> search [label="足够"]
   search -> online
-  online:w -> route:n [label="成功"]
-  online:e -> choose:n [label="失败"]
-  choose -> route [label="是：离线继续"]
+  online:w -> outline [label="成功：课程"]
+  online:s -> route [label="成功：路线"]
+  online:e -> choose [label="失败"]
+  choose -> outline [label="是：课程离线继续"]
+  choose -> route [label="是：路线离线继续"]
   choose -> retry [label="否：重试"]
-  route -> end
+  route -> route_edit -> route_overview -> outline
+  outline -> outline_edit -> course_overview -> teach
 }
 @enddot

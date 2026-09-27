@@ -27,6 +27,30 @@ class OpenAIAdapter(AdapterBase):
     def _chat_url(self) -> str:
         return f"{self.endpoint}/chat/completions"
 
+    def generate(self, messages: list[dict], **options: Any) -> dict:
+        """切片 3/4 结构化与文字生成（OpenAI 兼容 chat.completions）。
+
+        - native：response_format 透传（网关/模型支持时强制 schema）；
+        - tool：tools + tool_choice 透传，返回 tool_arguments；
+        - plain_text：纯文字（即时对话路径）。
+        供应商异常经 _map_status 映射为受控错误码。
+        """
+        payload: dict[str, Any] = {"model": self.model_name, "messages": messages}
+        if options.get("response_format"):
+            payload["response_format"] = options["response_format"]
+        if options.get("tools"):
+            payload["tools"] = options["tools"]
+            payload["tool_choice"] = options.get("tool_choice") or "auto"
+        status, body, _ = self._request("POST", self._chat_url(), json_body=payload)
+        self._map_status(status, body)
+        msg = (body.get("choices") or [{}])[0].get("message", {}) or {}
+        tool_calls = msg.get("tool_calls") or []
+        tool_arguments = None
+        if tool_calls:
+            fn = tool_calls[0].get("function") or {}
+            tool_arguments = fn.get("arguments")
+        return {"content": msg.get("content") or "", "tool_arguments": tool_arguments}
+
     def _probe(self, capability: str) -> None:
         if capability == "streaming":
             self._probe_streaming()

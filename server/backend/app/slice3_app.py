@@ -277,6 +277,36 @@ def _dev_synthetic_factories() -> tuple[Optional[Any], Optional[Any]]:
     )
 
 
+def _real_model_factory() -> Optional[Any]:
+    """真实模型工厂（LEARNING_REAL_MODEL_* 环境变量；OpenAI 兼容协议）。"""
+    key = os.environ.get("LEARNING_REAL_MODEL_KEY")
+    endpoint = os.environ.get("LEARNING_REAL_MODEL_ENDPOINT")
+    if not (key and endpoint):
+        return None
+    from .slice1.adapters.openai import OpenAIAdapter
+
+    model_name = os.environ.get("LEARNING_REAL_MODEL_NAME", "")
+    return lambda owner, task_id: OpenAIAdapter(
+        endpoint=endpoint, model_name=model_name, credentials={"api_key": key}
+    )
+
+
+def _real_tts_factory() -> Optional[Any]:
+    """真实 TTS 工厂（LEARNING_REAL_TTS_* 环境变量；MiniMax）。"""
+    key = os.environ.get("LEARNING_REAL_TTS_KEY")
+    if not key:
+        return None
+    from .slice1.adapters.minimax import MiniMaxTTSAdapter
+
+    endpoint = os.environ.get("LEARNING_REAL_TTS_ENDPOINT", "https://api.minimax.cn")
+    model_name = os.environ.get("LEARNING_REAL_TTS_MODEL", "speech-2.8-hd")
+    voice_id = os.environ.get("LEARNING_REAL_TTS_VOICE", "male-qn-qingse")
+    return lambda owner, task_id: MiniMaxTTSAdapter(
+        endpoint=endpoint, model_name=model_name,
+        credentials={"api_key": key}, voice_id=voice_id,
+    )
+
+
 def create_slice3_app(
     state: Optional[Slice3State] = None,
     slice2_state: Optional[Slice2State] = None,
@@ -286,6 +316,11 @@ def create_slice3_app(
     ocr_adapter_factory: Optional[Any] = None,
     tts_adapter_factory: Optional[Any] = None,
 ) -> FastAPI:
+    # 工厂优先级：显式传入 > 真实凭据（env）> 本地合成走查
+    if model_adapter_factory is None:
+        model_adapter_factory = _real_model_factory()
+    if tts_adapter_factory is None:
+        tts_adapter_factory = _real_tts_factory()
     if model_adapter_factory is None or search_adapter_factory is None:
         dev_model, dev_search = _dev_synthetic_factories()
         model_adapter_factory = model_adapter_factory or dev_model

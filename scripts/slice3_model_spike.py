@@ -160,7 +160,7 @@ class OpenAIClient(ProtocolClient):
                     "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
                 },
             }]
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = {"type": "function", "function": {"name": "probe_echo"}}
         elif capability == "json_schema":
             payload["response_format"] = {
                 "type": "json_schema",
@@ -219,7 +219,7 @@ class OpenAIClient(ProtocolClient):
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": ROUTE_PROMPT}],
-            "max_tokens": 512,
+            "max_tokens": 2048,
         }
         schema = {
             "type": "object",

@@ -94,6 +94,13 @@ class MiniMaxTTSAdapter(AdapterBase):
         trace_id = ""
         if isinstance(body, dict):
             trace_id = str(body.get("trace_id") or body.get("traceId") or "")
+        # 字幕时标：MiniMax 经 subtitle_file URL 提供 JSON 时标（临时 URL，
+        # 须在合成时抓取解析并持久化，不依赖链接时效）；抓取失败 → 无字幕
+        subtitle = None
+        if isinstance(data, dict):
+            subtitle = _normalize_subtitle(data.get("subtitle"))
+            if subtitle is None and data.get("subtitle_file"):
+                subtitle = _fetch_subtitle_file(str(data["subtitle_file"]))
         return {
             "model": self.model_name,
             "voice_id": payload["voice_setting"]["voice_id"],
@@ -101,8 +108,46 @@ class MiniMaxTTSAdapter(AdapterBase):
             "subtitle_enable": True,
             "subtitle_type": self.subtitle_type,
             "audio_hex": audio_hex,
-            "subtitle": (data or {}).get("subtitle") if isinstance(data, dict) else None,
+            "subtitle": subtitle,
             "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "vendor_trace_id": trace_id,
             "endpoint": self.endpoint,
         }
+
+
+def _fetch_subtitle_file(url: str) -> Optional[list[dict]]:
+    """抓取并解析 subtitle_file（JSON 数组，time_begin/end 毫秒浮点）。"""
+    import httpx
+
+    try:
+        r = httpx.get(url, timeout=20.0, follow_redirects=False)
+        entries = r.json()
+    except Exception:  # noqa: BLE001 - 抓取失败按无字幕处理（无音频模式）
+        return None
+    if not isinstance(entries, list):
+        return None
+    out = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        out.append({
+            "text": str(e.get("text") or "")[:200],
+            "begin_ms": int(float(e.get("time_begin") or 0)),
+            "end_ms": int(float(e.get("time_end") or 0)),
+        })
+    return out or None
+
+
+def _normalize_subtitle(value: Any) -> Optional[list[dict]]:
+    """内联字幕（若供应商直接返回数组）归一化。"""
+    if not isinstance(value, list) or not value:
+        return None
+    out = []
+    for e in value:
+        if isinstance(e, dict):
+            out.append({
+                "text": str(e.get("text") or "")[:200],
+                "begin_ms": int(float(e.get("begin_ms") or 0)),
+                "end_ms": int(float(e.get("end_ms") or 0)),
+            })
+    return out or None

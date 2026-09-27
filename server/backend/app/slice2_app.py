@@ -18,22 +18,25 @@ from .slice1_app import Slice1State, create_slice1_app
 
 
 class Slice2State:
-    def __init__(self, db, audit: Optional[PgAuditLog] = None) -> None:
+    def __init__(self, db, audit: Optional[PgAuditLog] = None, storage=None) -> None:
         self.db = db
         self.audit = audit
         self.quotas = QuotaService(db)
-        self.materials = MaterialService(db, self.quotas)
+        self.materials = MaterialService(db, self.quotas, storage=storage)
         self.index = ChunkIndexService(db)
 
 
 def create_slice2_app(
     state: Optional[Slice2State] = None,
     slice1_state: Optional[Slice1State] = None,
+    *,
+    storage=None,
+    pipeline_holder: Optional[dict] = None,
 ) -> FastAPI:
     app = create_slice1_app(state=slice1_state)
     if state is None:
         base = app.state.slice1
-        state = Slice2State(base.db, base.audit)
+        state = Slice2State(base.db, base.audit, storage=storage)
     app.state.slice2 = state
 
     def _resolve_user(request: Request):
@@ -59,6 +62,7 @@ def create_slice2_app(
             quotas=state.quotas,
             index=state.index,
             resolve_user=_resolve_user,
+            pipeline_holder=pipeline_holder,
         )
     )
     install_materials_error_handlers(app)

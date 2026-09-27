@@ -5,6 +5,7 @@ import PlanningView from "./PlanningView";
 import ChatView from "./ChatView";
 import TaskEntry from "./TaskEntry";
 import { CourseOverview, RouteOverview } from "./Overview";
+import MaterialsPage from "./MaterialsPage";
 import "./tokens.css";
 
 /**
@@ -160,6 +161,7 @@ export default function App() {
     "/home": ["新的学习任务"],
     "/chat": ["即时对话"],
     "/planning": ["课程规划"],
+    "/materials": ["资料准备"],
     "/tasks": ["任务状态"],
     "/admin": ["管理员审批"],
     "/capabilities": ["能力配置"],
@@ -179,6 +181,7 @@ export default function App() {
         </div>
         <div className="nav-g">
           <span className="gl">学习</span>
+          {navItem("/materials", "我的资料")}
           {navItem("/tasks", "任务状态")}
         </div>
         {me?.is_admin && (
@@ -229,6 +232,9 @@ export default function App() {
 
           {route === "/home" && (
             <TaskEntry me={me} onErr={setError} onOk={setNotice} go={go} />
+          )}
+          {route === "/materials" && me && (
+            <MaterialsPage onErr={setError} onOk={setNotice} />
           )}
           {route === "/tasks" && (
             <HomeView me={me} onErr={setError} onOk={setNotice} onNeedLogin={() => go("/login")} />

@@ -14,7 +14,7 @@ export function getSessionToken() {
 
 async function req(path: string, init: RequestInit = {}) {
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    ...(init.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
     ...(init.headers as Record<string, string> | undefined),
   };
   if (sessionToken) headers["Authorization"] = `Bearer ${sessionToken}`;
@@ -85,6 +85,20 @@ export const api = {
   },
 
   listMaterials: () => req("/api/materials"),
+  uploadMaterials: (files: File[]) => {
+    const fd = new FormData();
+    files.forEach((f) => fd.append("files", f));
+    return req("/api/materials", { method: "POST", body: fd });
+  },
+  getMaterial: (materialId: string) => req(`/api/materials/${materialId}`),
+  getMaterialPage: (materialId: string, pageNo: number) =>
+    req(`/api/materials/${materialId}/pages/${pageNo}`),
+  retryMaterialPage: (materialId: string, pageNo: number) =>
+    req(`/api/materials/${materialId}/pages/${pageNo}/retry`, { method: "POST", body: JSON.stringify({ reason: "user_retry" }) }),
+  deleteMaterial: (materialId: string) =>
+    req(`/api/materials/${materialId}`, { method: "DELETE" }),
+  searchMaterials: (body: Record<string, unknown>) =>
+    req("/api/materials/search", { method: "POST", body: JSON.stringify(body) }),
   // 切片 3：规划 / 草稿 / 场景 / 总览 / 导航 / 即时对话
   createRoute: (title: string, scenario = "self_study") =>
     req("/api/planning/routes", { method: "POST", body: JSON.stringify({ title, scenario }) }),

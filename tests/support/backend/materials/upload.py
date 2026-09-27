@@ -205,36 +205,69 @@ class QuotaService:
         }
 
     def reserve(self, owner_user_id: str, bytes_: int) -> dict:
+        """原子预留：SQL 级条件自增，防并发丢失更新（T08 账本竞争）。
+
+        ORM 读改写会命中身份图里的陈旧对象；这里用单条 UPDATE 的
+        条件谓词（额度足够才生效）保证账本最终一致。
+        """
         with self.db.session() as sess:
-            row = self._row(sess, owner_user_id)
-            if row.reserved_bytes + row.used_bytes + bytes_ > row.quota_bytes:
+            self._row(sess, owner_user_id)
+            from sqlalchemy import text as sa_text
+
+            result = sess.execute(
+                sa_text(
+                    "UPDATE material_upload_quotas "
+                    "SET reserved_bytes = reserved_bytes + :n, updated_at = :now "
+                    "WHERE owner_user_id = :o AND reserved_bytes + used_bytes + :n <= quota_bytes"
+                ),
+                {"n": bytes_, "o": owner_user_id, "now": utcnow()},
+            )
+            if result.rowcount != 1:
+                sess.rollback()
                 raise error("quota_exceeded", "not enough quota")
-            row.reserved_bytes += bytes_
-            row.updated_at = utcnow()
-            sess.flush()
+            row = sess.get(MaterialUploadQuotaRow, owner_user_id)
+            sess.refresh(row)
             view = self._view(row)
             sess.commit()
             return view
 
     def settle(self, owner_user_id: str, *, reserved_delta: int, used_delta: int) -> dict:
-        """解析完成：把预留转为实际占用（可为负，归还预留）。"""
+        """解析完成：把预留转为实际占用（可为负，归还预留）；SQL 级原子。"""
         with self.db.session() as sess:
-            row = self._row(sess, owner_user_id)
-            row.reserved_bytes = max(0, row.reserved_bytes - reserved_delta)
-            row.used_bytes = max(0, row.used_bytes + used_delta)
-            row.updated_at = utcnow()
-            sess.flush()
+            self._row(sess, owner_user_id)
+            from sqlalchemy import text as sa_text
+
+            sess.execute(
+                sa_text(
+                    "UPDATE material_upload_quotas "
+                    "SET reserved_bytes = GREATEST(0, reserved_bytes - :r), "
+                    "used_bytes = GREATEST(0, used_bytes + :u), updated_at = :now "
+                    "WHERE owner_user_id = :o"
+                ),
+                {"r": reserved_delta, "u": used_delta, "o": owner_user_id, "now": utcnow()},
+            )
+            row = sess.get(MaterialUploadQuotaRow, owner_user_id)
+            sess.refresh(row)
             view = self._view(row)
             sess.commit()
             return view
 
     def release(self, owner_user_id: str, bytes_: int) -> dict:
-        """解析失败/取消：归还预留。"""
+        """解析失败/取消：归还预留；SQL 级原子。"""
         with self.db.session() as sess:
-            row = self._row(sess, owner_user_id)
-            row.reserved_bytes = max(0, row.reserved_bytes - bytes_)
-            row.updated_at = utcnow()
-            sess.flush()
+            self._row(sess, owner_user_id)
+            from sqlalchemy import text as sa_text
+
+            sess.execute(
+                sa_text(
+                    "UPDATE material_upload_quotas "
+                    "SET reserved_bytes = GREATEST(0, reserved_bytes - :n), updated_at = :now "
+                    "WHERE owner_user_id = :o"
+                ),
+                {"n": bytes_, "o": owner_user_id, "now": utcnow()},
+            )
+            row = sess.get(MaterialUploadQuotaRow, owner_user_id)
+            sess.refresh(row)
             view = self._view(row)
             sess.commit()
             return view
@@ -243,9 +276,10 @@ class QuotaService:
 class MaterialService:
     """资料登记与删除边界（本切片不实现恢复流程）。"""
 
-    def __init__(self, db: Database, quotas: Optional[QuotaService] = None) -> None:
+    def __init__(self, db: Database, quotas: Optional[QuotaService] = None, storage=None) -> None:
         self.db = db
         self.quotas = quotas or QuotaService(db)
+        self.storage = storage
 
     def create_material(
         self,
@@ -273,7 +307,12 @@ class MaterialService:
             sess.flush()
             view = self._view(row)
             sess.commit()
-            return view
+        # 原件受控保存（对象键不含用户文件名；解析/裁切依赖原件）
+        if self.storage is not None:
+            from .storage import MaterialStorage
+
+            self.storage.put(MaterialStorage.original_key(material_id), validated.payload)
+        return view
 
     @staticmethod
     def _view(row: MaterialRow) -> dict:
@@ -297,7 +336,15 @@ class MaterialService:
                 raise error("material_not_found")
             if row.owner_user_id != actor_id:
                 raise error("access_denied", "not owner")
-            return self._view(row)
+            from sqlalchemy import func
+
+            from .models import MaterialPageRow
+
+            pages = sess.execute(
+                select(func.count()).select_from(MaterialPageRow)
+                .where(MaterialPageRow.material_id == material_id)
+            ).scalar_one()
+            return self._view(row) | {"page_count": int(pages)}
 
     def list_for_owner(self, owner_user_id: str, *, include_deleted: bool = False) -> list[dict]:
         with self.db.session() as sess:
@@ -360,4 +407,12 @@ class MaterialService:
             sess.commit()
         if reserved:
             self.quotas.release(actor_id, reserved)
+        # 受控对象立即下线（墓碑化清理在切片 5 调度）；删除失败不阻塞软删除
+        if self.storage is not None:
+            from .storage import MaterialStorage
+
+            try:
+                self.storage.delete(MaterialStorage.original_key(material_id))
+            except Exception:  # noqa: BLE001 - 对象缺失视为已清理
+                pass
         return view

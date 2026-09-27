@@ -29,12 +29,18 @@ class Slice3State:
         *,
         model_adapter_factory: Optional[Any] = None,
         search_adapter_factory: Optional[Any] = None,
+        ocr_adapter_factory: Optional[Any] = None,
+        storage=None,
+        pipeline_holder: Optional[dict] = None,
     ) -> None:
         self.db = db
         self.audit = audit
         self.events = PgTaskEventStore(db)
         self.tasks = TaskServiceShim(db, self.events)
         self.prompts = PromptServiceShim(db)
+        from .materials.storage import MaterialStorage
+
+        self.storage = storage or MaterialStorage()
         self.retrieval = PlanningRetrievalService(db)
         self.drafts = DraftService(db, audit)
         self.planning = PlanningService(
@@ -49,6 +55,21 @@ class Slice3State:
             search_adapter_factory=search_adapter_factory,
         )
         self.overview = OverviewService(db)
+        # 切片 2 T03/T04：逐页解析 + OCR 管线（适配器经工厂注入，真实凭据为人工前置）
+        from .materials.ocr import OcrPipelineService
+        from .materials.chunk_index import ChunkIndexService
+        from .slice1.disclosure_service import DisclosureService
+
+        self.chunk_index = ChunkIndexService(db)
+        self.ocr_pipeline = OcrPipelineService(
+            db, self.tasks, self.events, self.chunk_index,
+            storage=self.storage,
+            ocr_adapter_factory=ocr_adapter_factory,
+            disclosures=DisclosureService(db, audit),
+        )
+        # 资料路由经 holder 惰性取管线（slice2 装配早于 slice3）
+        self.pipeline_holder = pipeline_holder if pipeline_holder is not None else {"pipeline": None}
+        self.pipeline_holder["pipeline"] = self.ocr_pipeline
 
 
 class TaskServiceShim(TaskService):
@@ -148,6 +169,36 @@ class DevSyntheticSearchAdapter:
         }
 
 
+class _DevSyntheticOcrAdapter:
+    """仅本地走查：合成 OCR 任务提交/结果（含一个结构图区域与一个文本区域）。"""
+
+    kind = "ocr"
+    protocol = "paddleocr"
+
+    def submit(self, *, material_id: str, page_no: int, options=None) -> dict:
+        return {"external_request_id": f"devjob_{material_id}_{page_no}", "status": "submitted"}
+
+    def query(self, external_request_id: str) -> dict:
+        return {"external_request_id": external_request_id, "status": "done"}
+
+    def fetch_result(self, external_request_id: str) -> dict:
+        return {
+            "external_request_id": external_request_id,
+            "result": {
+                "layoutParsingResults": [{
+                    "prunedResult": {
+                        "parsing_res_list": [
+                            {"block_bbox": [40, 40, 300, 120], "block_label": "text",
+                             "block_content": "扫描页合成 OCR 文本 regions", "block_index": 0},
+                            {"block_bbox": [40, 140, 300, 260], "block_label": "structure_diagram",
+                             "block_content": "", "block_index": 1},
+                        ]
+                    }
+                }]
+            },
+        }
+
+
 def _dev_synthetic_factories() -> tuple[Optional[Any], Optional[Any]]:
     if os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") != "1":
         return None, None
@@ -163,18 +214,28 @@ def create_slice3_app(
     *,
     model_adapter_factory: Optional[Any] = None,
     search_adapter_factory: Optional[Any] = None,
+    ocr_adapter_factory: Optional[Any] = None,
 ) -> FastAPI:
     if model_adapter_factory is None or search_adapter_factory is None:
         dev_model, dev_search = _dev_synthetic_factories()
         model_adapter_factory = model_adapter_factory or dev_model
         search_adapter_factory = search_adapter_factory or dev_search
-    app = create_slice2_app(state=slice2_state)
+    if ocr_adapter_factory is None and os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") == "1":
+        ocr_adapter_factory = lambda owner, task_id: _DevSyntheticOcrAdapter()  # noqa: E731
+    storage = state.storage if state is not None else None
+    holder = state.pipeline_holder if state is not None else {"pipeline": None}
+    app = create_slice2_app(state=slice2_state, storage=storage, pipeline_holder=holder)
     if state is None:
         base = app.state.slice1
+        from .materials.storage import MaterialStorage
+
         state = Slice3State(
             base.db, base.audit,
             model_adapter_factory=model_adapter_factory,
             search_adapter_factory=search_adapter_factory,
+            ocr_adapter_factory=ocr_adapter_factory,
+            storage=storage or MaterialStorage(),
+            pipeline_holder=holder,
         )
     app.state.slice3 = state
 

@@ -35,11 +35,15 @@ def create_materials_router(
     quotas: QuotaService,
     index: ChunkIndexService,
     resolve_user: Callable[[Request], Any],
+    pipeline_holder: Optional[dict] = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/materials", tags=["slice2"])
 
     def _user(request: Request):
         return resolve_user(request)
+
+    def _pipeline():
+        return (pipeline_holder or {}).get("pipeline")
 
     @router.post("", status_code=201)
     async def upload_materials(
@@ -54,7 +58,14 @@ def create_materials_router(
         validated = validate_batch(batch)
         created = []
         for v in validated:
-            created.append(materials.create_material(owner_user_id=user.user_id, validated=v))
+            item = materials.create_material(owner_user_id=user.user_id, validated=v)
+            created.append(item)
+            pipeline = _pipeline()
+            if pipeline is not None:
+                try:
+                    pipeline.enqueue_parse(owner_user_id=user.user_id, material_id=item["material_id"])
+                except Exception:  # noqa: BLE001 - 入队失败不阻塞上传返回，可重试入队
+                    pass
         return {"data": created, "quota": quotas.snapshot(user.user_id)}
 
     @router.get("")
@@ -73,7 +84,7 @@ def create_materials_router(
         materials.get(material_id, actor_id=user.user_id)
         from sqlalchemy import select
 
-        from .models import MaterialPageRow
+        from .models import MaterialPageRow, MaterialRegionRow
 
         with materials.db.session() as sess:
             row = (
@@ -88,6 +99,16 @@ def create_materials_router(
             )
             if row is None:
                 raise error("index_out_of_range", "page not found")
+            regions = (
+                sess.execute(
+                    select(MaterialRegionRow).where(
+                        MaterialRegionRow.material_id == material_id,
+                        MaterialRegionRow.page_no == page_no,
+                    )
+                )
+                .scalars()
+                .all()
+            )
             return {
                 "page_id": row.page_id,
                 "material_id": row.material_id,
@@ -98,7 +119,53 @@ def create_materials_router(
                 "status": row.status,
                 "failure_reason": row.failure_reason,
                 "text_trustworthiness": row.text_trustworthiness,
+                "regions": [
+                    {
+                        "region_id": r.region_id,
+                        "kind": r.kind,
+                        "status": r.status,
+                        "trustworthy": r.trustworthy,
+                    }
+                    for r in regions
+                ],
             }
+
+    @router.get("/{material_id}/figures/{figure_id}/content")
+    def get_figure_content(material_id: str, figure_id: str, request: Request):
+        """短时受权读取：会话 + 所有权校验后回传 PNG 字节。"""
+        user = _user(request)
+        materials.get(material_id, actor_id=user.user_id)
+        from fastapi import Response
+
+        from sqlalchemy import select
+
+        from .models import FigureAssetRow
+
+        with materials.db.session() as sess:
+            figure = (
+                sess.execute(
+                    select(FigureAssetRow).where(
+                        FigureAssetRow.figure_id == figure_id,
+                        FigureAssetRow.material_id == material_id,
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if figure is None:
+                raise error("figure_not_found", status=404)
+            key = figure.storage_key
+        pipeline = _pipeline()
+        storage = getattr(pipeline, "storage", None) if pipeline else None
+        if storage is None:
+            from .storage import MaterialStorage
+
+            storage = MaterialStorage()
+        try:
+            payload = storage.get(key)
+        except Exception:  # noqa: BLE001
+            raise error("figure_not_found", status=404)
+        return Response(content=payload, media_type="image/png")
 
     @router.post("/{material_id}/pages/{page_no}/retry")
     def retry_page(material_id: str, page_no: int, body: RetryIn, request: Request) -> dict:

@@ -1,13 +1,19 @@
-"""任务表、幂等、generation/revision、worker 租约围栏（T03，架构 §3.2～§3.3）。"""
+"""任务表、幂等、generation/revision、worker 租约围栏（T03，架构 §3.2～§3.3）。
+
+切片 2 T06：四类 lane（interactive / teaching_prefetch / ocr / maintenance）
+调度隔离——interactive 保留容量只给交互任务，其他 lane 共用剩余容量；
+全局/单 lane/单用户三层上限；队列等待计入创建时设定的总截止。
+"""
 
 from __future__ import annotations
 
+import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, select, update
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func, select, update
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..logging_audit.contracts import validate_error_code, validate_stage, validate_status
@@ -15,6 +21,40 @@ from ..logging_audit.db import Database
 from ..logging_audit.models import Base
 from ..logging_audit.task_events import AccessDeniedError, TaskEvent
 from ..logging_audit.repositories import PgTaskEventStore
+
+LANES = ("interactive", "teaching_prefetch", "ocr", "maintenance")
+
+ACTIVE_STATUSES = ("leased", "running")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+@dataclass
+class LaneCapacity:
+    """四类 lane 的并发容量配置（可用环境变量覆盖，契约测试断言默认值）。"""
+
+    global_limit: int = field(default_factory=lambda: _env_int("TASK_GLOBAL_LIMIT", 8))
+    interactive_limit: int = field(default_factory=lambda: _env_int("TASK_INTERACTIVE_LIMIT", 4))
+    lane_limits: dict = field(default_factory=lambda: {
+        "interactive": _env_int("TASK_INTERACTIVE_LIMIT", 4),
+        "teaching_prefetch": _env_int("TASK_PREFETCH_LIMIT", 2),
+        "ocr": _env_int("TASK_OCR_LIMIT", 3),
+        "maintenance": _env_int("TASK_MAINTENANCE_LIMIT", 1),
+    })
+    per_user_per_lane: int = field(default_factory=lambda: _env_int("TASK_PER_USER_PER_LANE", 2))
+
+    @property
+    def non_interactive_capacity(self) -> int:
+        """非交互 lane 可共用的剩余容量（interactive 保留容量不被侵占）。"""
+        return max(0, self.global_limit - self.interactive_limit)
+
+
+LANE_CAPACITY = LaneCapacity()
 
 
 def utcnow() -> datetime:
@@ -114,8 +154,11 @@ class TaskService:
         model_config_version: Optional[str] = None,
         deadline_seconds: int = 3600,
         progress_total: int = 0,
+        lane: str = "interactive",
     ) -> dict:
         validate_stage(stage)
+        if lane not in LANES:
+            raise LeaseError("INVALID_LANE", f"unknown lane {lane}")
         with self.db.session() as sess:
             existing = sess.execute(
                 select(LearningTaskRow).where(
@@ -140,6 +183,7 @@ class TaskService:
                     idempotency_key=idempotency_key,
                     generation=1,
                     revision=1,
+                    lane=lane,
                     deadline_at=now + timedelta(seconds=deadline_seconds),
                     prompt_binding_id=prompt_binding_id,
                     model_config_version=model_config_version,
@@ -210,6 +254,125 @@ class TaskService:
             sess.commit()
             return Lease(
                 task_id=task_id,
+                attempt_id=attempt_id,
+                lease_token=lease_token,
+                lease_owner=lease_owner,
+                generation=row.generation,
+                attempt=attempt,
+                lease_until=lease_until,
+                deadline_at=row.deadline_at,
+            )
+
+    def claim_next(
+        self,
+        lane: str,
+        *,
+        lease_owner: str,
+        lease_seconds: int = 60,
+        capacity: Optional[LaneCapacity] = None,
+    ) -> Lease:
+        """按 lane 领取最旧排队任务（切片 2 T06 调度隔离）。
+
+        - interactive 保留容量只分配给 interactive 任务；
+        - 其他 lane 共用「全局 − interactive 保留」的剩余容量，且各自受
+          lane 上限与单用户单 lane 上限约束；
+        - 达到任务总截止（含队列等待）→ expired，不无限排队。
+        """
+        if lane not in LANES:
+            raise LeaseError("INVALID_LANE", f"unknown lane {lane}")
+        cfg = capacity or LANE_CAPACITY
+        now = utcnow()
+        with self.db.session() as sess:
+            counts = dict(
+                sess.execute(
+                    select(LearningTaskRow.lane, func.count())
+                    .where(LearningTaskRow.status.in_(ACTIVE_STATUSES))
+                    .group_by(LearningTaskRow.lane)
+                ).all()
+            )
+            active_lane = int(counts.get(lane, 0))
+            interactive_active = int(counts.get("interactive", 0))
+            active_total = int(sum(counts.values()))
+            if lane == "interactive":
+                if active_lane >= cfg.lane_limits["interactive"]:
+                    raise LeaseError("LANE_CAPACITY_FULL", "interactive capacity full")
+            else:
+                non_interactive_active = active_total - interactive_active
+                if (
+                    active_lane >= cfg.lane_limits.get(lane, 1)
+                    or non_interactive_active >= cfg.non_interactive_capacity
+                ):
+                    raise LeaseError("LANE_CAPACITY_FULL", f"lane {lane} capacity full")
+
+            candidates = (
+                sess.execute(
+                    select(LearningTaskRow)
+                    .where(
+                        LearningTaskRow.status == "queued",
+                        LearningTaskRow.lane == lane,
+                    )
+                    .order_by(LearningTaskRow.created_at)
+                    .limit(16)
+                    .with_for_update(skip_locked=True)
+                )
+                .scalars()
+                .all()
+            )
+            row = None
+            for candidate in candidates:
+                if candidate.deadline_at and candidate.deadline_at < now:
+                    candidate.status = "expired"
+                    sess.commit()
+                    continue
+                if candidate.cancel_requested:
+                    candidate.status = "cancelled"
+                    sess.commit()
+                    continue
+                if cfg.per_user_per_lane > 0:
+                    user_active = int(
+                        sess.execute(
+                            select(func.count())
+                            .select_from(LearningTaskRow)
+                            .where(
+                                LearningTaskRow.owner_user_id == candidate.owner_user_id,
+                                LearningTaskRow.lane == lane,
+                                LearningTaskRow.status.in_(ACTIVE_STATUSES),
+                            )
+                        ).scalar_one()
+                    )
+                    if user_active >= cfg.per_user_per_lane:
+                        continue
+                row = candidate
+                break
+            if row is None:
+                raise LeaseError("NO_QUEUED_TASK", f"no claimable task in lane {lane}")
+
+            attempt = row.attempt + 1
+            attempt_id = f"att_{uuid.uuid4().hex[:12]}"
+            lease_token = uuid.uuid4().hex
+            lease_until = now + timedelta(seconds=lease_seconds)
+            row.attempt = attempt
+            row.attempt_id = attempt_id
+            row.lease_owner = lease_owner
+            row.lease_token = lease_token
+            row.lease_until = lease_until
+            row.claimed_at = now
+            row.heartbeat_at = now
+            row.status = "leased"
+            sess.add(
+                TaskAttemptRow(
+                    attempt_id=attempt_id,
+                    task_id=row.task_id,
+                    attempt=attempt,
+                    lease_token=lease_token,
+                    lease_owner=lease_owner,
+                    generation=row.generation,
+                    lease_until=lease_until,
+                )
+            )
+            sess.commit()
+            return Lease(
+                task_id=row.task_id,
                 attempt_id=attempt_id,
                 lease_token=lease_token,
                 lease_owner=lease_owner,

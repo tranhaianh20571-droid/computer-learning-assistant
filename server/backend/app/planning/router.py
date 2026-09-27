@@ -121,6 +121,7 @@ def create_planning_router(
     drafts: DraftService,
     chat: ChatService,
     overview: OverviewService,
+    deletion,
     resolve_user: Callable[[Request], Any],
 ) -> APIRouter:
     router = APIRouter(tags=["slice3"])
@@ -372,6 +373,18 @@ def create_planning_router(
         return overview.course_overview(course_id, actor_id=user.user_id)
 
     # 教学门槛与启动教学路由归切片 4（teaching router）。
+
+    @router.delete("/api/planning/routes/{route_id}")
+    def delete_route(route_id: str, request: Request) -> dict:
+        """删除路线：课程保留，编排解除，写墓碑与审计。"""
+        user = _user(request)
+        return deletion.delete_route(route_id, actor_id=user.user_id)
+
+    @router.delete("/api/planning/courses/{course_id}")
+    def delete_course(course_id: str, request: Request) -> dict:
+        """删除课程：清理草稿/版本/讲次/教学产物，教学会话软删。"""
+        user = _user(request)
+        return deletion.delete_course(course_id, actor_id=user.user_id)
     # ------------------------------------------------------------------
     # 导航状态
     # ------------------------------------------------------------------

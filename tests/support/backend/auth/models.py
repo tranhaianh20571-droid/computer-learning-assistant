@@ -79,3 +79,5 @@ class LoginAttemptRow(Base):
     email: Mapped[str] = mapped_column(String(255), nullable=False)
     success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+

@@ -1,6 +1,6 @@
 """FastAPI 应用：任务事件 SSE/REST + 审计 + trace 中间件。
 
-测试支持入口；生产应用位于 server/backend/app/。
+生产入口：uvicorn app.logging_audit.app:app
 契约与 server.py / 架构 §2、§3.2 对齐。
 """
 

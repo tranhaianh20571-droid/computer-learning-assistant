@@ -639,6 +639,30 @@ EVENT_REGISTRY: Mapping[str, EventSpec] = {
             description="备份恢复锁定",
         ),
         EventSpec(
+            "restore.replayed",
+            (LogEventType.AUDIT, LogEventType.RUNTIME),
+            _COMMON_REQUIRED | frozenset({"result"}),
+            frozenset({"tombstone_id", "reason", "trace_id"}),
+            user_visible=False,
+            description="恢复期间墓碑重放（被删除对象重新移除）",
+        ),
+        EventSpec(
+            "restore.unlocked",
+            (LogEventType.AUDIT, LogEventType.RUNTIME),
+            _COMMON_REQUIRED | frozenset({"result"}),
+            frozenset({"tombstone_id", "reason", "trace_id"}),
+            user_visible=True,
+            description="恢复核验完成并解除锁定",
+        ),
+        EventSpec(
+            "restore.verify_failed",
+            (LogEventType.AUDIT, LogEventType.RUNTIME),
+            _COMMON_REQUIRED | frozenset({"result"}),
+            frozenset({"tombstone_id", "reason", "trace_id"}),
+            user_visible=False,
+            description="恢复核验失败（仍存在可访问的已删除对象），保持锁定",
+        ),
+        EventSpec(
             "audit.query.executed",
             (LogEventType.AUDIT,),
             _COMMON_REQUIRED

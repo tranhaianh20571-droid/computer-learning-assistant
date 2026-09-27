@@ -332,7 +332,8 @@ class MaterialService:
     def get(self, material_id: str, *, actor_id: str) -> dict:
         with self.db.session() as sess:
             row = sess.get(MaterialRow, material_id)
-            if row is None:
+            # 删除即撤销访问：软删后的资料一律不可读（切片 5 墓碑语义）
+            if row is None or row.deleted_at is not None:
                 raise error("material_not_found")
             if row.owner_user_id != actor_id:
                 raise error("access_denied", "not owner")

@@ -164,3 +164,36 @@ def auth_headers(token: str) -> dict:
 
 def txt_bytes(text: str = "神经网络 卷积 conv2d_block_7 v1.2.3") -> bytes:
     return text.encode("utf-8")
+
+
+class TeachingModelAdapter(SyntheticModelAdapter):
+    """按 prompt 特征返回教学步骤/追问候选（切片 4 测试共用）。"""
+
+    def generate(self, messages, **options):
+        import json as _json
+
+        self.generate_calls.append(options)
+        last = ""
+        for m in messages:
+            if m.get("role") == "user":
+                last = str(m.get("content", ""))
+        if "follow-up question" in last:
+            return {"content": _json.dumps({
+                "answer": "这是追问的合成回答，按定义、例子、误用三段展开。",
+                "board": None,
+            }, ensure_ascii=False)}
+        return {"content": _json.dumps({
+            "steps": [{
+                "title": "合成教学步骤",
+                "text": "本步骤讲解当前讲次的核心概念：先给出定义，再用一个具体例子说明它在真实系统里如何出现，"
+                        "最后指出两个最常见的误用与判别方法，帮助你把概念落到可操作的判断上。整段朗读约四十秒。",
+                "board": {
+                    "kind": "board", "title": "核心概念速览",
+                    "points": ["定义：并发事务之间的可见性约定", "例子：转账场景的两个事务", "误用：把隔离级别当成锁"],
+                    "code": None, "formula": None,
+                    "nodes": [{"id": "n1", "label": "事务 A"}, {"id": "n2", "label": "事务 B"}],
+                    "edges": [{"from_id": "n1", "to_id": "n2", "label": "冲突"}],
+                    "original_refs": [], "reveal_ms": [0, 4000, 8000],
+                },
+            }],
+        }, ensure_ascii=False)}

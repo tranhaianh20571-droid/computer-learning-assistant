@@ -27,6 +27,8 @@ import app.prompts.service  # noqa: F401 — register prompt tables
 import app.slice1.models  # noqa: F401 — register slice1 capability/connector tables
 import app.materials.models  # noqa: F401 — register slice2 materials/parse/index tables
 import app.planning.models  # noqa: F401 — register slice3 planning/chat/manifest tables
+import app.teaching.models  # noqa: F401 — register slice4 teaching/playback tables
+import app.cleanup.models  # noqa: F401 — register slice5 cleanup/backup tables
 
 # 合并 SQLModel 与 SQLAlchemy Base 元数据（切片 0 任务/审计/提示词表）
 from sqlalchemy import MetaData

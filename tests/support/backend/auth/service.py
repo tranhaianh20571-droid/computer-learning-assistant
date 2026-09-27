@@ -483,3 +483,5 @@ class AuthService:
             trace_id=trace_id,
         )
         return {"ok": True, "sessions_revoked": revoked}
+
+

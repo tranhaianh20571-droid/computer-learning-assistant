@@ -274,6 +274,9 @@ _KNOWN = frozenset(
         "resource.delete.requested",
         "cleanup.completed",
         "restore.locked",
+        "restore.replayed",
+        "restore.unlocked",
+        "restore.verify_failed",
         "audit.query.executed",
     }
 )

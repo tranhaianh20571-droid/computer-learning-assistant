@@ -307,6 +307,54 @@ class TestTTSModes:
         assert ws["steps"][0]["audio_ready"] is False
 
 
+class TestAudioAccess:
+    def test_audio_owner_ok_cross_user_denied(self, env) -> None:
+        from slice3_common import make_user
+
+        user_id, token, course_id, lesson_id = _user_with_ready_lesson(env)
+        client = env["client"]
+        env["container"]["model"] = TeachingModelAdapter(payload=STEP_PAYLOAD)
+        env["container"]["tts"] = GoodTTSAdapter()
+        start = client.post(f"/api/courses/{course_id}/lessons/{lesson_id}/start",
+                            headers={"Authorization": f"Bearer {token}"}).json()
+        client.post(f"/api/teaching/tasks/{start['task_id']}/run",
+                    headers={"Authorization": f"Bearer {token}"})
+        # 运行 TTS 任务后才有就绪音频
+        from backend.tasks.service import LearningTaskRow
+
+        with env["database"].session() as sess:
+            tts_row = sess.execute(
+                select(LearningTaskRow).where(
+                    LearningTaskRow.kind == "tts",
+                    LearningTaskRow.subject_id == f"{start['conversation_id']}:1:1",
+                )
+            ).scalars().first()
+            assert tts_row is not None
+            tts_id = tts_row.task_id
+        client.post(f"/api/teaching/tasks/{tts_id}/run", headers={"Authorization": f"Bearer {token}"})
+        conv_id = start["conversation_id"]
+        with env["database"].session() as sess:
+            from backend.teaching.models import AudioAssetRow
+
+            audio = sess.execute(
+                select(AudioAssetRow).where(
+                    AudioAssetRow.conversation_id == conv_id,
+                    AudioAssetRow.step_no == 1,
+                    AudioAssetRow.status == "ready",
+                )
+            ).scalars().first()
+            assert audio is not None
+        # 所有者可读
+        r_ok = client.get(f"/api/teaching/audio/{audio.audio_id}/content",
+                          headers={"Authorization": f"Bearer {token}"})
+        assert r_ok.status_code == 200
+        # 跨账户拒绝
+        _, other_token = make_user(client, env["database"])
+        r_bad = client.get(f"/api/teaching/audio/{audio.audio_id}/content",
+                           headers={"Authorization": f"Bearer {other_token}"})
+        assert r_bad.status_code == 404
+
+
 class TestPrefetchDiscipline:
     def test_prefetch_cancelled_by_followup(self, env) -> None:
         user_id, token, course_id, lesson_id = _user_with_ready_lesson(env)

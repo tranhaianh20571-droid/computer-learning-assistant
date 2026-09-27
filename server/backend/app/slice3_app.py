@@ -64,6 +64,12 @@ class Slice3State:
             model_adapter_factory=model_adapter_factory,
             tts_adapter_factory=tts_adapter_factory,
         )
+        # 切片 5：在线清理、备份轮换与恢复锁
+        from .cleanup.service import CleanupService
+        from .planning.deletion import PlanningDeletionService
+
+        self.cleanup = CleanupService(db, storage=self.storage, audit=audit)
+        self.deletion = PlanningDeletionService(db, audit)
         # 切片 2 T03/T04：逐页解析 + OCR 管线（适配器经工厂注入，真实凭据为人工前置）
         from .materials.ocr import OcrPipelineService
         from .materials.chunk_index import ChunkIndexService
@@ -333,6 +339,7 @@ def create_slice3_app(
             drafts=state.drafts,
             chat=state.chat,
             overview=state.overview,
+            deletion=state.deletion,
             resolve_user=_resolve_user,
         )
     )
@@ -341,6 +348,29 @@ def create_slice3_app(
     app.include_router(
         create_teaching_router(teaching=state.teaching, resolve_user=_resolve_user)
     )
+    from .cleanup.router import create_cleanup_router
+
+    app.include_router(
+        create_cleanup_router(cleanup=state.cleanup, resolve_user=_resolve_user)
+    )
+
+    @app.middleware("http")
+    async def restore_lock_guard(request: Request, call_next):
+        # restore_locked 期间拒绝普通用户访问（管理员路径与健康检查放行）
+        path = request.url.path
+        if (
+            state.cleanup.is_restore_locked()
+            and not path.startswith("/api/admin")
+            and path != "/healthz"
+        ):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=423,
+                content={"error_code": "restore_locked",
+                         "message": "system locked for restore"},
+            )
+        return await call_next(request)
 
     @app.exception_handler(PlanningError)
     async def planning_error(_: Request, exc: PlanningError) -> JSONResponse:

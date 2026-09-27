@@ -95,7 +95,6 @@ def create_auth_router(service: AuthService) -> APIRouter:
             "expires_at": info.expires_at.isoformat(),
         }
         # 通过 header 返回会话 token（前端存 httpOnly cookie 由浏览器管理；测试用 header）
-        # 浏览器使用 HttpOnly cookie；保留响应字段供合成测试和本地 API 客户端使用。
         response.set_cookie(
             "session_token",
             raw_token,

@@ -17,34 +17,45 @@
   --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
 }
 * { box-sizing: border-box; }
-html, body, #root { height: 100%; margin: 0; }
-body {
-  font-family: var(--font);
-  background: var(--bg);
-  color: var(--ink);
-  line-height: 1.5;
+
+/* 元素级全局样式放 base 层：Excalidraw 注入的非分层样式自然获胜（T06 隔离）。
+   :not(.excalidraw *) 把画布内部元素排除在全局 token 之外。 */
+@layer base {
+  html, body, #root { height: 100%; margin: 0; }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.5;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  button:not(.excalidraw *),
+  input:not(.excalidraw *),
+  select:not(.excalidraw *) {
+    font: inherit;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    padding: 0.55rem 0.85rem;
+    background: var(--surface);
+    color: var(--ink);
+  }
+  button:not(.excalidraw *) {
+    cursor: pointer;
+    background: var(--ink);
+    color: #fff;
+    border-color: var(--ink);
+  }
+  button.secondary:not(.excalidraw *) { background: var(--surface); color: var(--ink); border-color: var(--border); }
+  button:not(.excalidraw *):disabled { opacity: 0.55; cursor: not-allowed; }
+  input:not(.excalidraw *):focus,
+  button:not(.excalidraw *):focus-visible,
+  a:focus-visible,
+  select:not(.excalidraw *):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
 }
-a { color: var(--accent); text-decoration: none; }
-button, input, select {
-  font: inherit;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  padding: 0.55rem 0.85rem;
-  background: var(--surface);
-  color: var(--ink);
-}
-button {
-  cursor: pointer;
-  background: var(--ink);
-  color: #fff;
-  border-color: var(--ink);
-}
-button.secondary { background: var(--surface); color: var(--ink); border-color: var(--border); }
-button:disabled { opacity: 0.55; cursor: not-allowed; }
-input:focus, button:focus-visible, a:focus-visible, select:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
+
 .layout { display: grid; grid-template-columns: 220px 1fr; min-height: 100%; }
 .nav {
   background: var(--nav);
@@ -115,7 +126,7 @@ h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
   font-size: 0.92rem;
 }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
-canvas, .excalidraw-wrap {
+.excalidraw-wrap {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   min-height: 320px;
@@ -125,4 +136,40 @@ canvas, .excalidraw-wrap {
   .layout { grid-template-columns: 1fr; }
   .nav { flex-direction: row; flex-wrap: wrap; }
   .main { padding: 1rem; }
+}
+
+/* 切片 3：顶部模式切换与导航分组（T07） */
+.mode-switch {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface);
+  border-radius: 10px;
+  margin-bottom: 0.75rem;
+}
+.mode-switch button {
+  flex: 1;
+  background: transparent;
+  color: var(--ink);
+  border: none;
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+}
+.mode-switch button.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.nav-group { display: flex; flex-direction: column; gap: 2px; }
+.nav-title {
+  color: #9a9a9a;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  padding: 0.5rem 0.5rem 0.15rem;
+  text-transform: uppercase;
+}
+@media (max-width: 640px) {
+  .layout { grid-template-columns: 1fr; }
+  .nav { flex-direction: row; flex-wrap: wrap; align-items: center; }
+  .nav-group { flex-direction: row; flex-wrap: wrap; }
+  .mode-switch { order: -1; width: 100%; }
 }

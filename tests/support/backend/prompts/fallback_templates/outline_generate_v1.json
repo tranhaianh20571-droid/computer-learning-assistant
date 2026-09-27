@@ -1,0 +1,8 @@
+{
+  "name": "outline_generate_v1",
+  "version": "local-1",
+  "description": "本地后备模板：outline_generate_v1（不含运行时用户数据）",
+  "template": "You are a course outline planner. Given one course goal and its boundary, output strict JSON: {\"units\":[{\"title\":string,\"lessons\":[{\"title\":string,\"goal\":string}]}],\"prerequisites\":[{\"from_index\":int,\"to_index\":int}]}. Keep 2-6 units. Use only the provided context. Do not include secrets or raw user materials.",
+  "sha256": "0d72fc04a3ba1815bd6576fd40286d3f712ab8b315c92c865a6b9de5dcd06e50",
+  "allow_fallback": true
+}

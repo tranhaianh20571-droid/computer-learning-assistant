@@ -351,3 +351,25 @@ class TaskService:
                 row.status = "cancelled"
             sess.commit()
             return {"task_id": task_id, "cancel_requested": True, "status": row.status}
+
+    def requeue_after_wait(self, task_id: str, *, actor_id: str) -> dict:
+        """业务等待（awaiting_*）决策后重排队：generation+1、状态回 queued。
+
+        围栏语义延续：旧 generation worker 的迟到结果仍会被拒绝。
+        """
+        with self.db.session() as sess:
+            row = sess.execute(
+                select(LearningTaskRow).where(LearningTaskRow.task_id == task_id).with_for_update()
+            ).scalar_one_or_none()
+            if row is None:
+                raise LeaseError("TASK_NOT_FOUND", "task not found")
+            if row.owner_user_id != actor_id:
+                raise AccessDeniedError("not_owner")
+            row.generation += 1
+            row.status = "queued"
+            row.lease_token = None
+            row.lease_owner = None
+            row.lease_until = None
+            row.updated_at = utcnow()
+            sess.commit()
+            return {"task_id": task_id, "generation": row.generation, "status": row.status}

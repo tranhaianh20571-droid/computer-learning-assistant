@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getSessionToken, setSessionToken } from "./api";
 import CapabilityConfig from "./CapabilityConfig";
+import PlanningView from "./PlanningView";
+import ChatView from "./ChatView";
+import { CourseOverview, RouteOverview } from "./Overview";
 import "./tokens.css";
 
 /** 错误码 → 用户可见模板文案（不显示原始异常） */
@@ -97,16 +100,46 @@ export default function App() {
     <div className="layout">
       <nav className="nav" aria-label="主导航">
         <div className="brand">学伴 · CS STUDY</div>
-        <button className={route === "/home" ? "active" : ""} onClick={() => go("/home")}>任务状态</button>
-        <button className={route === "/login" ? "active" : ""} onClick={() => go("/login")}>登录</button>
-        <button className={route === "/register" ? "active" : ""} onClick={() => go("/register")}>注册</button>
+        {/* 顶部模式切换：课程规划 / 即时协助（T07 导航壳） */}
+        <div className="mode-switch" role="tablist" aria-label="模式切换">
+          <button
+            role="tab"
+            aria-selected={route === "/planning" || route.startsWith("/route/") || route.startsWith("/course/")}
+            className={route === "/planning" || route.startsWith("/route/") || route.startsWith("/course/") ? "active" : ""}
+            onClick={() => go("/planning")}
+          >
+            课程规划
+          </button>
+          <button
+            role="tab"
+            aria-selected={route === "/chat"}
+            className={route === "/chat" ? "active" : ""}
+            onClick={() => go("/chat")}
+          >
+            即时协助
+          </button>
+        </div>
+        <div className="nav-group" aria-label="学习">
+          <div className="nav-title">学习</div>
+          <button className={route === "/home" ? "active" : ""} onClick={() => go("/home")}>任务状态</button>
+        </div>
+        <div className="nav-group" aria-label="账户">
+          <div className="nav-title">账户</div>
+          <button className={route === "/login" ? "active" : ""} onClick={() => go("/login")}>登录</button>
+          <button className={route === "/register" ? "active" : ""} onClick={() => go("/register")}>注册</button>
+        </div>
         {me?.is_admin && (
-          <button className={route === "/admin" ? "active" : ""} onClick={() => go("/admin")}>管理员审批</button>
+          <div className="nav-group" aria-label="管理">
+            <div className="nav-title">管理</div>
+            <button className={route === "/admin" ? "active" : ""} onClick={() => go("/admin")}>管理员审批</button>
+          </div>
         )}
-        <button className={route === "/canvas" ? "active" : ""} onClick={() => go("/canvas")}>画布底座</button>
-        {me && (
-          <button className={route === "/capabilities" ? "active" : ""} onClick={() => go("/capabilities")}>能力配置</button>
-        )}
+        <div className="nav-group" aria-label="配置">
+          <div className="nav-title">配置</div>
+          {me && (
+            <button className={route === "/capabilities" ? "active" : ""} onClick={() => go("/capabilities")}>能力配置</button>
+          )}
+        </div>
         {me ? (
           <button
             onClick={async () => {
@@ -138,7 +171,7 @@ export default function App() {
               setNotice(m);
               setError("");
               try { setMe(await api.me()); } catch { /* ignore */ }
-              go("/home");
+              go("/planning");
             }}
             onErr={setError}
           />
@@ -151,6 +184,18 @@ export default function App() {
         {route === "/canvas" && <CanvasView />}
         {route === "/capabilities" && me && (
           <CapabilityConfig isAdmin={me.is_admin} onErr={setError} onOk={setNotice} />
+        )}
+        {route === "/planning" && (
+          <PlanningView onErr={setError} onOk={setNotice} needLogin={!me} />
+        )}
+        {route === "/chat" && (
+          <ChatView onErr={setError} onOk={setNotice} needLogin={!me} />
+        )}
+        {route.startsWith("/route/") && (
+          <RouteOverview routeId={route.slice("/route/".length)} onErr={setError} />
+        )}
+        {route.startsWith("/course/") && (
+          <CourseOverview courseId={route.slice("/course/".length)} onErr={setError} onOk={setNotice} />
         )}
       </main>
     </div>

@@ -1,0 +1,8 @@
+{
+  "name": "planning_revise_v1",
+  "version": "local-1",
+  "description": "本地后备模板：planning_revise_v1（不含运行时用户数据）",
+  "template": "You are a learning plan revision assistant. Given the existing plan structure and the requested adjustment, output the same strict JSON schema as the original plan (route: stages/prerequisites; outline: units/prerequisites). Preserve unchanged parts. Do not include secrets or raw user materials.",
+  "sha256": "035e33fb9da8ebd7498b761c73483b19541550066acdbaaa5131b4a411b5b19f",
+  "allow_fallback": true
+}

@@ -324,6 +324,55 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "PROMPT_UNAVAILABLE", TaskStage.GENERATE, False, True, AlertLevel.WARNING,
             "提示词绑定不可用，禁止调用模型",
         ),
+        # 切片 3：规划、草稿、即时对话（受控错误码；等待态不计为失败）
+        ErrorCodeSpec(
+            "DRAFT_CONFLICT", TaskStage.SAVE, False, True, AlertLevel.NONE,
+            "草稿并发冲突，拒绝后到写入",
+        ),
+        ErrorCodeSpec(
+            "DRAFT_REVISION_MISMATCH", TaskStage.SAVE, False, True, AlertLevel.NONE,
+            "草稿 revision 不匹配（乐观锁）",
+        ),
+        ErrorCodeSpec(
+            "INVALID_OUTLINE_STRUCTURE", TaskStage.GENERATE, False, True, AlertLevel.NONE,
+            "大纲结构无效（空单元/讲次归属非法）",
+        ),
+        ErrorCodeSpec(
+            "DAG_CYCLE", TaskStage.GENERATE, False, True, AlertLevel.WARNING,
+            "先修关系存在环",
+        ),
+        ErrorCodeSpec(
+            "INVALID_PREREQUISITE", TaskStage.GENERATE, False, True, AlertLevel.NONE,
+            "先修引用超出允许范围",
+        ),
+        ErrorCodeSpec(
+            "ROUTE_STRUCTURE_INVALID", TaskStage.GENERATE, False, True, AlertLevel.NONE,
+            "路线结构无效（至少一门课程）",
+        ),
+        ErrorCodeSpec(
+            "DUPLICATE_IDEMPOTENCY_KEY", TaskStage.SAVE, False, True, AlertLevel.NONE,
+            "幂等键与既有请求冲突",
+        ),
+        ErrorCodeSpec(
+            "AWAITING_SCOPE_CLARIFICATION", TaskStage.GENERATE, False, True, AlertLevel.NONE,
+            "规划范围存在歧义，等待用户澄清",
+        ),
+        ErrorCodeSpec(
+            "AWAITING_SEARCH_DECISION", TaskStage.SEARCH, False, True, AlertLevel.NONE,
+            "搜索失败，等待用户选择重试或离线继续",
+        ),
+        ErrorCodeSpec(
+            "MODEL_CAPABILITY_UNAVAILABLE", TaskStage.GENERATE, False, True, AlertLevel.WARNING,
+            "模型不支持所需能力，已停止调用",
+        ),
+        ErrorCodeSpec(
+            "CONTEXT_BUDGET_EXCEEDED", TaskStage.GENERATE, False, True, AlertLevel.WARNING,
+            "上下文超出预算，需要缩小范围或补充资料",
+        ),
+        ErrorCodeSpec(
+            "LESSON_UNLOCK_REQUIRED", TaskStage.GENERATE, False, True, AlertLevel.NONE,
+            "未确认大纲，禁止启动教学",
+        ),
         ErrorCodeSpec(
             "INTERNAL_ERROR", TaskStage.SAVE, False, False, AlertLevel.CRITICAL,
             "内部错误，已映射为受控错误码",

@@ -1,0 +1,8 @@
+{
+  "name": "chat_answer_v1",
+  "version": "local-1",
+  "description": "本地后备模板：chat_answer_v1（不含运行时用户数据）",
+  "template": "You are an instant study assistant. Answer the user question concisely in plain text using only the provided context. If context is insufficient, say what is missing. Do not include secrets.",
+  "sha256": "5b38c7ec38a13a795d0d4481905a32c36a06fd228aa876be368d28eacdd179c9",
+  "allow_fallback": true
+}

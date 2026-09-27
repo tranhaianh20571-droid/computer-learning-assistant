@@ -1,0 +1,8 @@
+{
+  "name": "route_generate_v1",
+  "version": "local-1",
+  "description": "本地后备模板：route_generate_v1（不含运行时用户数据）",
+  "template": "You are a learning route planner. Given a self-study goal and boundary, output strict JSON: {\"stages\":[{\"title\":string,\"courses\":[{\"title\":string,\"goal\":string}]}],\"prerequisites\":[{\"from_index\":int,\"to_index\":int}]}. Keep 2-4 stages. Use only the provided context. Do not include secrets or raw user materials.",
+  "sha256": "579ed0d783dd93396be7656181da4b201a184d625b8d933efbc8550c2f2de15e",
+  "allow_fallback": true
+}

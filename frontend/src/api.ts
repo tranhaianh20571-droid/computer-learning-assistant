@@ -83,4 +83,43 @@ export const api = {
     if (lastEventId) headers["Last-Event-ID"] = lastEventId;
     return fetch(`${API}/api/tasks/${taskId}/sse`, { headers, credentials: "include" });
   },
+
+  // 切片 3：规划 / 草稿 / 场景 / 总览 / 导航 / 即时对话
+  createRoute: (title: string, scenario = "self_study") =>
+    req("/api/planning/routes", { method: "POST", body: JSON.stringify({ title, scenario }) }),
+  createCourse: (body: Record<string, unknown>) =>
+    req("/api/planning/courses", { method: "POST", body: JSON.stringify(body) }),
+  createPlanningTask: (body: Record<string, unknown>) =>
+    req("/api/planning/tasks", { method: "POST", body: JSON.stringify(body) }),
+  runPlanningTask: (taskId: string) =>
+    req(`/api/planning/tasks/${taskId}/run`, { method: "POST" }),
+  getPlanningTask: (taskId: string) => req(`/api/planning/tasks/${taskId}`),
+  decidePlanningTask: (taskId: string, body: Record<string, unknown>) =>
+    req(`/api/planning/tasks/${taskId}/decision`, { method: "POST", body: JSON.stringify(body) }),
+  getDraft: (draftId: string) => req(`/api/planning/drafts/${draftId}`),
+  saveDraft: (draftId: string, body: Record<string, unknown>) =>
+    req(`/api/planning/drafts/${draftId}`, { method: "PUT", body: JSON.stringify(body) }),
+  confirmDraft: (draftId: string, body: Record<string, unknown>) =>
+    req(`/api/planning/drafts/${draftId}/confirm`, { method: "POST", body: JSON.stringify(body) }),
+  switchDraftScope: (draftId: string, planningScope: string) =>
+    req(`/api/planning/drafts/${draftId}/scope`, { method: "POST", body: JSON.stringify({ planning_scope: planningScope }) }),
+  routeOverview: (routeId: string) => req(`/api/routes/${routeId}/overview`),
+  courseOverview: (courseId: string) => req(`/api/courses/${courseId}/overview`),
+  routeScene: (routeId: string) => req(`/api/routes/${routeId}/scene`),
+  courseScene: (courseId: string) => req(`/api/courses/${courseId}/scene`),
+  getViewState: (targetKind: string, targetId: string) =>
+    req(`/api/planning/viewstates/${targetKind}/${targetId}`),
+  putViewState: (targetKind: string, targetId: string, canvas: Record<string, unknown>) =>
+    req(`/api/planning/viewstates/${targetKind}/${targetId}`, { method: "PUT", body: JSON.stringify({ canvas }) }),
+  putNavigation: (body: Record<string, unknown>) =>
+    req("/api/navigation", { method: "PUT", body: JSON.stringify(body) }),
+  startLesson: (courseId: string, lessonId: string) =>
+    req(`/api/courses/${courseId}/lessons/${lessonId}/start`, { method: "POST" }),
+  createChat: (body: Record<string, unknown>) =>
+    req("/api/chat", { method: "POST", body: JSON.stringify(body) }),
+  getChat: (conversationId: string) => req(`/api/chat/${conversationId}`),
+  sendChat: (conversationId: string, body: Record<string, unknown>) =>
+    req(`/api/chat/${conversationId}/messages`, { method: "POST", body: JSON.stringify(body) }),
+  resumeChat: (conversationId: string, decision: string) =>
+    req(`/api/chat/${conversationId}/resume`, { method: "POST", body: JSON.stringify({ decision }) }),
 };

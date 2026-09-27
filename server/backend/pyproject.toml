@@ -21,6 +21,9 @@ dependencies = [
     # 切片 1：凭据加密（AES-256-GCM）与连接器出站 WSS 通道
     "cryptography>=44.0.0,<51.0.0",
     "websockets>=14.0,<17.0",
+    "pypdfium2>=5.13.0",
+    "jieba>=0.42.1",
+    "pillow>=12.3.0",
 ]
 
 [dependency-groups]
@@ -30,6 +33,8 @@ dev = [
     "ty>=0.0.25",
     "ruff<1.0.0,>=0.2.2",
     "coverage<8.0.0,>=7.4.3",
+    "reportlab>=5.0.1",
+    "pillow>=12.3.0",
 ]
 
 [build-system]

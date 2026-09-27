@@ -26,12 +26,18 @@ class LearningTaskRow(Base):
     __table_args__ = (
         Index("idx_learning_tasks_owner", "owner_user_id"),
         Index("idx_learning_tasks_status", "status"),
+        Index("idx_learning_tasks_lane_status", "status", "lane"),
         Index("uq_learning_tasks_idem", "owner_user_id", "idempotency_key", unique=True),
     )
 
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     kind: Mapped[str] = mapped_column(String(40), nullable=False, default="generic")
+    # 切片 2 调度四类：interactive | teaching_prefetch | ocr | maintenance
+    lane: Mapped[str] = mapped_column(String(20), nullable=False, default="interactive")
+    # OCR 任务指针（仅 lane=ocr 使用）
+    material_id: Mapped[str | None] = mapped_column(String(64))
+    page_no: Mapped[int | None] = mapped_column(Integer)
     subject_id: Mapped[str] = mapped_column(String(64), nullable=False)
     stage: Mapped[str] = mapped_column(String(40), nullable=False, default="upload")
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="queued")

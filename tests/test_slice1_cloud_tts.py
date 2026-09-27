@@ -14,10 +14,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests" / "support"))
 
-os.environ.setdefault(
-    "LEARNING_DATABASE_URL",
-    "postgresql+psycopg://learning_assistant:learning_dev_pw@127.0.0.1:5432/learning_assistant",
-)
+from backend.logging_audit.db import get_database_url  # noqa: E402
+
+os.environ.setdefault("LEARNING_DATABASE_URL", get_database_url())
 
 from backend.logging_audit.db import Database  # noqa: E402
 from backend.slice1.adapters.minimax import MiniMaxTTSAdapter  # noqa: E402

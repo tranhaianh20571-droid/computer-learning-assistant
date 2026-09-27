@@ -20,5 +20,7 @@ __pycache__/
 test-results/
 playwright-report/
 .playwright-cli/
+.slice2-samples/
+slice2-ocr-spike-result.json
 文档/规范/tests/**/evidence/
 文档/规范/tests/**/reports/

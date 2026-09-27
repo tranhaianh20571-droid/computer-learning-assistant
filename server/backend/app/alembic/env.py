@@ -24,6 +24,7 @@ from app.core.config import settings # noqa
 from app.logging_audit.models import Base as LoggingBase  # noqa
 import app.tasks.service  # noqa: F401 — register task tables
 import app.prompts.service  # noqa: F401 — register prompt tables
+import app.slice1.models  # noqa: F401 — register slice1 capability/connector tables
 
 # 合并 SQLModel 与 SQLAlchemy Base 元数据（切片 0 任务/审计/提示词表）
 from sqlalchemy import MetaData

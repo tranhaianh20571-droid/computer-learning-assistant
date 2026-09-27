@@ -17,6 +17,7 @@ from backend.logging_audit.models import Base  # noqa: E402
 from backend.auth import models as _auth_models  # noqa: F401, E402
 from backend.tasks import service as _task_models  # noqa: F401, E402
 from backend.prompts import service as _prompt_models  # noqa: F401, E402
+from backend.slice1 import models as _slice1_models  # noqa: F401, E402
 
 config = context.config
 if config.config_file_name is not None:

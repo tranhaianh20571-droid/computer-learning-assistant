@@ -57,6 +57,26 @@ export const api = {
   createTask: (body: Record<string, unknown>) =>
     req("/api/tasks", { method: "POST", body: JSON.stringify(body) }),
   taskStatus: (taskId: string) => req(`/api/tasks/${taskId}/status`),
+  // 切片 1：能力配置 / 外发确认 / 连接器
+  listConfigs: (kind?: string) =>
+    req(`/api/capabilities/configs${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`),
+  createConfig: (body: Record<string, unknown>) =>
+    req("/api/capabilities/configs", { method: "POST", body: JSON.stringify(body) }),
+  updateConfig: (configId: string, body: Record<string, unknown>) =>
+    req(`/api/capabilities/configs/${configId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deactivateConfig: (configId: string) =>
+    req(`/api/capabilities/configs/${configId}`, { method: "DELETE" }),
+  testConfig: (configId: string) =>
+    req(`/api/capabilities/configs/${configId}/test`, { method: "POST" }),
+  listDisclosures: (taskId: string) =>
+    req(`/api/disclosures?task_id=${encodeURIComponent(taskId)}`),
+  revokeDisclosure: (grantId: string) =>
+    req(`/api/disclosures/${grantId}/revoke`, { method: "POST" }),
+  createPairing: (deviceName: string) =>
+    req("/api/connectors/pairing", { method: "POST", body: JSON.stringify({ device_name: deviceName }) }),
+  listConnectors: () => req("/api/connectors"),
+  revokeConnector: (bindingId: string) =>
+    req(`/api/connectors/${bindingId}/revoke`, { method: "POST" }),
   taskSse: (taskId: string, lastEventId?: string) => {
     const headers: Record<string, string> = {};
     if (sessionToken) headers["Authorization"] = `Bearer ${sessionToken}`;

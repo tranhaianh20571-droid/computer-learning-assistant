@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     EMAIL_TEST_USER: EmailStr = "test@example.com"
     FIRST_SUPERUSER: EmailStr
     FIRST_SUPERUSER_PASSWORD: str
+    # 切片 1：凭据加密主密钥（AES-256-GCM）。不写仓库、不写日志。
+    # 未配置时能力配置写入返回受控错误，不影响切片 0 链路。
+    APP_ENCRYPTION_KEY: str | None = None
 
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":

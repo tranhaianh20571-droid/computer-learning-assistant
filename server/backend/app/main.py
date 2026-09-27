@@ -8,6 +8,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.api.main import api_router
 from app.core.config import settings
+from app.slice1_app import create_slice1_app
 
 # 架构要求：不复用模板前端界面/组件库。产品前端位于仓库 frontend/。
 FRONTEND_DIR = Path(__file__).parent / "frontend"
@@ -44,4 +45,8 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 os.environ.setdefault("LEARNING_DATABASE_URL", str(settings.DATABASE_URL))
 from app.slice0_app import app as slice0_app  # noqa: E402
 
-app.mount("/", slice0_app)
+# 切片 1：能力配置、外发确认与本机连接器。
+# 凭据加密主密钥从环境变量 APP_ENCRYPTION_KEY 读取；未配置时配置写入返回受控错误，
+# 不影响切片 0 的身份/任务链路启动。
+slice1_app = create_slice1_app()
+app.mount("/", slice1_app)

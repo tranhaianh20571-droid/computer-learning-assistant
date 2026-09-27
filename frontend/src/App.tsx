@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getSessionToken, setSessionToken } from "./api";
+import CapabilityConfig from "./CapabilityConfig";
 import "./tokens.css";
 
 /** 错误码 → 用户可见模板文案（不显示原始异常） */
@@ -18,6 +19,19 @@ const ERROR_TEXT: Record<string, string> = {
   EVENTS_EXPIRED: "进度已过期，正在重新加载。",
   TASK_NOT_FOUND: "找不到该任务。",
   LEASE_LOST: "任务租约已过期，结果已忽略。",
+  config_not_found: "找不到该配置。",
+  credential_invalid: "凭据无效，请检查后重试。",
+  capability_test_failed: "能力测试失败，请检查服务地址与凭据。",
+  capability_unavailable: "该模型不支持所需能力，已停止调用。",
+  connector_offline: "连接器离线，请重新连接。",
+  connector_revoked: "连接器已撤销。",
+  nonce_replay: "检测到重复请求，已拒绝。",
+  disclosure_expired: "外发授权已过期，请重新确认。",
+  disclosure_revoked: "外发授权已撤销。",
+  disclosure_required: "缺少外发授权，已阻止外发。",
+  pairing_code_invalid: "配对码无效或已使用。",
+  invalid_target: "连接器只允许本机回环地址。",
+  admin_only: "仅管理员可执行此操作。",
 };
 
 function errText(e: unknown): string {
@@ -90,6 +104,9 @@ export default function App() {
           <button className={route === "/admin" ? "active" : ""} onClick={() => go("/admin")}>管理员审批</button>
         )}
         <button className={route === "/canvas" ? "active" : ""} onClick={() => go("/canvas")}>画布底座</button>
+        {me && (
+          <button className={route === "/capabilities" ? "active" : ""} onClick={() => go("/capabilities")}>能力配置</button>
+        )}
         {me ? (
           <button
             onClick={async () => {
@@ -132,6 +149,9 @@ export default function App() {
           <HomeView me={me} onErr={setError} onOk={setNotice} onNeedLogin={() => go("/login")} />
         )}
         {route === "/canvas" && <CanvasView />}
+        {route === "/capabilities" && me && (
+          <CapabilityConfig isAdmin={me.is_admin} onErr={setError} onOk={setNotice} />
+        )}
       </main>
     </div>
   );

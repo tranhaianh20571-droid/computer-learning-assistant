@@ -1,18 +1,19 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import ReadonlyCanvas from "./excalidraw/ReadonlyCanvas";
 
 /**
- * 切片 3 课程规划页：
- * - 四入口任务流（route_generate / outline_generate），范围选择与澄清/搜索等待决策；
- * - 草稿层级列表（业务排序/重命名走草稿 PUT，画布坐标不是顺序来源）；
- * - 停止编辑 1 秒后自动保存；服务端成功后才更新已保存 revision；失败可见可重试；
- * - 确认（幂等键）→ 不可变版本；导图读取已确认版本场景（与总览同版）。
+ * 课程规划工作台（设计稿 mm-clean / verbar / tree）：
+ * - 版本栏：基线版本 / 编辑中草稿（虚线斜纹 + 自动保存状态机）/ 确认与范围操作；
+ * - 左侧画布：只读 Excalidraw（已确认版本场景）；右侧层级列表承载业务编辑；
+ * - 停止编辑 1 秒自动保存，服务端成功后才更新已保存 revision，失败可见可重试；
+ * - 等待态（范围澄清 / 搜索决策）以 note + radio-row 呈现。
  */
 
-const WAIT_TEXT: Record<string, string> = {
-  awaiting_scope_clarification: "规划范围存在歧义，请选择围绕一门课程还是一条路线。",
-  awaiting_search_decision: "联网搜索失败：可重试，或明确选择离线继续（不会伪造联网依据）。",
+const SAVE_TEXT: Record<string, string> = {
+  saved: "草稿已保存 · 服务端已确认",
+  saving: "正在保存草稿…",
+  failed: "草稿未保存 · 服务端未确认",
 };
 
 type Draft = {
@@ -24,46 +25,43 @@ type Draft = {
   saved_state: string;
 };
 
-type TaskInfo = {
-  task_id: string;
-  status?: string;
-  wait_state?: string | null;
-  clarification_question?: string | null;
-  resolved_scope?: string | null;
-};
+function SaveBadge({ state, onRetry }: { state: string; onRetry: () => void }) {
+  if (state === "failed") {
+    return (
+      <span className="save is-failed" role="alert">
+        <span className="dot" />草稿未保存 · 服务端未确认
+        <button className="retry" onClick={onRetry}>重试</button>
+      </span>
+    );
+  }
+  if (state === "saving") return <span className="save is-saving"><span className="dot" />{SAVE_TEXT.saving}</span>;
+  return <span className="save"><span className="dot" />{SAVE_TEXT.saved}</span>;
+}
 
-export default function PlanningView({ onErr, onOk, needLogin }: { onErr: (s: string) => void; onOk: (s: string) => void; needLogin: boolean }) {
+export default function PlanningView({ onErr, onOk, needLogin, go }: {
+  onErr: (s: string) => void; onOk: (s: string) => void; needLogin: boolean; go: (p: string) => void;
+}) {
   const [title, setTitle] = useState("");
   const [scope, setScope] = useState("auto");
-  const [taskKind, setTaskKind] = useState("route_generate");
   const [routeId, setRouteId] = useState("");
   const [taskId, setTaskId] = useState("");
-  const [task, setTask] = useState<TaskInfo | null>(null);
+  const [task, setTask] = useState<any>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [localContent, setLocalContent] = useState<any>(null);
-  const [saveState, setSaveState] = useState<string>("");
+  const [saveState, setSaveState] = useState("saved");
   const [scene, setScene] = useState<any>(null);
-  const [outlineTitle, setOutlineTitle] = useState("");
+  const [runError, setRunError] = useState("");
   const saveTimer = useRef<number | null>(null);
   const dirtyRef = useRef(false);
-
-  const isRoute = taskKind === "route_generate";
+  const bootRef = useRef(false);
 
   const refreshTask = useCallback(async (id: string) => {
-    try {
-      const t = await api.getPlanningTask(id);
-      setTask(t);
-    } catch { /* 任务查询失败保持当前状态 */ }
+    try { setTask(await api.getPlanningTask(id)); } catch { /* 保持当前状态 */ }
   }, []);
 
   const loadScene = useCallback(async (rid: string) => {
     if (!rid) return;
-    try {
-      const s = await api.routeScene(rid);
-      setScene(s);
-    } catch {
-      setScene(null); // 未确认版本：无场景
-    }
+    try { setScene(await api.routeScene(rid)); } catch { setScene(null); }
   }, []);
 
   const runTask = useCallback(async (id: string) => {
@@ -76,13 +74,28 @@ export default function PlanningView({ onErr, onOk, needLogin }: { onErr: (s: st
         setSaveState(d.saved_state);
       }
       await refreshTask(id);
-      if (body.wait_state) onOk(WAIT_TEXT[body.wait_state] || "任务等待用户决策。");
+      if (body.wait_state === "awaiting_scope_clarification") onOk("规划范围存在歧义，请回答一个问题。");
+      else if (body.wait_state === "awaiting_search_decision") onOk("联网搜索失败，请选择重试或离线继续。");
       else if (body.task_status === "succeeded") onOk("候选已生成，请在草稿中查看并确认。");
-      else if (body.task_status === "failed") onErr(`生成失败：${body.error_code || "未知错误"}`);
+      else if (body.task_status === "failed") setRunError(body.error_code || "生成失败");
     } catch (e: any) {
-      onErr(e?.code ? `${e.code}` : "任务执行失败");
+      setRunError(e?.code || "任务执行失败");
     }
-  }, [onErr, onOk, refreshTask]);
+  }, [onOk, refreshTask]);
+
+  // 从首页跳转而来：自动执行待处理任务
+  useEffect(() => {
+    if (bootRef.current) return;
+    bootRef.current = true;
+    const pending = sessionStorage.getItem("slice3.pendingTask");
+    const pendingRoute = sessionStorage.getItem("slice3.pendingRoute");
+    if (pendingRoute) setRouteId(pendingRoute);
+    if (pending) {
+      sessionStorage.removeItem("slice3.pendingTask");
+      setTaskId(pending);
+      runTask(pending);
+    }
+  }, [runTask]);
 
   const createAndRun = useCallback(async () => {
     if (needLogin) return onErr("请先登录。");
@@ -93,24 +106,9 @@ export default function PlanningView({ onErr, onOk, needLogin }: { onErr: (s: st
         rid = r.route_id;
         setRouteId(rid);
       }
-      if (taskKind === "outline_generate") {
-        // 大纲任务需要课程壳：由已确认路线的第一门课程承接（简化入口，完整流程在总览页）
-        const overview = await api.routeOverview(rid);
-        const course = overview.stages?.[0]?.courses?.[0];
-        if (!course) return onErr("请先生成并确认路线，再展开课程大纲。");
-        const body = await api.createPlanningTask({
-          idempotency_key: `web-${Date.now()}`,
-          task_kind: taskKind,
-          planning_scope: "course",
-          target_course_id: course.course_id,
-        });
-        setTaskId(body.task_id);
-        await runTask(body.task_id);
-        return;
-      }
       const body = await api.createPlanningTask({
         idempotency_key: `web-${Date.now()}`,
-        task_kind: taskKind,
+        task_kind: "route_generate",
         planning_scope: scope,
         target_route_id: rid,
       });
@@ -119,12 +117,13 @@ export default function PlanningView({ onErr, onOk, needLogin }: { onErr: (s: st
     } catch (e: any) {
       onErr(e?.message || "创建任务失败");
     }
-  }, [needLogin, onErr, onOk, routeId, runTask, scope, taskKind, title]);
+  }, [needLogin, onErr, routeId, runTask, scope, title]);
 
   // 1 秒自动保存（停止编辑后）
   const scheduleSave = useCallback((next: any) => {
     setLocalContent(next);
     dirtyRef.current = true;
+    setSaveState("saving");
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(async () => {
       if (!draft || !dirtyRef.current) return;
@@ -201,117 +200,158 @@ export default function PlanningView({ onErr, onOk, needLogin }: { onErr: (s: st
   const waitState = task?.wait_state;
 
   return (
-    <div className="stack">
-      <div className="card stack">
-        <h1>课程规划</h1>
-        <p className="lede">
-          选择规划类型与范围；生成候选 → 草稿确认 → 不可变版本。导图与总览始终读取已确认版本。
-        </p>
-        <div className="row">
-          <label>
-            规划类型{" "}
-            <select value={taskKind} onChange={(e) => setTaskKind(e.target.value)} aria-label="规划类型">
-              <option value="route_generate">学习路线</option>
-              <option value="outline_generate">课程大纲（需已确认路线）</option>
-            </select>
-          </label>
-          <label>
-            范围{" "}
-            <select value={scope} onChange={(e) => setScope(e.target.value)} aria-label="规划范围" disabled={!isRoute}>
-              <option value="auto">自动判断（歧义时询问）</option>
-              <option value="course">单门课程</option>
-              <option value="route">完整路线</option>
-            </select>
-          </label>
+    <div className="mm-clean">
+      <div className="mm-clean-head">
+        <span className="kicker">课程规划 · {routeId ? "路线" : "新任务"}</span>
+        <h1>{title || "课程规划"}</h1>
+        <div className="row" style={{ flexWrap: "wrap", gap: "var(--s3)", alignItems: "center" }}>
+          <input
+            className="inp"
+            style={{ maxWidth: 320 }}
+            placeholder="路线标题（可留空自动创建）"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            aria-label="路线标题"
+          />
+          <span className="seg" role="radiogroup" aria-label="规划范围">
+            <button role="radio" aria-checked={scope === "auto"} onClick={() => setScope("auto")}>自动判断</button>
+            <button role="radio" aria-checked={scope === "course"} onClick={() => setScope("course")}>单门课程</button>
+            <button role="radio" aria-checked={scope === "route"} onClick={() => setScope("route")}>多课程路线</button>
+          </span>
+          <button className="btn btn-pri" onClick={createAndRun} disabled={needLogin}>生成路线候选</button>
+          {taskId && <span className="idtag">task_id={taskId}</span>}
+          {routeId && <button className="btn btn-sm" onClick={() => go(`/route/${routeId}`)}>查看路线总览 →</button>}
         </div>
-        {isRoute ? (
-          <div className="field">
-            <label>路线标题（可留空自动创建）</label>
-            <input value={title} onChange={(e) => setTitle(e.target.value)} aria-label="路线标题" />
-          </div>
-        ) : (
-          <div className="field">
-            <label>课程大纲标题（用于确认路线后展开）</label>
-            <input value={outlineTitle} onChange={(e) => setOutlineTitle(e.target.value)} aria-label="课程大纲标题" />
-          </div>
-        )}
-        <div className="row">
-          <button onClick={createAndRun} disabled={needLogin}>生成候选</button>
-          {taskId && <span className="mono">task_id={taskId}</span>}
-        </div>
-        {waitState === "awaiting_scope_clarification" && (
-          <div className="notice" role="status">
-            {task?.clarification_question || WAIT_TEXT[waitState]}
-            <div className="row">
-              <button onClick={() => decision({ resolved_scope: "course" })}>围绕一门课程</button>
-              <button onClick={() => decision({ resolved_scope: "route" })}>完整学习路线</button>
-            </div>
-          </div>
-        )}
-        {waitState === "awaiting_search_decision" && (
-          <div className="notice" role="status">
-            {WAIT_TEXT[waitState]}
-            <div className="row">
-              <button onClick={() => decision({ decision: "retry" })}>重试搜索</button>
-              <button className="secondary" onClick={() => decision({ decision: "offline_continue" })}>离线继续</button>
-            </div>
+        {runError && (
+          <div className="note note-err" role="alert">
+            <span className="tag">失败</span>
+            <div className="tt">生成失败 · {runError}</div>
+            <div>不无限重试；可调整输入后重新生成。</div>
           </div>
         )}
       </div>
 
-      {routeId && (
-        <div className="card stack">
-          <h2>导图（已确认版本）</h2>
-          {scene ? (
-            <ReadonlyCanvas elements={scene.elements} />
-          ) : (
-            <p className="lede">尚无已确认版本；确认草稿后此处展示导图（与总览同版）。</p>
-          )}
-          <div className="row">
-            <span className="mono">route_id={routeId}</span>
-            <a href={`#/route/${routeId}`}>查看路线总览 →</a>
+      {waitState === "awaiting_scope_clarification" && (
+        <div style={{ padding: "12px 32px" }}>
+          <div className="clarify" role="group" aria-label="范围澄清">
+            <span className="kicker" style={{ color: "var(--accent)" }}>只追问一句</span>
+            <p className="q">{task?.clarification_question || "这个规划是围绕一门课程展开，还是一条跨阶段的学习路线？"}</p>
+            <div className="radio-list">
+              <label className="radio-row">
+                <input type="radio" name="scope-clar" onChange={() => decision({ resolved_scope: "course" })} />
+                <span><b>围绕一门课程</b><span className="help" style={{ display: "block" }}>→ 单门课程：一份大纲、若干讲次</span></span>
+              </label>
+              <label className="radio-row">
+                <input type="radio" name="scope-clar" onChange={() => decision({ resolved_scope: "route" })} />
+                <span><b>一条完整学习路线</b><span className="help" style={{ display: "block" }}>→ 多课程路线：阶段与先修关系</span></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
+      {waitState === "awaiting_search_decision" && (
+        <div style={{ padding: "12px 32px" }}>
+          <div className="note note-warn" role="alert">
+            <span className="tag">等待</span>
+            <div className="tt">联网搜索失败</div>
+            <div>可以重试搜索，或明确选择离线继续（不会伪造联网依据）。</div>
+            <div className="acts">
+              <button className="btn btn-sm" onClick={() => decision({ decision: "retry" })}>重试搜索</button>
+              <button className="btn btn-sm btn-ink" onClick={() => decision({ decision: "offline_continue" })}>离线继续</button>
+            </div>
           </div>
         </div>
       )}
 
-      {draft && localContent && (
-        <DraftEditor
-          draft={draft}
-          content={localContent}
-          saveState={saveState}
-          onChange={scheduleSave}
-          onConfirm={confirmDraft}
-          onScopeSwitch={setScopeAndNewDraft}
-          onRetrySave={() => scheduleSave(localContent)}
-        />
+      {routeId && (
+        <>
+          <div className="verbar">
+            <div className="cell">
+              <span className="lab">基线版本</span>
+              <div className="line">
+                {scene
+                  ? <><span className="ver ver-conf">已确认 v1</span><span className="muted">路线导图与总览同版</span></>
+                  : <span className="muted">尚无已确认版本；确认草稿后此处展示导图。</span>}
+              </div>
+            </div>
+            <div className={`cell ${draft ? "editing" : ""}`}>
+              <span className="lab">{draft ? "编辑中 · 草稿" : "草稿"}</span>
+              <div className="line">
+                {draft ? (
+                  <>
+                    <span className="ver ver-draft">草稿 rev {draft.revision}</span>
+                    <SaveBadge state={saveState} onRetry={() => scheduleSave(localContent)} />
+                  </>
+                ) : (
+                  <span className="muted">生成候选后，在这里编辑并确认。</span>
+                )}
+              </div>
+            </div>
+            <div className="acts">
+              {draft && (
+                <>
+                  <button className="btn btn-pri" onClick={confirmDraft}>确认草稿</button>
+                  <button className="btn btn-draft" onClick={() => setScopeAndNewDraft(draft.draft_kind === "route" ? "course" : "route")}>
+                    切换为{draft.draft_kind === "route" ? "课程大纲" : "路线"}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="mm-tools">
+            <span className="hint">画布位置只影响视角；业务排序与重命名在右侧层级列表进行（写草稿，不直接改已确认版本）。</span>
+            <span className="sp" />
+            {draft && <span className="idtag">draft_id={draft.draft_id}</span>}
+          </div>
+
+          <div className="mm-body">
+            <div className="mm-main">
+              <div className="stage-wrap">
+                {scene ? (
+                  <div className="canvas-readonly-wrap">
+                    <ReadonlyCanvas elements={scene.elements} height={520} />
+                  </div>
+                ) : (
+                  <div className="canvas-readonly-wrap" style={{ display: "grid", placeItems: "center", color: "var(--ink3)" }}>
+                    确认草稿后，这里展示与总览同版的路线导图。
+                  </div>
+                )}
+              </div>
+            </div>
+            <aside className="mm-side" aria-label="草稿层级列表">
+              <div className="tabs" role="tablist">
+                <button role="tab" aria-selected={true}>层级列表</button>
+              </div>
+              <div className="side-scroll">
+                {draft && localContent ? (
+                  <DraftTree draft={draft} content={localContent} onChange={scheduleSave} />
+                ) : (
+                  <p className="muted">尚无草稿。生成候选后，这里会显示阶段、课程（或单元、讲次）的层级列表，可重命名与调整顺序。</p>
+                )}
+              </div>
+            </aside>
+          </div>
+        </>
       )}
     </div>
   );
 }
 
-function DraftEditor({
-  draft, content, saveState, onChange, onConfirm, onScopeSwitch, onRetrySave,
-}: {
-  draft: Draft;
-  content: any;
-  saveState: string;
-  onChange: (next: any) => void;
-  onConfirm: () => void;
-  onScopeSwitch: (scope: string) => void;
-  onRetrySave: () => void;
+function DraftTree({ draft, content, onChange }: {
+  draft: Draft; content: any; onChange: (next: any) => void;
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const isRoute = draft.draft_kind === "route";
-  const groups: { id: string; title: string; items: { id: string; title: string; goal?: string }[] }[] = useMemo(() => {
-    if (isRoute) {
-      return (content.stages || []).map((s: any, i: number) => ({
-        id: `s${i}`, title: s.title, items: (s.courses || []).map((c: any, j: number) => ({ id: `s${i}c${j}`, title: c.title, goal: c.goal })),
+  const groups: { id: string; title: string; items: { id: string; title: string }[] }[] = isRoute
+    ? (content.stages || []).map((s: any, i: number) => ({
+        id: `s${i}`, title: s.title,
+        items: (s.courses || []).map((c: any, j: number) => ({ id: `s${i}c${j}`, title: c.title })),
+      }))
+    : (content.units || []).map((u: any, i: number) => ({
+        id: `u${i}`, title: u.title,
+        items: (u.lessons || []).map((l: any, j: number) => ({ id: `u${i}l${j}`, title: l.title })),
       }));
-    }
-    return (content.units || []).map((u: any, i: number) => ({
-      id: `u${i}`, title: u.title, items: (u.lessons || []).map((l: any, j: number) => ({ id: `u${i}l${j}`, title: l.title, goal: l.goal })),
-    }));
-  }, [content, isRoute]);
 
   const move = (list: any[], from: number, to: number) => {
     if (to < 0 || to >= list.length) return list;
@@ -320,17 +360,14 @@ function DraftEditor({
     next.splice(to, 0, item);
     return next;
   };
-
   const editGroupTitle = (gi: number, title: string) => {
     const next = structuredClone(content);
-    if (isRoute) next.stages[gi].title = title;
-    else next.units[gi].title = title;
+    if (isRoute) next.stages[gi].title = title; else next.units[gi].title = title;
     onChange(next);
   };
   const editItemTitle = (gi: number, ii: number, title: string) => {
     const next = structuredClone(content);
-    if (isRoute) next.stages[gi].courses[ii].title = title;
-    else next.units[gi].lessons[ii].title = title;
+    if (isRoute) next.stages[gi].courses[ii].title = title; else next.units[gi].lessons[ii].title = title;
     onChange(next);
   };
   const moveItem = (gi: number, ii: number, dir: -1 | 1) => {
@@ -347,55 +384,54 @@ function DraftEditor({
   };
 
   return (
-    <div className="card stack">
-      <div className="row">
-        <h2>草稿（{isRoute ? "路线" : "课程大纲"}）</h2>
-        <span className={`badge ${saveState === "saved" ? "succeeded" : saveState === "failed" ? "failed" : "running"}`}>
-          {saveState === "saved" ? "已保存" : saveState === "failed" ? "保存失败" : "保存中"}
-        </span>
-        {saveState === "failed" && <button className="secondary" onClick={onRetrySave}>重试保存</button>}
-        <span className="mono">revision={draft.revision}</span>
-      </div>
-      <p className="lede">业务排序与重命名在此进行（写草稿）；画布位置不会改变学习顺序。</p>
+    <ol className="tree" aria-label="草稿层级列表">
       {groups.map((g, gi) => (
-        <div key={g.id} className="stack" style={{ borderLeft: "3px solid var(--border)", paddingLeft: "0.75rem" }}>
-          <div className="row">
+        <li key={g.id}>
+          <div className="ti" style={{ ["--lvl" as any]: 0 }}>
             <button
-              className="secondary"
+              className="tw"
               aria-expanded={!!open[g.id]}
+              aria-label={`${open[g.id] ? "收起" : "展开"} ${g.title}`}
               onClick={() => setOpen((o) => ({ ...o, [g.id]: !o[g.id] }))}
             >
-              {open[g.id] ? "收起" : "展开"}
+              {open[g.id] ? "▾" : "▸"}
             </button>
             <input
+              className="ren"
               value={g.title}
               aria-label={`${isRoute ? "阶段" : "单元"}标题`}
               onChange={(e) => editGroupTitle(gi, e.target.value)}
-              style={{ flex: 1, minWidth: 200 }}
+              style={{ width: "100%" }}
             />
-            <button className="secondary" onClick={() => moveGroup(gi, -1)} aria-label="上移">↑</button>
-            <button className="secondary" onClick={() => moveGroup(gi, 1)} aria-label="下移">↓</button>
+            <span className="mv">
+              <button onClick={() => moveGroup(gi, -1)} aria-label="上移">↑</button>
+              <button onClick={() => moveGroup(gi, 1)} aria-label="下移">↓</button>
+            </span>
           </div>
-          {open[g.id] && g.items.map((item, ii) => (
-            <div key={item.id} className="row">
-              <input
-                value={item.title}
-                aria-label={`${isRoute ? "课程" : "讲次"}标题`}
-                onChange={(e) => editItemTitle(gi, ii, e.target.value)}
-                style={{ flex: 1, minWidth: 180 }}
-              />
-              <button className="secondary" onClick={() => moveItem(gi, ii, -1)} aria-label="上移条目">↑</button>
-              <button className="secondary" onClick={() => moveItem(gi, ii, 1)} aria-label="下移条目">↓</button>
-            </div>
-          ))}
-        </div>
+          {open[g.id] && (
+            <ul>
+              {g.items.map((item, ii) => (
+                <li key={item.id}>
+                  <div className="ti lv1" style={{ ["--lvl" as any]: 1 }}>
+                    <span className="ord">{ii + 1}</span>
+                    <input
+                      className="ren"
+                      value={item.title}
+                      aria-label={`${isRoute ? "课程" : "讲次"}标题`}
+                      onChange={(e) => editItemTitle(gi, ii, e.target.value)}
+                      style={{ width: "100%" }}
+                    />
+                    <span className="mv">
+                      <button onClick={() => moveItem(gi, ii, -1)} aria-label="上移条目">↑</button>
+                      <button onClick={() => moveItem(gi, ii, 1)} aria-label="下移条目">↓</button>
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </li>
       ))}
-      <div className="row">
-        <button onClick={onConfirm}>确认草稿（创建不可变版本）</button>
-        <button className="secondary" onClick={() => onScopeSwitch(isRoute ? "course" : "route")}>
-          切换为{isRoute ? "课程大纲" : "路线"}（保留输入）
-        </button>
-      </div>
-    </div>
+    </ol>
   );
 }

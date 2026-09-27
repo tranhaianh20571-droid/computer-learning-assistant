@@ -84,6 +84,7 @@ export const api = {
     return fetch(`${API}/api/tasks/${taskId}/sse`, { headers, credentials: "include" });
   },
 
+  listMaterials: () => req("/api/materials"),
   // 切片 3：规划 / 草稿 / 场景 / 总览 / 导航 / 即时对话
   createRoute: (title: string, scenario = "self_study") =>
     req("/api/planning/routes", { method: "POST", body: JSON.stringify({ title, scenario }) }),

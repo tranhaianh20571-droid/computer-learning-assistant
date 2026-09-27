@@ -3,83 +3,152 @@ import { api } from "./api";
 import ReadonlyCanvas from "./excalidraw/ReadonlyCanvas";
 
 /**
- * 切片 3 T07：路线总览与课程总览。
- * - 与导图同版（同一已确认版本读取）；准备状态标签按切片 0 视觉规则；
- * - 不输出路线整体百分比；课程进度按当前已确认大纲讲次等权（本切片全为未开始）；
- * - 未确认大纲或讲次未就绪：「开始学习」禁用并显示原因（教学启动行为归切片 4）。
+ * 路线总览与课程总览（设计稿 5/6 节）：
+ * - 总览与导图从同一已确认版本读取（同版口径）；
+ * - 路线总览：route-sum 概况 + stage/crs 列表；不输出路线整体百分比；
+ * - 课程总览：c-info 侧栏（大纲版本 ver / 进度 / 单元）+ lec 讲次行（三层状态字形）；
+ * - 未确认大纲或讲次未就绪：开始学习禁用并给出 .why 原因（教学启动归切片 4）。
  */
 
 const PREP_LABEL: Record<string, { text: string; cls: string }> = {
-  not_generated: { text: "未生成", cls: "queued" },
-  generating: { text: "生成中", cls: "running" },
-  ready: { text: "已就绪", cls: "succeeded" },
-  failed: { text: "失败", cls: "failed" },
+  not_generated: { text: "未生成", cls: "" },
+  generating: { text: "生成中", cls: "is-making" },
+  ready: { text: "已就绪", cls: "is-ready" },
+  failed: { text: "失败", cls: "is-fail" },
 };
 
-function PrepBadge({ status }: { status: string }) {
+function PrepState({ status, extra }: { status: string; extra?: string }) {
   const meta = PREP_LABEL[status] || PREP_LABEL.not_generated;
-  return <span className={`badge ${meta.cls}`}>{meta.text}</span>;
+  return (
+    <span className={`st st-prep ${meta.cls}`}>
+      <i className="g" aria-hidden="true" />
+      <span className="k">讲解</span>
+      {extra || meta.text}
+    </span>
+  );
 }
 
-export function RouteOverview({ routeId, onErr }: { routeId: string; onErr: (s: string) => void }) {
+export function RouteOverview({ routeId, onErr, go }: {
+  routeId: string; onErr: (s: string) => void; go: (p: string) => void;
+}) {
   const [overview, setOverview] = useState<any>(null);
   const [scene, setScene] = useState<any>(null);
+  const [showCanvas, setShowCanvas] = useState(false);
 
   const load = useCallback(async () => {
     try {
       setOverview(await api.routeOverview(routeId));
-      try {
-        setScene(await api.routeScene(routeId));
-      } catch {
-        setScene(null);
-      }
+      try { setScene(await api.routeScene(routeId)); } catch { setScene(null); }
       api.putNavigation({ route_id: routeId }).catch(() => {});
     } catch (e: any) {
       onErr(e?.message || "路线总览加载失败");
     }
   }, [onErr, routeId]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
-  if (!overview) return <div className="card stack"><p className="lede">加载中…</p></div>;
+  if (!overview) return <p className="muted">加载中…</p>;
+
+  const readyCount = overview.stages?.filter((s: any) => s.courses?.some((c: any) => c.outline_confirmed)).length || 0;
+  const pendingCount = (overview.stages || []).reduce(
+    (acc: number, s: any) => acc + s.courses?.filter((c: any) => !c.outline_confirmed).length, 0);
+
+  const startOutlineFor = async (courseId: string) => {
+    try {
+      const task = await api.createPlanningTask({
+        idempotency_key: `web-${Date.now()}`,
+        task_kind: "outline_generate",
+        planning_scope: "course",
+        target_course_id: courseId,
+      });
+      sessionStorage.setItem("slice3.pendingTask", task.task_id);
+      sessionStorage.removeItem("slice3.pendingRoute");
+      go("/planning");
+    } catch (e: any) {
+      onErr(e?.message || "创建大纲任务失败");
+    }
+  };
 
   return (
-    <div className="stack">
-      <div className="card stack">
-        <h1>路线总览</h1>
-        <p className="lede">
-          版本 v{overview.version_no ?? "-"}（已确认）· 阶段 {overview.stages?.length ?? 0} 个。
-          学习顺序以层级与先修关系为准。
-        </p>
-        {overview.stages?.map((s: any) => (
-          <div key={s.stage_id} className="stack" style={{ borderLeft: "3px solid var(--border)", paddingLeft: "0.75rem" }}>
-            <h3>{s.title}</h3>
-            <ul style={{ margin: 0, paddingLeft: "1.2rem" }}>
-              {s.courses?.map((c: any) => (
-                <li key={c.course_id}>
-                  <a href={`#/course/${c.course_id}`}>{c.title || c.course_id}</a>{" "}
-                  <span className={`badge ${c.outline_confirmed ? "succeeded" : "queued"}`}>
-                    {c.outline_confirmed ? "大纲已确认" : "未确认大纲"}
-                  </span>
-                  <span className="help"> 已开始 {c.progress?.lesson_started ?? 0}/{c.progress?.lesson_total ?? 0} 讲</span>
-                </li>
-              ))}
-            </ul>
+    <div className="page-w">
+      <div className="phead">
+        <span className="kicker">学习路线 · {overview.scenario === "school" ? "学校课程" : "自学"}</span>
+        <div className="row">
+          <h1 className="h1">学习路线</h1>
+          {overview.has_version
+            ? <span className="ver ver-conf">已确认 v{overview.version_no}</span>
+            : <span className="ver ver-hist">尚无已确认版本</span>}
+          {scene && (
+            <button className="btn btn-sm" onClick={() => setShowCanvas((v) => !v)}>
+              {showCanvas ? "收起导图" : "查看导图（与总览同版）"}
+            </button>
+          )}
+        </div>
+        <p className="lede">学习顺序以层级与先修关系为准；画布位置不会改变业务顺序。</p>
+      </div>
+
+      <div className="route-sum" aria-label="路线概况">
+        <a href="#c-ready"><span className="n">{readyCount} 门</span><span className="l">大纲已确认 · 可以展开学习</span></a>
+        <a href="#c-act"><span className="n">{pendingCount} 门</span><span className="l">还没有大纲</span></a>
+      </div>
+
+      {showCanvas && scene && (
+        <div className="canvas-readonly-wrap" style={{ marginBottom: 24 }}>
+          <ReadonlyCanvas elements={scene.elements} height={460} />
+        </div>
+      )}
+
+      {(overview.stages || []).map((s: any) => (
+        <section className="stage" aria-labelledby={`st-${s.stage_id}`} key={s.stage_id}>
+          <div className="stage-h">
+            <span className="k">阶段 {String(s.order_index + 1).padStart(2, "0")} · {s.course_count} 门课程</span>
+            <h2 id={`st-${s.stage_id}`}>{s.title}</h2>
           </div>
-        ))}
-        <div className="row mono">route_id={routeId}</div>
-      </div>
-      <div className="card stack">
-        <h2>路线导图（与总览同版）</h2>
-        {scene ? <ReadonlyCanvas elements={scene.elements} /> : <p className="lede">尚无已确认路线版本。</p>}
-      </div>
+          <ol className="crs">
+            {s.courses?.map((c: any) => (
+              <li key={c.course_id} id={c.outline_confirmed ? "c-ready" : "c-act"}>
+                <span className="ord">#{String(c.order_index + 1).padStart(2, "0")}</span>
+                <div>
+                  <h3><a href={`#/course/${c.course_id}`}>{c.title || c.course_id}</a></h3>
+                  {c.goal_snapshot && <p className="goal">{c.goal_snapshot}</p>}
+                  <div className="meta-l">
+                    <span>course_id={c.course_id.slice(0, 12)}</span>
+                  </div>
+                </div>
+                <div className="ost">
+                  {c.outline_confirmed
+                    ? <span className="ol-st ol-ready">大纲已确认</span>
+                    : <span className="ol-st ol-pending">未确认大纲</span>}
+                  {c.outline_confirmed && (
+                    <span className="sub">已开始 <b className="num">{c.progress?.lesson_started ?? 0} / {c.progress?.lesson_total ?? 0}</b> 讲</span>
+                  )}
+                </div>
+                <div className="next">
+                  {c.outline_confirmed ? (
+                    <>
+                      <a className="btn btn-pri" href={`#/course/${c.course_id}`}>进入课程</a>
+                      <span className="why">大纲已确认，可以查看讲次与准备状态。</span>
+                    </>
+                  ) : (
+                    <>
+                      <button className="btn btn-draft" onClick={() => startOutlineFor(c.course_id)}>生成课程大纲</button>
+                      <span className="why">确认大纲后才能开始学习；先修不等于已掌握。</span>
+                    </>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ))}
+      <div className="idtag" style={{ marginTop: 16 }}>route_id={routeId}</div>
     </div>
   );
 }
 
-export function CourseOverview({ courseId, onErr, onOk }: { courseId: string; onErr: (s: string) => void; onOk: (s: string) => void }) {
+export function CourseOverview({ courseId, onErr, onOk, go }: {
+  courseId: string; onErr: (s: string) => void; onOk: (s: string) => void; go: (p: string) => void;
+}) {
   const [overview, setOverview] = useState<any>(null);
 
   const load = useCallback(async () => {
@@ -91,20 +160,14 @@ export function CourseOverview({ courseId, onErr, onOk }: { courseId: string; on
     }
   }, [courseId, onErr]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
-  if (!overview) return <div className="card stack"><p className="lede">加载中…</p></div>;
+  if (!overview) return <p className="muted">加载中…</p>;
 
   const start = async (lessonId: string, startable: boolean, reason: string) => {
-    if (!startable) {
-      onErr(reason);
-      return;
-    }
+    if (!startable) { onErr(reason); return; }
     try {
       const r = await api.startLesson(courseId, lessonId);
-      // 切片 3 只交付门槛校验；首段教学生成由切片 4 提供
       onOk(r.reason === "teaching_generation_in_slice4"
         ? "大纲已确认；教学生成将在后续版本开放。"
         : "已请求开始学习。");
@@ -114,73 +177,114 @@ export function CourseOverview({ courseId, onErr, onOk }: { courseId: string; on
   };
 
   return (
-    <div className="stack">
-      <div className="card stack">
-        <h1>课程总览</h1>
-        <p className="lede">
-          版本 v{overview.version_no ?? "-"} ·{" "}
-          <span className={`badge ${overview.outline_confirmed ? "succeeded" : "failed"}`}>
-            {overview.outline_confirmed ? "大纲已确认" : "未确认大纲（禁止启动教学）"}
-          </span>
-          {" "}· 已开始 {overview.progress?.lesson_started ?? 0}/{overview.progress?.lesson_total ?? 0} 讲
-        </p>
-        {overview.source_route_version_id && (
-          <p className="help">本课程由路线展开生成；安排过先修 ≠ 已掌握，请按先修顺序学习。</p>
+    <div className="course">
+      <aside className="c-info">
+        <div className="od-stack" style={{ ["--od-gap" as any]: "8px" }}>
+          <span className="kicker">课程 · {overview.scenario === "school" ? "学校课程" : "自学"}</span>
+          <h1>课程总览</h1>
+        </div>
+        <div className="blk">
+          <span className="k">大纲版本</span>
+          {overview.outline_confirmed ? (
+            <div className="row">
+              <span className="ver ver-conf">已确认 v{overview.version_no}</span>
+            </div>
+          ) : (
+            <>
+              <span className="ver ver-draft">草稿 · 从未确认</span>
+              <span className="help">确认之前，这门课只能编辑大纲，不能开始学习。</span>
+            </>
+          )}
+        </div>
+        {overview.outline_confirmed && (
+          <div className="blk c-prog">
+            <span className="k">课程进度</span>
+            <span className="n num">{overview.progress?.lesson_started ?? 0} <small>/ {overview.progress?.lesson_total ?? 0} 讲 已开始</small></span>
+            <span className="help">只统计当前已确认大纲的讲次等权进度；完成状态写入由后续版本提供。</span>
+          </div>
         )}
-        {overview.units?.map((u: any) => (
-          <div key={u.unit_id} className="stack" style={{ borderLeft: "3px solid var(--border)", paddingLeft: "0.75rem" }}>
-            <h3>{u.title}</h3>
-            <ul style={{ margin: 0, paddingLeft: "1.2rem" }}>
-              {u.lessons?.map((l: any) => (
-                <li key={l.lesson_id}>
-                  <span className="mono">第 {l.order_index + 1} 讲</span>{" "}
-                  {l.goal || l.lesson_id} <PrepBadge status={l.status_preparation} />
-                  {l.prereq_hint && (
-                    <span className="badge running" title="安排过先修 ≠ 已掌握">有先修</span>
-                  )}
-                  <button
-                    className="secondary"
-                    style={{ marginLeft: "0.5rem" }}
-                    disabled={!overview.teaching_unlocked || !l.startable}
-                    aria-disabled={!overview.teaching_unlocked || !l.startable}
-                    title={!overview.teaching_unlocked
-                      ? "未确认大纲，禁止启动教学"
-                      : !l.startable ? "讲次未就绪（未生成/生成中/失败）" : "开始学习"}
-                    onClick={() => start(
-                      l.lesson_id, overview.teaching_unlocked && l.startable,
-                      overview.teaching_unlocked ? "该讲次尚未就绪。" : "未确认大纲，禁止启动教学。",
-                    )}
-                  >
-                    开始学习
-                  </button>
-                </li>
-              ))}
-            </ul>
+        {overview.source_route_version_id && (
+          <div className="blk">
+            <span className="k">课程来源</span>
+            <span className="help">由学习路线展开生成；安排过先修 ≠ 已掌握，请按先修顺序学习。</span>
+          </div>
+        )}
+        <div className="blk">
+          <span className="k">单元</span>
+          <ul className="units">
+            {(overview.units || []).map((u: any, i: number) => (
+              <li key={u.unit_id}>
+                <a href={`#unit-${u.unit_id}`}>
+                  <span className="n">{String(i + 1).padStart(2, "0")}</span>
+                  <span className="od-truncate">{u.title}</span>
+                  <span className="c">{u.lesson_count} 讲</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="blk">
+          <button className="btn btn-sm" onClick={() => go("/planning")}>去调整规划</button>
+          <span className="help">调整大纲会产生或编辑草稿，不会覆盖已确认的内容。</span>
+        </div>
+      </aside>
+
+      <section>
+        {!overview.outline_confirmed && (
+          <div className="note note-draft" role="note" style={{ marginBottom: 24 }}>
+            <span className="tag">草稿</span>
+            <div className="tt">这份大纲还没确认</div>
+            <div>确认之后才能开始学习；确认不会启动整课的讲解生成或语音合成。</div>
+          </div>
+        )}
+        {(overview.units || []).map((u: any) => (
+          <div key={u.unit_id} id={`unit-${u.unit_id}`}>
+            <div className="unit-h">
+              <span className="k">单元 · {u.lesson_count} 讲</span>
+              <h2 className="h2">{u.title}</h2>
+            </div>
+            <ol className="lecs">
+              {u.lessons?.map((l: any) => {
+                const startable = overview.teaching_unlocked && l.startable;
+                const why = !overview.teaching_unlocked
+                  ? "未确认大纲，不能学习"
+                  : !l.startable
+                    ? (l.status_preparation === "failed" ? "上次生成失败，可以重试" : "讲解还没生成好")
+                    : "进入后从第 1 步开始生成";
+                return (
+                  <li className={`lec${overview.teaching_unlocked ? "" : " locked"}`} key={l.lesson_id}>
+                    <span className="no">L{String(l.order_index + 1).padStart(2, "0")}</span>
+                    <div>
+                      <h3>{l.title || l.goal || l.lesson_id}</h3>
+                      {l.prereq_arranged && <p className="desc">有先修讲次；安排过先修 ≠ 已掌握。</p>}
+                      <div className="states">
+                        <PrepState status={l.status_preparation} />
+                        <span className={`st st-learn ${l.learning_state === "user_completed" ? "is-done" : l.learning_state === "in_progress" ? "is-doing" : ""}`}>
+                          <i className="g" aria-hidden="true" />
+                          <span className="k">学习</span>
+                          {l.learning_state === "user_completed" ? "已完成" : l.learning_state === "in_progress" ? "进行中" : "未开始"}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="go">
+                      <button
+                        className={`btn${startable ? " btn-pri" : ""}`}
+                        disabled={!startable}
+                        onClick={() => start(l.lesson_id, startable,
+                          overview.teaching_unlocked ? "该讲次尚未就绪。" : "未确认大纲，禁止启动教学。")}
+                      >
+                        {overview.teaching_unlocked ? (l.startable ? "开始学习" : "未就绪") : "未确认，不能学习"}
+                      </button>
+                      <span className="why">{why}</span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
           </div>
         ))}
-        <div className="row mono">course_id={courseId}</div>
-      </div>
-      <div className="card stack">
-        <h2>大纲导图（与总览同版）</h2>
-        <SceneLoader courseId={courseId} />
-      </div>
+        <div className="idtag" style={{ marginTop: 16 }}>course_id={courseId}</div>
+      </section>
     </div>
   );
-}
-
-function SceneLoader({ courseId }: { courseId: string }) {
-  const [scene, setScene] = useState<any>(null);
-  const [loaded, setLoaded] = useState(false);
-  useEffect(() => {
-    (async () => {
-      try {
-        setScene(await api.courseScene(courseId));
-      } catch {
-        setScene(null);
-      }
-      setLoaded(true);
-    })();
-  }, [courseId]);
-  if (!loaded) return <p className="lede">加载中…</p>;
-  return scene ? <ReadonlyCanvas elements={scene.elements} /> : <p className="lede">尚无已确认大纲版本。</p>;
 }

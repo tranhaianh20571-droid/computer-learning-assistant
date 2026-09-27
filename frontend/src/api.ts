@@ -99,6 +99,21 @@ export const api = {
     req(`/api/materials/${materialId}`, { method: "DELETE" }),
   searchMaterials: (body: Record<string, unknown>) =>
     req("/api/materials/search", { method: "POST", body: JSON.stringify(body) }),
+  // 切片 4：讲次教学
+  startLessonV2: (courseId: string, lessonId: string) =>
+    req(`/api/courses/${courseId}/lessons/${lessonId}/start`, { method: "POST" }),
+  getWorkspace: (conversationId: string) => req(`/api/teaching/${conversationId}`),
+  saveCheckpoint: (conversationId: string, body: Record<string, unknown>) =>
+    req(`/api/teaching/${conversationId}/checkpoint`, { method: "POST", body: JSON.stringify(body) }),
+  sendFollowup: (conversationId: string, body: Record<string, unknown>) =>
+    req(`/api/teaching/${conversationId}/followup`, { method: "POST", body: JSON.stringify(body) }),
+  resumeLesson: (conversationId: string) =>
+    req(`/api/teaching/${conversationId}/resume`, { method: "POST" }),
+  runTeachingTask: (taskId: string) =>
+    req(`/api/teaching/tasks/${taskId}/run`, { method: "POST" }),
+  audioUrl: (audioId: string) => `${API}/api/teaching/audio/${audioId}/content`,
+  figureUrl: (materialId: string, figureId: string) =>
+    `${API}/api/materials/${materialId}/figures/${figureId}/content`,
   // 切片 3：规划 / 草稿 / 场景 / 总览 / 导航 / 即时对话
   createRoute: (title: string, scenario = "self_study") =>
     req("/api/planning/routes", { method: "POST", body: JSON.stringify({ title, scenario }) }),

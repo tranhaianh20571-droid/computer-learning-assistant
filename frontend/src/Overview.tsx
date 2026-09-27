@@ -167,10 +167,15 @@ export function CourseOverview({ courseId, onErr, onOk, go }: {
   const start = async (lessonId: string, startable: boolean, reason: string) => {
     if (!startable) { onErr(reason); return; }
     try {
-      const r = await api.startLesson(courseId, lessonId);
-      onOk(r.reason === "teaching_generation_in_slice4"
-        ? "大纲已确认；教学生成将在后续版本开放。"
-        : "已请求开始学习。");
+      const r = await api.startLessonV2(courseId, lessonId);
+      // 计时起点 = 本次点击；首段生成任务已创建
+      if (r.conversation_id) {
+        sessionStorage.setItem("slice4.pendingTask", r.task_id);
+        onOk("首段生成中，进入讲次工作区。");
+        go(`/lecture/${r.conversation_id}`);
+      } else {
+        onOk("已请求开始学习。");
+      }
     } catch (e: any) {
       onErr(e?.code === "LESSON_UNLOCK_REQUIRED" ? "未确认大纲，暂不能开始学习。" : e?.message || "操作失败");
     }

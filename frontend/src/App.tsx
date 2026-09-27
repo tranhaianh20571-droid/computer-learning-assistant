@@ -6,6 +6,7 @@ import ChatView from "./ChatView";
 import TaskEntry from "./TaskEntry";
 import { CourseOverview, RouteOverview } from "./Overview";
 import MaterialsPage from "./MaterialsPage";
+import LectureView from "./LectureView";
 import "./tokens.css";
 
 /**
@@ -162,6 +163,7 @@ export default function App() {
     "/chat": ["即时对话"],
     "/planning": ["课程规划"],
     "/materials": ["资料准备"],
+    "/lecture": ["讲次教学"],
     "/tasks": ["任务状态"],
     "/admin": ["管理员审批"],
     "/capabilities": ["能力配置"],
@@ -255,6 +257,9 @@ export default function App() {
           )}
           {route.startsWith("/course/") && (
             <CourseOverview courseId={route.slice("/course/".length)} onErr={setError} onOk={setNotice} go={go} />
+          )}
+          {route.startsWith("/lecture/") && (
+            <LectureView conversationId={route.slice("/lecture/".length)} onErr={setError} onOk={setNotice} go={go} />
           )}
         </main>
       </div>

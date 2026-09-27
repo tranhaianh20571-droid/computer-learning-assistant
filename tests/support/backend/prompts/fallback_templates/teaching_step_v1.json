@@ -1,0 +1,8 @@
+{
+  "name": "teaching_step_v1",
+  "version": "local-1",
+  "description": "本地后备模板：teaching_step_v1（不含运行时用户数据）",
+  "template": "You are a lecture teacher. Produce ONE short teaching step (target 30-60 seconds of speech) for the current lesson. Output strict JSON: {\"steps\":[{\"title\":string,\"text\":string,\"board\":{\"kind\":\"board\",\"title\":string,\"points\":[string],\"code\":string|null,\"formula\":string|null,\"nodes\":[{\"id\":string,\"label\":string}],\"edges\":[{\"from_id\":string,\"to_id\":string,\"label\":string}],\"original_refs\":[],\"reveal_ms\":[int]}}]}. text must be 80-480 characters. Do not include secrets or raw user materials.",
+  "sha256": "768e57b916d316e35850b5e86347ff45169bb8d2e1170e1fadce8355e7985ee1",
+  "allow_fallback": true
+}

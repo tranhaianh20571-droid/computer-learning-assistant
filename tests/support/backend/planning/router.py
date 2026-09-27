@@ -371,17 +371,7 @@ def create_planning_router(
         user = _user(request)
         return overview.course_overview(course_id, actor_id=user.user_id)
 
-    # ------------------------------------------------------------------
-    # 教学门槛（本切片只校验；教学生成归切片 4）
-    # ------------------------------------------------------------------
-    @router.post("/api/courses/{course_id}/lessons/{lesson_id}/start")
-    def start_lesson(course_id: str, lesson_id: str, request: Request) -> dict:
-        user = _user(request)
-        drafts.ensure_outline_confirmed(course_id, actor_id=user.user_id)
-        # 大纲已确认：本切片到此为止（首段教学生成由切片 4 的用户触发实现）
-        return {"course_id": course_id, "lesson_id": lesson_id, "started": False,
-                "reason": "teaching_generation_in_slice4"}
-
+    # 教学门槛与启动教学路由归切片 4（teaching router）。
     # ------------------------------------------------------------------
     # 导航状态
     # ------------------------------------------------------------------

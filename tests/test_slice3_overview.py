@@ -165,14 +165,36 @@ class TestCourseOverview:
         r2 = client.get(f"/api/routes/{route_id}/overview", headers=auth_headers(token))
         assert r2.status_code == 200
 
-    def test_lesson_start_when_ready_returns_placeholder(self, env) -> None:
+    def test_lesson_start_when_ready_starts_teaching(self, env) -> None:
+        """切片 4：大纲已确认 + 讲次就绪 → 真启动教学（创建课程会话）。"""
+        from sqlalchemy import select, update
+
+        from backend.planning.models import LessonRow, OutlineVersionRow
+
         user_id, token, route_id, course_id = _confirm_route_and_outline(env)
+        # 讲次置 ready（首段内容生成由切片 4 worker 承接）
+        with env["database"].session() as sess:
+            ov_id = sess.execute(
+                select(OutlineVersionRow.outline_version_id)
+                .where(OutlineVersionRow.course_id == course_id)
+                .limit(1)
+            ).scalar_one()
+        with env["database"].session() as sess:
+            lesson = sess.execute(
+                select(LessonRow).where(LessonRow.outline_version_id == ov_id).limit(1)
+            ).scalars().first()
+            lesson.status_preparation = "ready"
+            lesson_id = lesson.lesson_id
         r = env["client"].post(
-            f"/api/courses/{course_id}/lessons/les_x/start", headers=auth_headers(token)
+            f"/api/courses/{course_id}/lessons/{lesson_id}/start", headers=auth_headers(token)
         )
-        # 大纲已确认 → 门槛通过；本切片不启动教学（切片 4 实现）
-        assert r.status_code == 200
-        assert r.json()["started"] is False
+        assert r.status_code == 201, r.text
+        assert r.json()["conversation_id"]
+        # 未就绪讲次仍被门槛拒绝
+        r2 = env["client"].post(
+            f"/api/courses/{course_id}/lessons/les_missing/start", headers=auth_headers(token)
+        )
+        assert r2.status_code == 404
 
 
 class TestNavigation:

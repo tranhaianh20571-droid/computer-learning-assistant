@@ -312,7 +312,10 @@ class PlanningViewStateRow(Base):
 
 class ConversationRow(Base):
     __tablename__ = "conversations"
-    __table_args__ = (Index("idx_conversations_owner", "owner_user_id"),)
+    __table_args__ = (
+        Index("idx_conversations_owner", "owner_user_id"),
+        Index("idx_conversations_lesson", "lesson_id"),
+    )
 
     conversation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -320,6 +323,14 @@ class ConversationRow(Base):
     scenario: Mapped[str] = mapped_column(String(20), nullable=False, default="self_study")
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     material_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    # 切片 4：课程会话绑定（kind=teaching 时必填业务校验，DB 层可空）
+    course_id: Mapped[str | None] = mapped_column(String(64))
+    outline_version_id: Mapped[str | None] = mapped_column(String(64))
+    lesson_id: Mapped[str | None] = mapped_column(String(64))
+    lesson_content_version_id: Mapped[str | None] = mapped_column(String(64))
+    # 一次性原课程恢复点（追问时创建；连续追问沿用最初恢复点）
+    restore_point_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    session_state: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

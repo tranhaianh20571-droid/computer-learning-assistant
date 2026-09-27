@@ -374,6 +374,10 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "未确认大纲，禁止启动教学",
         ),
         ErrorCodeSpec(
+            "CHECKPOINT_STALE", TaskStage.SAVE, False, True, AlertLevel.NONE,
+            "播放位置保存的 client_seq 已过期（单调校验拒绝旧请求）",
+        ),
+        ErrorCodeSpec(
             "INTERNAL_ERROR", TaskStage.SAVE, False, False, AlertLevel.CRITICAL,
             "内部错误，已映射为受控错误码",
         ),

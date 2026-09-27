@@ -30,6 +30,7 @@ class Slice3State:
         model_adapter_factory: Optional[Any] = None,
         search_adapter_factory: Optional[Any] = None,
         ocr_adapter_factory: Optional[Any] = None,
+        tts_adapter_factory: Optional[Any] = None,
         storage=None,
         pipeline_holder: Optional[dict] = None,
     ) -> None:
@@ -55,6 +56,14 @@ class Slice3State:
             search_adapter_factory=search_adapter_factory,
         )
         self.overview = OverviewService(db)
+        # 切片 4：讲次教学（步骤生成/板书/TTS/检查点/追问/恢复）
+        from .teaching.service import TeachingService
+
+        self.teaching = TeachingService(
+            db, self.tasks, self.events, self.prompts, self.storage,
+            model_adapter_factory=model_adapter_factory,
+            tts_adapter_factory=tts_adapter_factory,
+        )
         # 切片 2 T03/T04：逐页解析 + OCR 管线（适配器经工厂注入，真实凭据为人工前置）
         from .materials.ocr import OcrPipelineService
         from .materials.chunk_index import ChunkIndexService
@@ -116,7 +125,35 @@ class DevSyntheticModelAdapter:
         for m in messages:
             if m.get("role") == "user":
                 last = str(m.get("content", ""))
-        if "outline" in last or "大纲" in last:
+        if "follow-up question" in last:
+            payload = {
+                "answer": "这是针对追问的合成回答：概念按定义、例子、常见误用三段展开（本地走查，非真实模型）。",
+                "board": None,
+            }
+        elif "ONE short teaching step" in last or "lecture teacher" in last:
+            payload = {
+                "steps": [{
+                    "title": "合成教学步骤",
+                    "text": "本步骤讲解当前讲次的核心概念：先给出定义，再用一个具体例子说明它在真实系统里如何出现，"
+                            "最后指出两个最常见的误用与判别方法，帮助你把概念落到可操作的判断上。"
+                            "整段朗读约 40 秒，适合作为一段短步骤播放。",
+                    "board": {
+                        "kind": "board",
+                        "title": "核心概念速览",
+                        "points": ["定义：并发事务之间的可见性约定", "例子：转账场景的两个事务", "误用：把隔离级别当成锁"],
+                        "code": None,
+                        "formula": None,
+                        "nodes": [
+                            {"id": "n1", "label": "事务 A"},
+                            {"id": "n2", "label": "事务 B"},
+                        ],
+                        "edges": [{"from_id": "n1", "to_id": "n2", "label": "冲突"}],
+                        "original_refs": [],
+                        "reveal_ms": [0, 4000, 8000],
+                    },
+                }]
+            }
+        elif "outline" in last or "大纲" in last:
             payload = {
                 "units": [
                     {"title": "单元一：数据库基础与 SQL 实践（长单元标题观察换行与省略号策略）",
@@ -169,6 +206,32 @@ class DevSyntheticSearchAdapter:
         }
 
 
+class _DevSyntheticTTSAdapter:
+    """仅本地走查：合成 TTS（返回 hex 音频与句级字幕）。"""
+
+    kind = "tts"
+    protocol = "minimax"
+
+    def synthesize(self, text: str, *, voice_id=None) -> dict:
+        import hashlib as _hashlib
+
+        payload = b"ID3synthetic-audio" + text.encode("utf-8")
+        subtitle = [{"word": seg, "begin_ms": i * 400, "end_ms": (i + 1) * 400}
+                    for i, seg in enumerate(text.split("。") if text else []) if seg][:20]
+        return {
+            "model": "speech-2.8-hd",
+            "voice_id": voice_id or "dev-synthetic",
+            "audio_format": "mp3",
+            "subtitle_enable": True,
+            "subtitle_type": "sentence",
+            "audio_hex": payload.hex(),
+            "subtitle": subtitle,
+            "text_sha256": _hashlib.sha256(text.encode()).hexdigest(),
+            "vendor_trace_id": "dev-synthetic",
+            "endpoint": "dev://synthetic",
+        }
+
+
 class _DevSyntheticOcrAdapter:
     """仅本地走查：合成 OCR 任务提交/结果（含一个结构图区域与一个文本区域）。"""
 
@@ -215,6 +278,7 @@ def create_slice3_app(
     model_adapter_factory: Optional[Any] = None,
     search_adapter_factory: Optional[Any] = None,
     ocr_adapter_factory: Optional[Any] = None,
+    tts_adapter_factory: Optional[Any] = None,
 ) -> FastAPI:
     if model_adapter_factory is None or search_adapter_factory is None:
         dev_model, dev_search = _dev_synthetic_factories()
@@ -222,6 +286,8 @@ def create_slice3_app(
         search_adapter_factory = search_adapter_factory or dev_search
     if ocr_adapter_factory is None and os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") == "1":
         ocr_adapter_factory = lambda owner, task_id: _DevSyntheticOcrAdapter()  # noqa: E731
+    if tts_adapter_factory is None and os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") == "1":
+        tts_adapter_factory = lambda owner, task_id: _DevSyntheticTTSAdapter()  # noqa: E731
     storage = state.storage if state is not None else None
     holder = state.pipeline_holder if state is not None else {"pipeline": None}
     app = create_slice2_app(state=slice2_state, storage=storage, pipeline_holder=holder)
@@ -234,6 +300,7 @@ def create_slice3_app(
             model_adapter_factory=model_adapter_factory,
             search_adapter_factory=search_adapter_factory,
             ocr_adapter_factory=ocr_adapter_factory,
+            tts_adapter_factory=tts_adapter_factory,
             storage=storage or MaterialStorage(),
             pipeline_holder=holder,
         )
@@ -269,11 +336,24 @@ def create_slice3_app(
             resolve_user=_resolve_user,
         )
     )
+    from .teaching.router import create_teaching_router
+
+    app.include_router(
+        create_teaching_router(teaching=state.teaching, resolve_user=_resolve_user)
+    )
 
     @app.exception_handler(PlanningError)
     async def planning_error(_: Request, exc: PlanningError) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status, content={"error_code": exc.code, "message": exc.message}
+        )
+
+    from .teaching.errors import TeachingError
+
+    @app.exception_handler(TeachingError)
+    async def teaching_error(_: Request, exc: TeachingError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status or 400, content={"error_code": exc.code, "message": exc.message}
         )
 
     @app.exception_handler(WaitStateSignal)

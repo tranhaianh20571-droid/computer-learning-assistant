@@ -1,0 +1,8 @@
+{
+  "name": "lesson_step_v1",
+  "version": "local-1",
+  "description": "本地后备模板：课程短步骤生成（不含运行时用户数据）",
+  "template": "You are a teaching assistant. Generate one short lesson step as strict JSON: {\"title\": string, \"summary\": string, \"board_items\": string[]}. Do not include secrets or raw user materials.",
+  "sha256": "fff35efc09adc572c01e72fa263bf6e505d6a412cdc432bfbeceba86a78aa46e",
+  "allow_fallback": true
+}

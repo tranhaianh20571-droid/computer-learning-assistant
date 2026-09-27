@@ -1,9 +1,9 @@
 .backup/
 .mimocode/
+diagrams/
 文档/
 .DS_Store
 Thumbs.db
-
 # Local environments and credentials
 .env
 .env.*
@@ -19,5 +19,6 @@ coverage/
 __pycache__/
 test-results/
 playwright-report/
+.playwright-cli/
 文档/规范/tests/**/evidence/
 文档/规范/tests/**/reports/

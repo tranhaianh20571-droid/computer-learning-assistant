@@ -93,6 +93,7 @@ export default function App() {
   const go = useCallback((path: string) => {
     setError("");
     setNotice("");
+    document.getElementById("side")?.classList.remove("open");
     location.hash = path;
     setRoute(path);
   }, []);
@@ -111,6 +112,32 @@ export default function App() {
       setBooted(true);
     })();
   }, []);
+
+  // 移动端抽屉侧栏：点外部 / Escape / 导航跳转时收起
+  // （hooks 必须位于早退 return 之前）
+  const closeSide = useCallback(() => {
+    document.getElementById("side")?.classList.remove("open");
+  }, []);
+
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      const side = document.getElementById("side");
+      if (!side || !side.classList.contains("open")) return;
+      const target = e.target as HTMLElement;
+      if (target.closest("#side")) return; // 侧栏内部点击不收起
+      if (target.closest("[data-nav-toggle]")) return; // 开关按钮自身走 toggle
+      side.classList.remove("open");
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeSide();
+    };
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeSide]);
 
   // 登录/注册/验证/重置：独立整页路由（无侧栏），参考 Google 登录式布局
   const isAuthRoute = ["/login", "/register", "/verify", "/reset"].includes(route);
@@ -223,7 +250,7 @@ export default function App() {
       </nav>
       <div className="main">
         <header className="top">
-          <button className="iconbtn menu-btn" aria-label="打开导航" aria-controls="side" onClick={sideOpen}>☰</button>
+          <button className="iconbtn menu-btn" data-nav-toggle aria-label="打开导航" aria-controls="side" onClick={sideOpen}>☰</button>
           <nav className="crumb" aria-label="当前位置">
             <span className="here">{crumbHere[0] || "学伴"}</span>
           </nav>

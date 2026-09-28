@@ -63,7 +63,8 @@ page.on("request", (req) => {
 });
 
 await page.goto(`${baseUrl}/#/login`, { waitUntil: "networkidle" });
-report.checks.login = await page.getByRole("heading", { name: "登录" }).isVisible();
+// ds-1 改版后登录页主标题为 h2「回到你的学习空间」（kicker 为「登录」）
+report.checks.login = await page.getByRole("heading", { name: "回到你的学习空间" }).isVisible();
 
 // 未登录时能力配置入口不渲染（需登录）
 report.checks.capability_hidden_when_anonymous =
@@ -74,10 +75,10 @@ await page.setViewportSize({ width: 390, height: 844 });
 await page.screenshot({ path: `${outDir}/slice1-narrow-login.png`, fullPage: false });
 await page.setViewportSize({ width: 1280, height: 900 });
 
-// 键盘可达：Tab 能聚焦到导航按钮
+// 键盘可达：Tab 能聚焦到可交互元素（登录页首个可聚焦为邮箱输入框）
 await page.keyboard.press("Tab");
 report.checks.keyboard_focus = await page.evaluate(
-  () => document.activeElement !== null && document.activeElement.tagName === "BUTTON"
+  () => document.activeElement !== null && ["BUTTON", "INPUT", "A"].includes(document.activeElement.tagName)
 );
 
 writeFileSync(`${outDir}/slice1-frontend-report.json`, JSON.stringify(report, null, 2));

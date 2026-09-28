@@ -1,5 +1,6 @@
-/** API 客户端：只访问本机开发 API，不打印密钥/正文到控制台。 */
-const API = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8000";
+/** API 客户端：默认同源相对路径（vite dev/preview 代理到后端，生产同域部署），
+ * 会话 Cookie 才能随请求携带；可用 VITE_API_BASE 覆盖。不打印密钥/正文到控制台。 */
+const API = (import.meta as any).env?.VITE_API_BASE ?? "";
 
 // 浏览器会话由服务端 HttpOnly cookie 承载；令牌只在内存中保留，供开发测试的 Bearer 兼容路径使用。
 let sessionToken: string | null = null;

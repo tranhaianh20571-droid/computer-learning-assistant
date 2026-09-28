@@ -185,6 +185,7 @@ class OverviewService:
                     )
             return {
                 "course_id": course.course_id,
+                "title": course.title_ref,
                 "scenario": course.scenario,
                 "current_version_id": version.outline_version_id if version else None,
                 "version_no": version.version_no if version else None,

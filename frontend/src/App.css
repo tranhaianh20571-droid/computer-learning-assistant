@@ -205,7 +205,7 @@
 .course-grid { display: grid; gap: 22px; }
 .ccard { display: grid; grid-template-columns: 190px 1fr 210px; border: 1px solid var(--rule); border-radius: 16px; overflow: hidden; background: #fff; }
 .ccard-cover { border: none; cursor: pointer; min-height: 176px; display: flex; align-items: center; justify-content: center; }
-.mono { width: 94px; height: 94px; border: 2.5px dashed currentColor; border-radius: 50% 46% 52% 48%; display: flex; align-items: center; justify-content: center; font-family: var(--serif); font-size: 46px; font-weight: 600; opacity: .8; }
+.monogram { width: 94px; height: 94px; border: 2.5px dashed currentColor; border-radius: 50% 46% 52% 48%; display: flex; align-items: center; justify-content: center; font-family: var(--serif); font-size: 46px; font-weight: 600; opacity: .8; }
 .tone-a .ccard-cover { background: #DBE7F6; color: #1F3F77; }
 .tone-b .ccard-cover { background: #DDF0E4; color: #1F5C3A; }
 .tone-c .ccard-cover { background: #F6EBDD; color: #6B4423; }
@@ -225,7 +225,7 @@
 /* 杂志化课程详情 */
 .ccourse { display: grid; grid-template-columns: 300px 1fr; gap: 30px; align-items: start; }
 .ccover { border-radius: 14px; height: 210px; display: flex; align-items: center; justify-content: center; margin-bottom: 16px; }
-.ccover .mono { width: 112px; height: 112px; font-size: 58px; }
+.ccover .monogram { width: 112px; height: 112px; font-size: 58px; }
 .bigpct { font-family: var(--serif); font-size: 46px; line-height: 1.1; font-weight: 600; }
 .bigpct small { font-size: 14px; font-family: inherit; color: var(--ink2); font-weight: 400; }
 .unitdots { display: flex; gap: 8px; align-items: center; }

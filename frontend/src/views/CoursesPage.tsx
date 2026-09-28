@@ -92,7 +92,7 @@ export default function CoursesPage({ me, onErr, go }: {
           return (
             <article className={`ccard ${toneOf(c.course_id)}`} key={c.course_id}>
               <button className="ccard-cover" onClick={() => go(`/course/${c.course_id}`)} aria-label={`打开课程 ${c.title}`}>
-                <span className="mono" aria-hidden="true">{(c.title || "课").trim().charAt(0).toUpperCase()}</span>
+                <span className="monogram" aria-hidden="true">{(c.title || "课").trim().charAt(0).toUpperCase()}</span>
               </button>
               <div className="ccard-body">
                 <span className="kicker">{c.scenario === "school" ? "学校课程" : "自学"}{c.unit_count > 0 ? ` · ${c.unit_count} 单元` : ""}</span>

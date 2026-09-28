@@ -195,7 +195,7 @@ export function CourseOverview({ courseId, onErr, onOk, go }: {
       <aside className="c-info">
         <button className="btn btn-sm" onClick={() => go("/courses")}>← 返回课程</button>
         <div className={`ccover ${["tone-a", "tone-b", "tone-c", "tone-d", "tone-e"][courseId.length % 5]}`}>
-          <span className="mono" aria-hidden="true">{title.trim().charAt(0).toUpperCase()}</span>
+          <span className="monogram" aria-hidden="true">{title.trim().charAt(0).toUpperCase()}</span>
         </div>
         <span className="kicker">课程 · {overview.scenario === "school" ? "学校课程" : "自学"}</span>
         <h1 className="serif" style={{ fontSize: 26, lineHeight: 1.4, margin: 0 }}>{title}</h1>

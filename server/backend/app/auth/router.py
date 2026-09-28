@@ -149,6 +149,16 @@ def create_auth_router(service: AuthService) -> APIRouter:
         except AuthError as exc:
             raise HTTPException(status_code=exc.status, detail={"error_code": exc.code, "message": exc.message})
 
+    @router.get("/admin/pending")
+    def list_pending(user=Depends(session_user)) -> dict:
+        """待审批用户列表（管理员入口）。"""
+        if not user.is_admin:
+            raise HTTPException(status_code=403, detail={"error_code": "ACCESS_DENIED", "message": "admin only"})
+        try:
+            return {"data": service.list_pending(admin_id=user.user_id)}
+        except AuthError as exc:
+            raise HTTPException(status_code=exc.status, detail={"error_code": exc.code, "message": exc.message})
+
     @router.get("/me")
     def me(user=Depends(session_user)) -> dict:
         return {

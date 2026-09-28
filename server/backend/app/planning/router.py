@@ -166,6 +166,12 @@ def create_planning_router(
             sess.commit()
         return {"course_id": course_id}
 
+    @router.get("/api/planning/courses")
+    def list_courses(request: Request) -> dict:
+        """当前用户的课程列表（owned、未删除），含确认状态/进度与下一讲提示。"""
+        user = _user(request)
+        return {"data": overview.list_course_summaries(actor_id=user.user_id)}
+
     @router.post("/api/planning/tasks", status_code=201)
     def create_planning_task(body: PlanningTaskIn, request: Request) -> dict:
         user = _user(request)

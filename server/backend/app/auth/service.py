@@ -210,6 +210,29 @@ class AuthService:
             raise AuthError("ACCESS_DENIED", "admin only", status=403)
         return admin
 
+    def list_pending(self, admin_id: str) -> list[dict]:
+        """待审批用户列表（管理员入口）；只返回 pending_approval 状态。"""
+        with self.db.session() as sess:
+            self._require_admin(sess, admin_id)
+            rows = (
+                sess.execute(
+                    select(UserRow)
+                    .where(UserRow.status == "pending_approval")
+                    .order_by(UserRow.created_at)
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                {
+                    "user_id": u.user_id,
+                    "email": u.email,
+                    "display_name": u.display_name,
+                    "created_at": u.created_at.isoformat() if u.created_at else None,
+                }
+                for u in rows
+            ]
+
     def approve(self, admin_id: str, target_user_id: str, trace_id: Optional[str] = None) -> dict:
         with self.db.session() as sess:
             self._require_admin(sess, admin_id)

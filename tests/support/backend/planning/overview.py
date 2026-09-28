@@ -272,6 +272,50 @@ class OverviewService:
                 "last_lesson_id": row.last_lesson_id,
             }
 
+    def list_course_summaries(self, *, actor_id: str) -> list[dict]:
+        """课程列表（owned、未删除）：确认状态 + 讲次进度 + 下一讲提示。
+
+        复用 course_overview 的同版口径逐课程取数（邀请制下课程数很小）；
+        下一讲 = 第一个未完成且就绪的讲次，供列表页「接下来」栏展示。
+        """
+        with self.db.session() as sess:
+            course_rows = (
+                sess.execute(
+                    select(CourseRow)
+                    .where(CourseRow.owner_user_id == actor_id, CourseRow.deleted_at.is_(None))
+                    .order_by(CourseRow.created_at.desc())
+                )
+                .scalars()
+                .all()
+            )
+        items: list[dict] = []
+        for course in course_rows:
+            ov = self.course_overview(course.course_id, actor_id=actor_id)
+            lessons = [l for u in ov.get("units", []) for l in u.get("lessons", [])]
+            progress = ov.get("progress") or {}
+            nxt = next(
+                (
+                    l
+                    for l in lessons
+                    if l.get("learning_state") != "user_completed" and l.get("startable")
+                ),
+                None,
+            )
+            items.append(
+                {
+                    "course_id": course.course_id,
+                    "title": course.title_ref,
+                    "scenario": course.scenario,
+                    "outline_confirmed": bool(ov.get("outline_confirmed")),
+                    "unit_count": len(ov.get("units", [])),
+                    "lesson_total": int(progress.get("lesson_total", 0)),
+                    "lesson_started": int(progress.get("lesson_started", 0)),
+                    "next_lesson_id": nxt.get("lesson_id") if nxt else None,
+                    "next_lesson_title": (nxt.get("title") or None) if nxt else None,
+                }
+            )
+        return items
+
     def get_navigation(self, *, actor_id: str) -> dict:
         with self.db.session() as sess:
             row = sess.get(LearningNavigationStateRow, actor_id)

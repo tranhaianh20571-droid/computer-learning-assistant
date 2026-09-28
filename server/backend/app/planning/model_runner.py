@@ -24,6 +24,26 @@ from pydantic import BaseModel, ValidationError
 
 from ..logging_audit.logger import monotonic_ms
 from ..logging_audit.metrics import get_model_call_metrics
+
+# 模式能力失败缓存：输出连续无效的 (适配器签名, 能力) 在 TTL 内直接跳过，
+# 避免每次生成都在已知不支持的模式上烧时间（探测结论的运行时缓存）。
+_MODE_FAIL_TTL_MS = 6 * 60 * 60 * 1000
+# 键：(适配器签名, 能力, tool_name)。tool_name 标识输出 schema——
+# 访谈追问（IntakeQuestionSet）的失败不得毒化路线/大纲生成的同能力模式；
+# "text" 能力不缓存：文本输出失败多是内容/解析问题而非能力缺失，
+# 而 prompted 是所有结构化生成的最终兜底，缓存它会连锁杀死后续生成。
+_MODE_FAIL_CACHE: dict[tuple[str, str, str], int] = {}
+
+
+def _adapter_signature(adapter: Any) -> str:
+    """适配器签名：仅当 endpoint/model_name 非空时参与缓存（合成适配器不受影响）。"""
+    ep = str(getattr(adapter, "endpoint", "") or "")
+    mn = str(getattr(adapter, "model_name", "") or "")
+    return f"{ep}|{mn}" if (ep or mn) else ""
+
+
+def reset_mode_capability_cache() -> None:
+    _MODE_FAIL_CACHE.clear()
 from .errors import error
 from .outputs import PROMPTED_PARSE_RETRIES
 
@@ -44,12 +64,19 @@ class ModelRunResult:
 class ModelCapabilityGate:
     """按配置能力状态选择输出模式；能力未知时先探测并回报（由调用方持久化）。"""
 
-    def __init__(self, adapter: Any) -> None:
+    def __init__(self, adapter: Any, tool_name: str = "") -> None:
         self.adapter = adapter
+        self.tool_name = tool_name
 
     def capability_state(self, capability: str) -> str:
         """available | unavailable | unknown（探测失败按 unavailable）。"""
         probe = getattr(self.adapter, "probe", None)
+        # 运行时失败缓存优先：真实网关上"输出连续无效"的证据压过过期的配置探测结论
+        sig = _adapter_signature(self.adapter)
+        if sig:
+            expiry = _MODE_FAIL_CACHE.get((sig, capability, self.tool_name))
+            if expiry and expiry > monotonic_ms():
+                return "unavailable"
         status = getattr(self.adapter, "capability_status", None)
         if isinstance(status, dict) and status.get(capability) in ("available", "unavailable"):
             return status[capability]
@@ -116,9 +143,10 @@ def run_structured(
       {"content": str|dict, "tool_arguments": str|dict|None}
     合成适配器与切片 1 适配器扩展都遵循该形状。
     """
-    gate = ModelCapabilityGate(adapter)
+    gate = ModelCapabilityGate(adapter, tool_name=tool_name)
     candidate_modes = modes or gate.choose_modes()
     degraded_from: list[str] = []
+    sig = _adapter_signature(adapter)
     for mode in candidate_modes:
         attempts = 0
         max_attempts = PROMPTED_PARSE_RETRIES + 1 if mode == "prompted" else 1
@@ -126,9 +154,21 @@ def run_structured(
         while attempts < max_attempts:
             attempts += 1
             options = _options_for_mode(mode, schema, tool_name, prompt_suffix, last_error)
+            call_messages = messages
+            if mode == "prompted":
+                # 提示注入：严格 JSON 指令 / 重试修正 / 业务后缀 追加到最后一条 user 消息
+                hint = options.pop("append_to_last_user_message", "")
+                if hint:
+                    call_messages = _apply_user_suffix(messages, hint)
+            use_stream = mode == "prompted" and hasattr(adapter, "generate_stream_text")
             call_started = monotonic_ms()
             try:
-                raw = adapter.generate(messages, **options)
+                if use_stream:
+                    # 流式收集：大 JSON 生成期间连接持续有数据，规避网关读超时/截断
+                    text = adapter.generate_stream_text(call_messages, **options)
+                    raw = {"content": text}
+                else:
+                    raw = adapter.generate(call_messages, **options)
             except Exception as exc:  # noqa: BLE001 - 供应商异常 → 受控错误码
                 code = getattr(exc, "code", "MODEL_TIMEOUT")
                 mapped = "MODEL_TIMEOUT" if code == "timeout" else "MODEL_CAPABILITY_UNAVAILABLE"
@@ -154,8 +194,25 @@ def run_structured(
             except ValidationError:
                 last_error = "schema_violation"
                 continue
+        # 该模式所有尝试耗尽且输出无效 → 记入能力失败缓存
+        # （仅真实网关签名；structured 能力按 schema 身份隔离；text 不缓存）
+        capability = _REQUIRED_CAPABILITY[mode]
+        if sig and capability != "text":
+            _MODE_FAIL_CACHE[(sig, capability, tool_name)] = monotonic_ms() + _MODE_FAIL_TTL_MS
         degraded_from.append(mode)
     raise error("MODEL_CAPABILITY_UNAVAILABLE", "all output modes failed")
+
+
+def _apply_user_suffix(messages: list[dict], suffix: str) -> list[dict]:
+    """把提示后缀追加到最后一条 user 消息（拷贝，不改入参）。"""
+    out = [dict(m) for m in messages]
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") == "user":
+            out[i]["content"] = str(out[i].get("content", "")) + suffix
+            return out
+    if out:
+        out[-1]["content"] = str(out[-1].get("content", "")) + suffix
+    return out
 
 
 def _options_for_mode(
@@ -216,5 +273,6 @@ def run_chat(adapter: Any, messages: list[dict], *, max_len: int, stage: str = "
 
 __all__ = [
     "ModelCapabilityGate", "ModelRunResult", "OUTPUT_MODES",
+    "reset_mode_capability_cache",
     "run_structured", "run_chat", "_parse_json_payload",
 ]

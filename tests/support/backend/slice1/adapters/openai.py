@@ -51,6 +51,14 @@ class OpenAIAdapter(AdapterBase):
             tool_arguments = fn.get("arguments")
         return {"content": msg.get("content") or "", "tool_arguments": tool_arguments}
 
+    def generate_stream_text(self, messages: list[dict], **options: Any) -> str:
+        """流式收集为完整文本（v2）：供结构化生成的大 JSON 输出使用。
+
+        与 generate 同参（响应体 stream=True），生成期间连接持续有数据，
+        规避非流式长生成在网关/上游的读超时与截断；完成后整体解析。
+        """
+        return "".join(delta for delta in self.stream(messages, **options) if delta)
+
     def stream(self, messages: list[dict], **options: Any):
         """SSE 流式纯文本生成（切片 4 补充）：逐段 yield 文本增量。
 

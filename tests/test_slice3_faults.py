@@ -14,6 +14,7 @@ from slice3_common import (
     SyntheticModelAdapter,
     SyntheticSearchAdapter,
     auth_headers,
+    run_route_generate,
     make_user,
 )
 
@@ -70,7 +71,7 @@ def _run_route_task(env, token, route_id, *, signals=None, scope="route"):
         json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
               "planning_scope": scope, "target_route_id": route_id, "signals": signals or {}},
     ).json()["task_id"]
-    body = client.post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token)).json()
+    body = run_route_generate(client, token, task_id)
     return task_id, body
 
 

@@ -39,6 +39,7 @@ from slice3_common import (  # noqa: E402
     SyntheticSearchAdapter,
     TeachingModelAdapter,
     make_user,
+    run_route_generate,
 )
 
 
@@ -89,7 +90,7 @@ def env(database: Database):
     t1 = client.post("/api/planning/tasks", headers=HA,
                      json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
                            "planning_scope": "route", "target_route_id": route_id}).json()["task_id"]
-    b1 = client.post(f"/api/planning/tasks/{t1}/run", headers=HA).json()
+    b1 = run_route_generate(client, None, t1, headers=HA)
     d1 = state.drafts.get_draft(b1["draft"]["draft_id"], actor_id=user_a)
     client.post(f"/api/planning/drafts/{b1['draft']['draft_id']}/confirm", headers=HA,
                 json={"revision": d1["revision"], "idempotency_key": f"c{uuid.uuid4().hex[:8]}"})

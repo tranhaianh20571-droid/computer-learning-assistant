@@ -41,6 +41,7 @@ from slice3_common import (  # noqa: E402
     SyntheticModelAdapter,
     SyntheticSearchAdapter,
     capability_status,
+    run_route_generate,
 )
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -146,7 +147,7 @@ def _user_with_ready_lesson(env):
     t = client.post("/api/planning/tasks", headers={"Authorization": f"Bearer {token}"},
                     json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
                           "planning_scope": "route", "target_route_id": route_id}).json()["task_id"]
-    body = client.post(f"/api/planning/tasks/{t}/run", headers={"Authorization": f"Bearer {token}"}).json()
+    body = run_route_generate(client, token, t, headers={"Authorization": f"Bearer {token}"})
     draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
     client.post(f"/api/planning/drafts/{body['draft']['draft_id']}/confirm",
                 headers={"Authorization": f"Bearer {token}"},

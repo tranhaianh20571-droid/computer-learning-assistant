@@ -142,6 +142,24 @@ class SyntheticSearchAdapter:
         }
 
 
+def run_route_generate(client, token: str, task_id: str, *, scope: str = "route",
+                       headers: dict | None = None) -> dict:
+    """执行 route_generate 任务；落入 v2 生成前访谈则按默认画像作答后继续。"""
+    H = headers or auth_headers(token)
+    body = client.post(f"/api/planning/tasks/{task_id}/run", headers=H).json()
+    if body.get("wait_state") != "awaiting_intake":
+        return body
+    answers = []
+    if scope:
+        answers.append({"question_id": "scope", "selections": [scope]})
+    answers.append({"question_id": "foundation", "selections": ["some"]})
+    answers.append({"question_id": "depth", "selections": ["practice"]})
+    return client.post(
+        f"/api/planning/tasks/{task_id}/decision", headers=H,
+        json={"kind": "intake", "answers": answers},
+    ).json()
+
+
 def make_user(client, database) -> str:
     """注册 + 置 approved + 登录，返回 (user_id, token)。"""
     from backend.auth.models import UserRow

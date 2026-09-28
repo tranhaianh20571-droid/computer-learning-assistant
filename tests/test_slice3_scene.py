@@ -13,6 +13,7 @@ from slice3_common import (
     SyntheticSearchAdapter,
     auth_headers,
     make_user,
+    run_route_generate,
 )
 
 from backend.planning.scene import (  # noqa: E402
@@ -66,7 +67,7 @@ def _confirmed_route(env):
         json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
               "planning_scope": "route", "target_route_id": route_id},
     ).json()["task_id"]
-    body = client.post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token)).json()
+    body = run_route_generate(client, token, task_id)
     draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
     client.post(
         f"/api/planning/drafts/{body['draft']['draft_id']}/confirm", headers=auth_headers(token),

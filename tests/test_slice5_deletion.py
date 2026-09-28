@@ -37,6 +37,7 @@ from slice3_common import (  # noqa: E402
     SyntheticModelAdapter,
     SyntheticSearchAdapter,
     make_user,
+    run_route_generate,
 )
 
 
@@ -118,7 +119,7 @@ class TestRouteDeletion:
                         json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}",
                               "task_kind": "route_generate", "planning_scope": "route",
                               "target_route_id": route_id}).json()["task_id"]
-        body = client.post(f"/api/planning/tasks/{t}/run", headers=H).json()
+        body = run_route_generate(client, None, t, headers=H)
         assert "draft" in body, body
         draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
         client.post(f"/api/planning/drafts/{body['draft']['draft_id']}/confirm", headers=H,
@@ -165,7 +166,7 @@ class TestCourseDeletion:
                         json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}",
                               "task_kind": "route_generate", "planning_scope": "route",
                               "target_route_id": route_id}).json()["task_id"]
-        body = client.post(f"/api/planning/tasks/{t}/run", headers=H).json()
+        body = run_route_generate(client, None, t, headers=H)
         draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
         client.post(f"/api/planning/drafts/{body['draft']['draft_id']}/confirm", headers=H,
                     json={"revision": draft["revision"], "idempotency_key": f"c{uuid.uuid4().hex[:8]}"})

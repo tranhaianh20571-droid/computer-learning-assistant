@@ -13,6 +13,7 @@ from slice3_common import (
     SyntheticSearchAdapter,
     auth_headers,
     make_user,
+    run_route_generate,
 )
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -60,7 +61,7 @@ def _confirm_route_and_outline(env):
         json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
               "planning_scope": "route", "target_route_id": route_id},
     ).json()["task_id"]
-    body = client.post(f"/api/planning/tasks/{t1}/run", headers=auth_headers(token)).json()
+    body = run_route_generate(client, token, t1)
     draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
     client.post(
         f"/api/planning/drafts/{body['draft']['draft_id']}/confirm", headers=auth_headers(token),
@@ -75,7 +76,7 @@ def _confirm_route_and_outline(env):
         json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "outline_generate",
               "planning_scope": "course", "target_course_id": course_id},
     ).json()["task_id"]
-    body2 = client.post(f"/api/planning/tasks/{t2}/run", headers=auth_headers(token)).json()
+    body2 = client.post(f"/api/planning/tasks/{t2}/run", headers=auth_headers(token)).json()  # outline 无访谈
     outline_draft = env["state"].drafts.get_draft(body2["draft"]["draft_id"], actor_id=user_id)
     client.post(
         f"/api/planning/drafts/{body2['draft']['draft_id']}/confirm", headers=auth_headers(token),

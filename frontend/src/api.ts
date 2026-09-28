@@ -77,11 +77,11 @@ export const api = {
   listConnectors: () => req("/api/connectors"),
   revokeConnector: (bindingId: string) =>
     req(`/api/connectors/${bindingId}/revoke`, { method: "POST" }),
-  taskSse: (taskId: string, lastEventId?: string) => {
+  taskSse: (taskId: string, lastEventId?: string, signal?: AbortSignal) => {
     const headers: Record<string, string> = {};
     if (sessionToken) headers["Authorization"] = `Bearer ${sessionToken}`;
     if (lastEventId) headers["Last-Event-ID"] = lastEventId;
-    return fetch(`${API}/api/tasks/${taskId}/sse`, { headers, credentials: "include" });
+    return fetch(`${API}/api/tasks/${taskId}/sse`, { headers, credentials: "include", signal });
   },
 
   listMaterials: () => req("/api/materials"),

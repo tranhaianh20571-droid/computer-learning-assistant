@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { parseSseFrames } from "./lib/sse";
 
 /**
  * 即时对话（设计稿 9 节 chat 布局）：
@@ -117,29 +118,24 @@ export default function ChatView({ onErr, onOk, needLogin }: {
         const { value, done: rdDone } = await reader.read();
         if (rdDone) break;
         buf += dec.decode(value, { stream: true });
-        const frames = buf.split("\n\n");
-        buf = frames.pop() || "";
-        for (const frame of frames) {
-          const evLine = frame.split("\n").find((l) => l.startsWith("event: "));
-          const dataLine = frame.split("\n").find((l) => l.startsWith("data: "));
-          if (!dataLine) continue;
-          let data: any = {};
-          try { data = JSON.parse(dataLine.slice(6)); } catch { continue; }
-          const type = evLine?.slice(7) || "";
-          if (type === "delta") {
+        const parsed = parseSseFrames(buf);
+        buf = parsed.rest;
+        for (const frame of parsed.frames) {
+          const data = frame.data || {};
+          if (frame.event === "delta") {
             buffer += String(data.text || ""); // 入缓冲，由 Typewriter 上屏
-          } else if (type === "done") {
+          } else if (frame.event === "done") {
             finished = true;
             streamDone = true;
             if (typeof data.external_result_count === "number" && data.external_result_count > 0) {
               setLastExternal(data.external_result_count);
             }
-          } else if (type === "wait") {
+          } else if (frame.event === "wait") {
             streamDone = true;
             await refresh(id);
             onErr("联网搜索失败：请选择重试或离线继续。");
             return;
-          } else if (type === "error") {
+          } else if (frame.event === "error") {
             streamDone = true;
             if (data.error_code === "MODEL_CAPABILITY_UNAVAILABLE") {
               onErr("该模型不支持所需能力，已停止调用（不无限重试）。");

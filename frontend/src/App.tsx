@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, setSessionToken } from "./api";
+import { useEventStream } from "./hooks/useEventStream";
 import CapabilityConfig from "./CapabilityConfig";
 import PlanningView from "./PlanningView";
 import ChatView from "./ChatView";
@@ -489,7 +490,7 @@ function HomeView({ me, onErr, onOk, onNeedLogin }: any) {
   const [taskId, setTaskId] = useState("");
   const [status, setStatus] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
-  const esRef = useRef<AbortController | null>(null);
+  const { runStream } = useEventStream();
 
   const loadStatus = useCallback(async (id: string) => {
     try {
@@ -499,47 +500,24 @@ function HomeView({ me, onErr, onOk, onNeedLogin }: any) {
   }, [onErr]);
 
   const openSse = useCallback(async (id: string) => {
-    esRef.current?.abort();
-    const ctrl = new AbortController();
-    esRef.current = ctrl;
     try {
-      const res = await api.taskSse(id);
-      if (!res.ok || !res.body) {
-        if (res.status === 410) {
-          await loadStatus(id);
-          return;
-        }
-        throw new Error("SSE failed");
-      }
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() || "";
-        for (const part of parts) {
-          const dataLine = part.split("\n").find((l) => l.startsWith("data: "));
-          if (!dataLine) continue;
-          try {
-            const evt = JSON.parse(dataLine.slice(6));
-            setEvents((prev) => [...prev, evt]);
-            setStatus((s: any) =>
-              s
-                ? { ...s, status: evt.status, stage: evt.stage, revision: (s.revision || 0) }
-                : { status: evt.status, stage: evt.stage }
-            );
-          } catch { /* ignore malformed */ }
-        }
-      }
+      await runStream(
+        (signal) => api.taskSse(id, undefined, signal),
+        (frame) => {
+          const evt = frame.data;
+          setEvents((prev) => [...prev, evt]);
+          setStatus((s: any) =>
+            s
+              ? { ...s, status: evt.status, stage: evt.stage, revision: (s.revision || 0) }
+              : { status: evt.status, stage: evt.stage }
+          );
+        },
+        { onExpired: () => loadStatus(id) },
+      );
     } catch (e) {
       if ((e as Error).name !== "AbortError") onErr(errText(e));
     }
-  }, [loadStatus, onErr]);
-
-  useEffect(() => () => esRef.current?.abort(), []);
+  }, [loadStatus, onErr, runStream]);
 
   return (
     <div className="page-w">

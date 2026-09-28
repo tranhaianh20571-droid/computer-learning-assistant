@@ -45,8 +45,10 @@ class TestFieldAllowlist(unittest.TestCase):
 
     def test_unknown_field_rejected(self):
         with self.assertRaises(ContractError) as ctx:
-            validate_field_name("user_question")
+            validate_field_name("totally_unknown_field")
         self.assertEqual(ctx.exception.code, "UNKNOWN_FIELD")
+        # ADR-022：user_question 已进入允许名单（仅内容通道事件可用）
+        validate_field_name("user_question")
 
     def test_forbidden_field_rejected(self):
         for name in ("password", "api_key", "email", "token", "prompt", "url"):

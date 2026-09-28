@@ -25,12 +25,13 @@ class LogLevel(str, Enum):
 
 
 class LogEventType(str, Enum):
-    """事件数据类型：运行日志 / 任务事件 / 审计（可组合）。"""
+    """事件数据类型：运行日志 / 任务事件 / 审计 / 指标 / 内容通道（可组合）。"""
 
     RUNTIME = "runtime"
     TASK = "task"
     AUDIT = "audit"
     METRIC = "metric"
+    CONTENT = "content"
 
 
 class TaskStage(str, Enum):
@@ -139,6 +140,12 @@ ALLOWED_FIELDS: FrozenSet[str] = frozenset(
         # 观测降级
         "degraded",
         "dropped_count",
+        # 外部观测平台标识（ADR-022 删除联动：langfuse 等受控枚举值）
+        "platform",
+        # 内容 trace 通道（ADR-022：仅内容事件可用；其余通道出现即被 sanitize 拒绝）
+        "model_prompt",
+        "model_answer",
+        "user_question",
         # 事件流
         "last_sequence",
         "cursor",
@@ -214,10 +221,19 @@ FIELD_MAX_LENGTH: Mapping[str, int] = {
     "object_type": 40,
     "audit_action": 64,
     "cleanup_stage": 40,
+    # 内容通道三项（ADR-022）：16 KiB 截断
+    "model_prompt": 16384,
+    "model_answer": 16384,
+    "user_question": 16384,
 }
 
 DEFAULT_FIELD_MAX_LENGTH = 120
 MAX_TEMPLATE_PARAMS = 20
+
+# 内容 trace 三项（ADR-022）：只允许出现在含 CONTENT 类型的事件上（logger 强制）
+CONTENT_TRACE_FIELD_NAMES: FrozenSet[str] = frozenset(
+    {"model_prompt", "model_answer", "user_question"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +297,10 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
         ErrorCodeSpec(
             "MODEL_TIMEOUT", TaskStage.GENERATE, True, True, AlertLevel.WARNING,
             "模型调用超时",
+        ),
+        ErrorCodeSpec(
+            "OBSERVABILITY_DELETION_FAILED", TaskStage.CLEANUP, True, False, AlertLevel.WARNING,
+            "外部观测内容删除任务失败（ADR-022 删除联动）",
         ),
         ErrorCodeSpec(
             "BOARD_SCHEMA_INVALID", TaskStage.BOARD, True, True, AlertLevel.WARNING,
@@ -700,6 +720,34 @@ EVENT_REGISTRY: Mapping[str, EventSpec] = {
             frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "capability", "reason"}),
             user_visible=False,
             description="模型/生成调用失败（聚合指标，无内容字段）",
+        ),
+        EventSpec(
+            "model.call.content",
+            (LogEventType.RUNTIME, LogEventType.CONTENT),
+            _COMMON_REQUIRED | frozenset({"stage", "status"}),
+            frozenset(
+                {
+                    "trace_id",
+                    "task_id",
+                    "attempt",
+                    "mode",
+                    "config_id",
+                    "model_prompt",
+                    "model_answer",
+                    "user_question",
+                    "reason",
+                }
+            ),
+            user_visible=False,
+            description="模型调用内容通道（ADR-022：提示词/回答/用户问题，仅内容输出口，开关受控）",
+        ),
+        EventSpec(
+            "observability.deletion.scheduled",
+            (LogEventType.RUNTIME,),
+            _COMMON_REQUIRED | frozenset({"resource_type", "resource_id", "platform", "status"}),
+            frozenset({"trace_id", "owner_user_id", "reason"}),
+            user_visible=False,
+            description="外部观测内容删除任务登记与状态（ADR-022 删除联动）",
         ),
     )
 }

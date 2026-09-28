@@ -62,6 +62,11 @@ _ID_FIELDS = frozenset(
 # 自由文本字段：完整脱敏
 _TEXT_FIELDS = frozenset({"message", "reason", "template_params"})
 
+# 内容 trace 通道字段（ADR-022）：只清理危险控制字符并截断，保留换行/制表结构，
+# 不做值级凭据模式遮蔽（内容完整性优先；凭据防护由字段名级 FORBIDDEN 名单与
+# 适配器层凭据掩码承担）。这些字段只允许出现在内容通道事件上。
+_CONTENT_TEXT_FIELDS = frozenset({"model_prompt", "model_answer", "user_question"})
+
 REDACTED = "[REDACTED]"
 
 
@@ -91,6 +96,10 @@ def redact_sensitive_text(value: str) -> str:
 
 
 def sanitize_string(value: str, field_name: str) -> str:
+    if field_name in _CONTENT_TEXT_FIELDS:
+        # 内容通道字段：仅移除危险控制字符，保留 \n\t/\r 结构（json.dumps
+        # 转义保证单行输出），不做值级遮蔽，只截断
+        return limit_length(_CONTROL_CHARS.sub("", value), field_name)
     value = strip_control_chars(value)
     if field_name in _ID_FIELDS:
         # ID 字段只限长，不做敏感值遮蔽（避免误伤合法 trace/task ID）

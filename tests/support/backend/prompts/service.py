@@ -52,9 +52,18 @@ class PromptService:
     - 哈希不匹配或无后备 → prompt_unavailable
     """
 
-    def __init__(self, db: Database, fallback_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        db: Database,
+        fallback_dir: Optional[Path] = None,
+        langfuse_fetch: Optional[Any] = None,
+    ) -> None:
         self.db = db
         self.fallback_dir = fallback_dir or Path(__file__).resolve().parent / "fallback_templates"
+        # ADR-022：Langfuse 模板拉取器（可选）。签名 fetch(prompt_name) -> dict，
+        # 返回 {"template": str, "version": str}；未注入时 langfuse 源受控报错。
+        # 生产实现走 REST（见 prompts/langfuse_client.py），测试注入合成拉取器。
+        self.langfuse_fetch = langfuse_fetch
 
     def _sha256(self, text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -93,9 +102,18 @@ class PromptService:
             data = self.load_local_template(prompt_name)
             snapshot = data["template"]
             sha = self._sha256(snapshot)
+        elif source == "langfuse":
+            if self.langfuse_fetch is None:
+                raise PromptUnavailable("langfuse adapter not configured in this environment")
+            fetched = self.langfuse_fetch(prompt_name)
+            snapshot = str(fetched.get("template", ""))
+            version = langfuse_version or str(fetched.get("version", ""))
+            if not snapshot or not version:
+                raise PromptUnavailable("langfuse fetch incomplete")
+            langfuse_version = version
+            sha = self._sha256(snapshot)
         else:
-            # Langfuse 路径：生产从 Langfuse 拉取；此处要求调用方传入快照由 adapter 提供
-            raise PromptUnavailable("langfuse adapter not configured in this environment")
+            raise PromptUnavailable(f"unknown source: {source}")
 
         binding_id = f"pbind_{uuid.uuid4().hex[:12]}"
         with self.db.session() as sess:

@@ -24,6 +24,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..logging_audit.logger import monotonic_ms
 from ..logging_audit.metrics import get_model_call_metrics
+from ..logging_audit.content_trace import get_content_trace
 
 # 模式能力失败缓存：输出连续无效的 (适配器签名, 能力) 在 TTL 内直接跳过，
 # 避免每次生成都在已知不支持的模式上烧时间（探测结论的运行时缓存）。
@@ -172,11 +173,20 @@ def run_structured(
             except Exception as exc:  # noqa: BLE001 - 供应商异常 → 受控错误码
                 code = getattr(exc, "code", "MODEL_TIMEOUT")
                 mapped = "MODEL_TIMEOUT" if code == "timeout" else "MODEL_CAPABILITY_UNAVAILABLE"
+                get_content_trace().emit(
+                    stage, "failed", mode=mode,
+                    prompt_messages=call_messages, reason=mapped,
+                )
                 get_model_call_metrics().record(
                     stage=stage, outcome="failed", mode=mode,
                     error_code=mapped, duration_ms=monotonic_ms() - call_started,
                 )
                 raise error(mapped) from exc
+            get_content_trace().emit(
+                stage, "succeeded", mode=mode,
+                prompt_messages=call_messages,
+                answer=raw.get("content") if isinstance(raw, dict) else raw,
+            )
             get_model_call_metrics().record(
                 stage=stage, outcome="succeeded", mode=mode,
                 duration_ms=monotonic_ms() - call_started,
@@ -257,11 +267,17 @@ def run_chat(adapter: Any, messages: list[dict], *, max_len: int, stage: str = "
     except Exception as exc:  # noqa: BLE001
         code = getattr(exc, "code", "MODEL_TIMEOUT")
         mapped = "MODEL_TIMEOUT" if code == "timeout" else "MODEL_CAPABILITY_UNAVAILABLE"
+        get_content_trace().emit(
+            stage, "failed", prompt_messages=messages, reason=mapped,
+        )
         get_model_call_metrics().record(
             stage=stage, outcome="failed", error_code=mapped,
             duration_ms=monotonic_ms() - call_started,
         )
         raise error(mapped) from exc
+    get_content_trace().emit(
+        stage, "succeeded", prompt_messages=messages, answer=content,
+    )
     get_model_call_metrics().record(
         stage=stage, outcome="succeeded", duration_ms=monotonic_ms() - call_started,
     )

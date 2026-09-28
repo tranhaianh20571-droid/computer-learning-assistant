@@ -15,10 +15,12 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, TextIO
 
 from .contracts import (
+    CONTENT_TRACE_FIELD_NAMES,
     REQUIRED_COMMON_FIELDS,
     SCHEMA_VERSION,
     ContractError,
     EventSpec,
+    LogEventType,
     LogLevel,
     validate_error_code,
     validate_event_name,
@@ -47,10 +49,12 @@ class StructuredLogger:
         environment: str = "development",
         stream: Optional[TextIO] = None,
         strict: bool = True,
+        content_stream: Optional[TextIO] = None,
     ) -> None:
         self.service = service
         self.environment = environment
         self.stream = stream if stream is not None else sys.stdout
+        self.content_stream = content_stream  # ADR-022：内容通道独立输出口（未设则回落主口）
         self.strict = strict
         self._clock = utc_now_iso
 
@@ -80,6 +84,14 @@ class StructuredLogger:
             validate_status(status)
         if error_code is not None:
             validate_error_code(error_code)
+        # ADR-022：内容三项只属于内容通道事件——非 CONTENT 事件携带即契约错误
+        if LogEventType.CONTENT not in spec.types:
+            offending = CONTENT_TRACE_FIELD_NAMES.intersection(fields.keys())
+            if offending:
+                raise ContractError(
+                    "CONTENT_FIELD_ON_NON_CONTENT_EVENT",
+                    f"内容字段只允许出现在内容通道事件上: {sorted(offending)}",
+                )
 
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -117,9 +129,12 @@ class StructuredLogger:
         self._validate_required(spec, record)
         sanitized = sanitize_record(record)
         line = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        self.stream.write(line + "\n")
-        if hasattr(self.stream, "flush"):
-            self.stream.flush()
+        target = self.stream
+        if LogEventType.CONTENT in spec.types and self.content_stream is not None:
+            target = self.content_stream
+        target.write(line + "\n")
+        if hasattr(target, "flush"):
+            target.flush()
         return sanitized
 
     def _validate_required(self, spec: EventSpec, record: Mapping[str, Any]) -> None:

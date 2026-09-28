@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     # 切片 1：凭据加密主密钥（AES-256-GCM）。不写仓库、不写日志。
     # 未配置时能力配置写入返回受控错误，不影响切片 0 链路。
     APP_ENCRYPTION_KEY: str | None = None
+    # ADR-022：OTel/Langfuse 观测（OTLP 出口）与内容 trace 通道。
+    # 密钥只从环境变量/.env 读取，不写日志、不进事件；未配置时整链路 no-op。
+    OTEL_ENABLED: bool = False
+    OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
+    LANGFUSE_BASE_URL: str | None = None
+    LANGFUSE_PUBLIC_KEY: str | None = None
+    LANGFUSE_SECRET_KEY: str | None = None
+    # 内容三项（提示词/回答/用户问题）记录总开关；关闭时内容通道零产出。
+    CONTENT_TRACE_ENABLED: bool = False
 
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":

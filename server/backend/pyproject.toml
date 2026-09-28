@@ -24,6 +24,9 @@ dependencies = [
     "pypdfium2>=5.13.0",
     "jieba>=0.42.1",
     "pillow>=12.3.0",
+    "pydantic-ai-slim>=2.51.0",
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-exporter-otlp-proto-http>=1.24",
 ]
 
 [dependency-groups]

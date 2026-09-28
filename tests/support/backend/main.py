@@ -21,6 +21,15 @@ def custom_generate_unique_id(route: APIRoute) -> str:
 if settings.SENTRY_DSN and settings.FASTAPI_ENV != "development":
     sentry_sdk.init(dsn=str(settings.SENTRY_DSN), enable_tracing=True)
 
+# ADR-022：OTel 装配（OTLP → Langfuse）。未启用/缺端点时 no-op；
+# 导出失败由批处理器丢弃，核心任务不受影响。
+try:
+    from app.logging_audit.otel_setup import otel_from_env
+
+    otel_from_env(service_name=str(settings.PROJECT_NAME))
+except Exception:  # noqa: BLE001 — 观测装配失败不阻塞应用启动
+    pass
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",

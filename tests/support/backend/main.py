@@ -52,6 +52,10 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 # 由独立子应用提供 PRD 所需的邮箱验证、审批、持久会话、任务围栏、
 # 提示词绑定和 SSE 路由。模板自身的 /api/v1 路由仍保留作工程能力入口。
 os.environ.setdefault("LEARNING_DATABASE_URL", str(settings.DATABASE_URL))
+# ADR-022：内容通道开关经 settings 解析（真实环境变量 > .env）后同步到
+# 进程环境，供 logging_audit.content_trace 读取（沿用上方桥接模式）。
+# 当前本机配置：只开本地内容记录，OTel/Langfuse 保持关闭。
+os.environ["CONTENT_TRACE_ENABLED"] = "1" if settings.CONTENT_TRACE_ENABLED else "0"
 from app.slice0_app import app as slice0_app  # noqa: E402
 
 # 切片 1：能力配置、外发确认与本机连接器。

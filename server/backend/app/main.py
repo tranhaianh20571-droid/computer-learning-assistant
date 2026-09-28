@@ -1,65 +1,8 @@
-import os
-from pathlib import Path
+"""产品入口（薄壳）：装配见 app/assembler.py（重构方案 O-A）。
 
-import sentry_sdk
-from fastapi import FastAPI
-from fastapi.routing import APIRoute
-from starlette.middleware.cors import CORSMiddleware
+启动：`uvicorn app.main:app`（server/backend 目录下）。
+"""
 
-from app.api.main import api_router
-from app.core.config import settings
-from app.slice1_app import create_slice1_app
+from app.assembler import create_app
 
-# 架构要求：不复用模板前端界面/组件库。产品前端位于仓库 frontend/。
-FRONTEND_DIR = Path(__file__).parent / "frontend"
-
-
-def custom_generate_unique_id(route: APIRoute) -> str:
-    return f"{route.tags[0]}-{route.name}"
-
-
-if settings.SENTRY_DSN and settings.FASTAPI_ENV != "development":
-    sentry_sdk.init(dsn=str(settings.SENTRY_DSN), enable_tracing=True)
-
-# ADR-022：OTel 装配（OTLP → Langfuse）。未启用/缺端点时 no-op；
-# 导出失败由批处理器丢弃，核心任务不受影响。
-try:
-    from app.logging_audit.otel_setup import otel_from_env
-
-    otel_from_env(service_name=str(settings.PROJECT_NAME))
-except Exception:  # noqa: BLE001 — 观测装配失败不阻塞应用启动
-    pass
-
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    generate_unique_id_function=custom_generate_unique_id,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.FRONTEND_HOST],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(api_router, prefix=settings.API_V1_STR)
-# 模板前端已按架构移除；产品 UI 由 frontend/ 独立提供
-# app.frontend("/", directory=FRONTEND_DIR)
-
-# 切片 0 产品 API：使用模板的配置/迁移/运行时作为唯一后端基线，
-# 由独立子应用提供 PRD 所需的邮箱验证、审批、持久会话、任务围栏、
-# 提示词绑定和 SSE 路由。模板自身的 /api/v1 路由仍保留作工程能力入口。
-os.environ.setdefault("LEARNING_DATABASE_URL", str(settings.DATABASE_URL))
-# ADR-022：内容通道开关经 settings 解析（真实环境变量 > .env）后同步到
-# 进程环境，供 logging_audit.content_trace 读取（沿用上方桥接模式）。
-# 当前本机配置：只开本地内容记录，OTel/Langfuse 保持关闭。
-os.environ["CONTENT_TRACE_ENABLED"] = "1" if settings.CONTENT_TRACE_ENABLED else "0"
-from app.slice0_app import app as slice0_app  # noqa: E402
-
-# 切片 1：能力配置、外发确认与本机连接器。
-# 凭据加密主密钥从环境变量 APP_ENCRYPTION_KEY 读取；未配置时配置写入返回受控错误，
-# 不影响切片 0 的身份/任务链路启动。
-slice1_app = create_slice1_app()
-app.mount("/", slice1_app)
+app = create_app()

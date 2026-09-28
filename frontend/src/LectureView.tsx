@@ -33,6 +33,7 @@ export default function LectureView({ conversationId, onErr, onOk, go }: {
   const [followup, setFollowup] = useState("");
   const [busy, setBusy] = useState(false);
   const [pendingTask, setPendingTask] = useState<string | null>(null);
+  const [savedAt, setSavedAt] = useState("");
   const seqRef = useRef(0);
   const posRef = useRef(0);
 
@@ -81,6 +82,7 @@ export default function LectureView({ conversationId, onErr, onOk, go }: {
       await api.saveCheckpoint(conversationId, {
         client_seq: seqRef.current, step_no: stepNo, position_ms: positionMs,
       });
+      setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
     } catch (e: any) {
       if (e?.code === "CHECKPOINT_STALE") {
         onErr("位置保存冲突：已按服务端最新位置校准。");
@@ -169,11 +171,15 @@ export default function LectureView({ conversationId, onErr, onOk, go }: {
           ← <span>退出讲次</span>
         </button>
         <div className="lecture-current">
-          <b>{step?.title || "讲次教学"}</b>
-          <span>conversation={conversationId} · generation={ws.generation}</span>
+          <b className="serif">{step?.title || "讲次教学"}</b>
+          <span>第 {current} 步 · 共 {ws.steps.length || "…"} 步</span>
         </div>
+        {ws.steps.length > 0 && (
+          <span className="idtag" aria-label="讲次进度">{Math.round((current / ws.steps.length) * 100)}%</span>
+        )}
         <span className="lecture-zoom">{playing ? "播放中" : "已暂停"}</span>
         <span className="lecture-spacer" />
+        {savedAt && <span className="help">位置已保存 {savedAt}</span>}
         <div className="row" style={{ gap: 8 }}>
           <button className="btn btn-sm" onClick={togglePlay} disabled={busy}>
             {playing ? "暂停" : noAudio ? "手动推进" : "播放"}
@@ -299,7 +305,7 @@ export default function LectureView({ conversationId, onErr, onOk, go }: {
               <button className="btn btn-pri" onClick={sendFollowup} disabled={busy || !followup.trim()}>追问</button>
             </div>
             <div className="hint">
-              <span>追问会暂停原课程并创建恢复点；回答后点「继续课程 · 不自动播放」恢复。</span>
+              <span>输入不会打断讲解；发送后才会暂停并创建恢复点，回答后点「继续课程 · 不自动播放」。</span>
               <span><kbd>位置</kbd> 每 5 秒自动保存</span>
             </div>
           </div>

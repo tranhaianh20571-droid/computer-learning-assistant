@@ -127,6 +127,9 @@ export const api = {
     req("/api/planning/routes", { method: "POST", body: JSON.stringify({ title, scenario }) }),
   createCourse: (body: Record<string, unknown>) =>
     req("/api/planning/courses", { method: "POST", body: JSON.stringify(body) }),
+  listCourses: () => req("/api/planning/courses"),
+  getNavigation: () => req("/api/navigation"),
+  adminPending: () => req("/api/auth/admin/pending"),
   createPlanningTask: (body: Record<string, unknown>) =>
     req("/api/planning/tasks", { method: "POST", body: JSON.stringify(body) }),
   runPlanningTask: (taskId: string) =>

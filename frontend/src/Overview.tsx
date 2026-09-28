@@ -181,19 +181,29 @@ export function CourseOverview({ courseId, onErr, onOk, go }: {
     }
   };
 
+  const allLessons = (overview.units || []).flatMap((u: any) => u.lessons || []);
+  const lessonTotal = overview.progress?.lesson_total ?? allLessons.length;
+  const lessonStarted = overview.progress?.lesson_started ?? 0;
+  const pct = lessonTotal > 0 ? Math.min(100, Math.round((lessonStarted / lessonTotal) * 100)) : 0;
+  const next = allLessons.find(
+    (l: any) => l.learning_state !== "user_completed" && l.startable && overview.teaching_unlocked,
+  );
+  const nextUnit = next && (overview.units || []).find((u: any) => u.lessons?.some((l: any) => l.lesson_id === next.lesson_id));
+  const title = overview.title || courseId;
+
   return (
-    <div className="course">
+    <div className="ccourse">
       <aside className="c-info">
-        <div className="od-stack" style={{ ["--od-gap" as any]: "8px" }}>
-          <span className="kicker">课程 · {overview.scenario === "school" ? "学校课程" : "自学"}</span>
-          <h1>课程总览</h1>
+        <button className="btn btn-sm" onClick={() => go("/courses")}>← 返回课程</button>
+        <div className={`ccover ${["tone-a", "tone-b", "tone-c", "tone-d", "tone-e"][courseId.length % 5]}`}>
+          <span className="mono" aria-hidden="true">{title.trim().charAt(0).toUpperCase()}</span>
         </div>
+        <span className="kicker">课程 · {overview.scenario === "school" ? "学校课程" : "自学"}</span>
+        <h1 className="serif" style={{ fontSize: 26, lineHeight: 1.4, margin: 0 }}>{title}</h1>
         <div className="blk">
           <span className="k">大纲版本</span>
           {overview.outline_confirmed ? (
-            <div className="row">
-              <span className="ver ver-conf">已确认 v{overview.version_no}</span>
-            </div>
+            <span className="ver ver-conf">已确认 v{overview.version_no}</span>
           ) : (
             <>
               <span className="ver ver-draft">草稿 · 从未确认</span>
@@ -204,8 +214,9 @@ export function CourseOverview({ courseId, onErr, onOk, go }: {
         {overview.outline_confirmed && (
           <div className="blk c-prog">
             <span className="k">课程进度</span>
-            <span className="n num">{overview.progress?.lesson_started ?? 0} <small>/ {overview.progress?.lesson_total ?? 0} 讲 已开始</small></span>
-            <span className="help">只统计当前已确认大纲的讲次等权进度；完成状态写入由后续版本提供。</span>
+            <div className="bigpct">{pct}% <small>已开始 {lessonStarted}/{lessonTotal} 讲</small></div>
+            <div className="bar" role="img" aria-label={`进度 ${pct}%`}><i style={{ width: `${pct}%` }} /></div>
+            <span className="help">只统计当前已确认大纲的讲次等权进度。</span>
           </div>
         )}
         {overview.source_route_version_id && (
@@ -214,20 +225,6 @@ export function CourseOverview({ courseId, onErr, onOk, go }: {
             <span className="help">由学习路线展开生成；安排过先修 ≠ 已掌握，请按先修顺序学习。</span>
           </div>
         )}
-        <div className="blk">
-          <span className="k">单元</span>
-          <ul className="units">
-            {(overview.units || []).map((u: any, i: number) => (
-              <li key={u.unit_id}>
-                <a href={`#unit-${u.unit_id}`}>
-                  <span className="n">{String(i + 1).padStart(2, "0")}</span>
-                  <span className="od-truncate">{u.title}</span>
-                  <span className="c">{u.lesson_count} 讲</span>
-                </a>
-              </li>
-            ))}
-          </ul>
-        </div>
         <div className="blk">
           <button className="btn btn-sm" onClick={() => go("/planning")}>去调整规划</button>
           <span className="help">调整大纲会产生或编辑草稿，不会覆盖已确认的内容。</span>
@@ -242,11 +239,52 @@ export function CourseOverview({ courseId, onErr, onOk, go }: {
             <div>确认之后才能开始学习；确认不会启动整课的讲解生成或语音合成。</div>
           </div>
         )}
-        {(overview.units || []).map((u: any) => (
-          <div key={u.unit_id} id={`unit-${u.unit_id}`}>
+
+        {overview.outline_confirmed && (
+          <div
+            className="action-card"
+            style={{ marginBottom: 18, cursor: "pointer" }}
+            role="button"
+            tabIndex={0}
+            onClick={() => go("/materials")}
+            onKeyDown={(e) => { if (e.key === "Enter") go("/materials"); }}
+          >
+            <span className="plus" aria-hidden="true">＋</span>
+            <div style={{ flex: 1 }}>
+              <b>上传资料，扩展这门课程</b>
+              <p className="help" style={{ margin: "2px 0 0" }}>上传新的 PDF，或直接描述你想添加、修改的内容。</p>
+            </div>
+            <span className="btn">去准备资料</span>
+          </div>
+        )}
+
+        {overview.outline_confirmed && (
+          <div className="row" style={{ gap: 14, marginBottom: 22, flexWrap: "wrap" }}>
+            <span className="unitdots" aria-label={`共 ${(overview.units || []).length} 个单元`}>
+              {(overview.units || []).map((u: any) => {
+                const ls = u.lessons || [];
+                const allDone = ls.length > 0 && ls.every((l: any) => l.learning_state === "user_completed");
+                return <i key={u.unit_id} className={allDone ? "on" : ""} title={u.title} />;
+              })}
+            </span>
+            {next ? (
+              <button className="nextpill" onClick={() => start(next.lesson_id, true, "")}>
+                <span className="kicker">下一步</span>
+                <b>{next.title || "下一讲"}</b>
+                <span aria-hidden="true">›</span>
+              </button>
+            ) : (
+              <span className="ver ver-conf">全部讲次已完成 🎉</span>
+            )}
+            {nextUnit && <span className="help">{nextUnit.title} · 共 {lessonTotal} 讲</span>}
+          </div>
+        )}
+
+        {(overview.units || []).map((u: any, ui: number) => (
+          <div key={u.unit_id} id={`unit-${u.unit_id}`} style={{ marginBottom: 28 }}>
             <div className="unit-h">
-              <span className="k">单元 · {u.lesson_count} 讲</span>
-              <h2 className="h2">{u.title}</h2>
+              <span className="k">第 {ui + 1} 单元，共 {(overview.units || []).length} 单元 · {u.lesson_count} 讲</span>
+              <h2 className="h2 serif">{u.title}</h2>
             </div>
             <ol className="lecs">
               {u.lessons?.map((l: any) => {
@@ -258,7 +296,7 @@ export function CourseOverview({ courseId, onErr, onOk, go }: {
                     : "进入后从第 1 步开始生成";
                 return (
                   <li className={`lec${overview.teaching_unlocked ? "" : " locked"}`} key={l.lesson_id}>
-                    <span className="no">L{String(l.order_index + 1).padStart(2, "0")}</span>
+                    <span className="no">{String(l.order_index + 1).padStart(2, "0")}</span>
                     <div>
                       <h3>{l.title || l.goal || l.lesson_id}</h3>
                       {l.prereq_arranged && <p className="desc">有先修讲次；安排过先修 ≠ 已掌握。</p>}
@@ -288,7 +326,6 @@ export function CourseOverview({ courseId, onErr, onOk, go }: {
             </ol>
           </div>
         ))}
-        <div className="idtag" style={{ marginTop: 16 }}>course_id={courseId}</div>
       </section>
     </div>
   );

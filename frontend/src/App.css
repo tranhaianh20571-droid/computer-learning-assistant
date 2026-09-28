@@ -182,3 +182,64 @@
     border-right-color: var(--border);
   }
 }
+
+/* ==================== v2 布局：侧栏徽标 / 任务卡 / 课程列表 / 杂志化详情 ==================== */
+.nav-badge { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font: 600 11px/20px var(--mono); text-align: center; }
+.side-foot .nav-a { width: 100%; text-align: left; }
+
+/* 首页任务卡 */
+.task-card { border: 1px solid var(--rule); background: #fff; border-radius: 14px; padding: 14px 16px 12px; box-shadow: 0 1px 0 rgba(21, 23, 26, .03); }
+.task-type { display: inline-flex; border: 1px solid var(--rule); border-radius: 9px; overflow: hidden; margin-bottom: 10px; background: #F3F4F0; }
+.task-type button { padding: 7px 16px; font: 500 13px/1.4 var(--sans, inherit); border: none; background: none; cursor: pointer; color: var(--ink2); }
+.task-type button[aria-checked="true"] { background: var(--ink); color: #fff; }
+.attach-wrap { position: relative; }
+.attach-btn { border: none; background: none; font: 500 13px/1.6 var(--sans, inherit); color: var(--ink2); cursor: pointer; padding: 5px 8px; border-radius: 8px; }
+.attach-btn:hover { background: #EEF0EC; color: var(--ink); }
+.attach-pop { position: absolute; bottom: calc(100% + 8px); left: 0; min-width: 300px; background: #fff; border: 1px solid var(--rule); border-radius: 12px; box-shadow: 0 14px 34px rgba(21, 23, 26, .14); padding: 6px; z-index: 40; max-height: 260px; overflow: auto; }
+.attach-pop button { display: flex; width: 100%; align-items: center; gap: 8px; padding: 8px 10px; border: none; background: none; font: inherit; font-size: 13px; cursor: pointer; border-radius: 8px; text-align: left; }
+.attach-pop button:hover { background: #F2F3EF; }
+
+/* 课程列表 */
+.courses-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 4px 0 22px; flex-wrap: wrap; }
+.search-inp { max-width: 300px; border-radius: 999px; padding: 9px 18px; }
+.course-grid { display: grid; gap: 22px; }
+.ccard { display: grid; grid-template-columns: 190px 1fr 210px; border: 1px solid var(--rule); border-radius: 16px; overflow: hidden; background: #fff; }
+.ccard-cover { border: none; cursor: pointer; min-height: 176px; display: flex; align-items: center; justify-content: center; }
+.mono { width: 94px; height: 94px; border: 2.5px dashed currentColor; border-radius: 50% 46% 52% 48%; display: flex; align-items: center; justify-content: center; font-family: var(--serif); font-size: 46px; font-weight: 600; opacity: .8; }
+.tone-a .ccard-cover { background: #DBE7F6; color: #1F3F77; }
+.tone-b .ccard-cover { background: #DDF0E4; color: #1F5C3A; }
+.tone-c .ccard-cover { background: #F6EBDD; color: #6B4423; }
+.tone-d .ccard-cover { background: #EFE3F4; color: #5A2E73; }
+.tone-e .ccard-cover { background: #FBE3E3; color: #7A2E2E; }
+.ccard-body { padding: 18px 22px; display: flex; flex-direction: column; gap: 9px; }
+.ccard-body h2 { font-family: var(--serif); font-size: 22px; line-height: 1.4; margin: 0; font-weight: 600; }
+.ccard-body h2 a { color: inherit; text-decoration: none; }
+.ccard-body h2 a:hover { color: var(--accent); }
+.bar { position: relative; height: 8px; border-radius: 999px; background: #E7E9E3; margin-top: auto; }
+.bar > i { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 999px; background: var(--accent); }
+.bar .num { position: absolute; right: 0; top: -24px; font-size: 12px; color: var(--ink2); }
+.ccard-side { border-left: 1px solid var(--rule); padding: 18px 18px; display: flex; flex-direction: column; gap: 10px; justify-content: center; }
+.next-title { font-size: 14px; line-height: 1.55; margin: 0; }
+.od-truncate-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* 杂志化课程详情 */
+.ccourse { display: grid; grid-template-columns: 300px 1fr; gap: 30px; align-items: start; }
+.ccover { border-radius: 14px; height: 210px; display: flex; align-items: center; justify-content: center; margin-bottom: 16px; }
+.ccover .mono { width: 112px; height: 112px; font-size: 58px; }
+.bigpct { font-family: var(--serif); font-size: 46px; line-height: 1.1; font-weight: 600; }
+.bigpct small { font-size: 14px; font-family: inherit; color: var(--ink2); font-weight: 400; }
+.unitdots { display: flex; gap: 8px; align-items: center; }
+.unitdots i { width: 13px; height: 13px; border: 1.5px solid var(--rule2); border-radius: 50%; }
+.unitdots i.on { background: var(--accent); border-color: var(--accent); }
+.nextpill { display: inline-flex; gap: 12px; align-items: center; border: 1px solid var(--rule); background: #fff; border-radius: 999px; padding: 9px 18px; cursor: pointer; font: inherit; font-size: 14px; }
+.nextpill b { font-weight: 600; }
+.nextpill:hover { border-color: var(--accent); }
+.action-card { display: flex; gap: 14px; align-items: center; border: 1px solid var(--rule); background: #fff; border-radius: 12px; padding: 14px 18px; }
+.action-card .plus { font-size: 22px; color: var(--accent); }
+/* 讲次行沿用既有 .lecs/.lec/.no */
+@media (max-width: 900px) {
+  .ccard { grid-template-columns: 1fr; }
+  .ccard-cover { min-height: 120px; }
+  .ccard-side { border-left: none; border-top: 1px solid var(--rule); }
+  .ccourse { grid-template-columns: 1fr; }
+}

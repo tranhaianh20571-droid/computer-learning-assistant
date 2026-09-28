@@ -194,7 +194,7 @@ export default function ChatView({ onErr, onOk, needLogin }: {
       <div className="chat-head">
         <h1>即时对话</h1>
         <span className="help">
-          {convId ? `conversation=${convId} · generation=${generation}` : "尚无会话"} · 不需要路线或课程 · 只有文字，没有板书和音频
+          {(convId ? "会话进行中" : "尚无会话") + " · 不需要路线或课程 · 只有文字，没有板书和音频"}
         </span>
         <span className="sp" />
         <label className="help" style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
@@ -248,9 +248,10 @@ export default function ChatView({ onErr, onOk, needLogin }: {
             </div>
           ))}
           {turns.length > 0 && lastExternal !== null && lastExternal > 0 && (
-            <div className="searchok" role="status">
-              <span className="kicker">外部来源</span>
-              <span>本次回答参考了 <b className="num">{lastExternal}</b> 条外部搜索结果（source=external，与资料内容分开标记）。</span>
+            <div className="note note-info" role="status">
+              <span className="tag">外部来源</span>
+              <div className="tt">本次回答参考了 <b className="num">{lastExternal}</b> 条外部搜索结果</div>
+              <div>来源与你的资料内容分开标记（source=external）。</div>
             </div>
           )}
           {liveText !== null && (
@@ -297,7 +298,6 @@ export default function ChatView({ onErr, onOk, needLogin }: {
               <button className="btn btn-pri" onClick={send} disabled={busy || !input.trim()}>发送</button>
             </div>
             <div className="hint">
-              <span>新追问会使当前轮次加一；旧回答保留为历史；刷新只恢复已保存内容。</span>
               <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 发送</span>
             </div>
           </div>

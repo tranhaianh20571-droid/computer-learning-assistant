@@ -5,6 +5,7 @@ import { useSession } from "./hooks/useSession";
 import { AUTH_LEFT, LoginView, RegisterView, ResetView, VerifyView } from "./views/auth/AuthPages";
 import AdminView from "./views/AdminView";
 import CanvasView from "./views/CanvasView";
+import CoursesPage from "./views/CoursesPage";
 import TasksView from "./views/TasksView";
 import CapabilityConfig from "./CapabilityConfig";
 import PlanningView from "./PlanningView";
@@ -14,18 +15,21 @@ import { CourseOverview, RouteOverview } from "./Overview";
 import MaterialsPage from "./MaterialsPage";
 import LectureView from "./LectureView";
 import "./tokens.css";
+import "./App.css";
 
 /**
- * 应用骨架（对齐设计规范 ds-1「工程制图 / 技术手册」）：
- * - 路由/会话状态在 hooks（useHashRoute / useSession），视图在 views/，共享原语在 lib/ 与 ui/；
- * - 登录/注册/验证/重置为独立整页路由（.auth 双栏，无侧栏）；
- * - 应用骨架为 .app 双栏：深色侧栏（分组导航 + 账户脚注）+ .main（顶栏面包屑 + .page）。
+ * 应用骨架（对齐设计规范 ds-1「工程制图 / 技术手册」，v2 布局收敛）：
+ * - 侧栏三组：开始（新的学习任务）/ 学习（课程、课程规划、我的资料）/ 管理（注册审批+徽标）；
+ *   任务状态与即时对话撤出主导航（路由保留：/tasks 由规划流程进入，/chat 由首页切换进入）；
+ * - 认证页与讲次教学工作区为独立整页（无侧栏）：讲次是全屏播放模式；
+ * - 路由/会话状态在 hooks，视图在 views/，共享原语在 lib/ 与 ui/。
  */
 export default function App() {
   const { me, setMe, booted } = useSession();
   const { route, navigate } = useHashRoute();
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [pendingCount, setPendingCount] = useState(0);
 
   const go = useCallback((path: string) => {
     setError("");
@@ -34,8 +38,17 @@ export default function App() {
     navigate(path);
   }, [navigate]);
 
-  // 移动端抽屉侧栏：点外部 / Escape / 导航跳转时收起
-  // （hooks 必须位于早退 return 之前）
+  // 管理员：待审批数徽标
+  useEffect(() => {
+    if (!me?.is_admin) { setPendingCount(0); return; }
+    let alive = true;
+    api.adminPending()
+      .then((r: any) => { if (alive) setPendingCount((r.data || []).length); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [me?.is_admin, route]);
+
+  // 移动端抽屉侧栏：点外部 / Escape / 导航跳转时收起（hooks 必须位于早退 return 之前）
   const closeSide = useCallback(() => {
     document.getElementById("side")?.classList.remove("open");
   }, []);
@@ -60,7 +73,6 @@ export default function App() {
     };
   }, [closeSide]);
 
-  // 登录/注册/验证/重置：独立整页路由（无侧栏）
   const isAuthRoute = ["/login", "/register", "/verify", "/reset"].includes(route);
   if (!booted) return <div className="auth"><div className="auth-r"><p className="muted">加载中…</p></div></div>;
 
@@ -95,14 +107,27 @@ export default function App() {
     );
   }
 
+  // 讲次教学工作区：全屏播放模式（无侧栏/顶栏骨架）
+  if (route.startsWith("/lecture/")) {
+    return (
+      <LectureView
+        conversationId={route.slice("/lecture/".length)}
+        onErr={setError}
+        onOk={setNotice}
+        go={go}
+      />
+    );
+  }
+
   // ---------- 导航分组 ----------
-  const navItem = (path: string, label: string) => (
+  const navItem = (path: string, label: string, badge?: number) => (
     <button
       className="nav-a"
       aria-current={route === path ? "page" : undefined}
       onClick={() => go(path)}
     >
-      {label}
+      <span>{label}</span>
+      {badge !== undefined && badge > 0 && <span className="nav-badge" aria-label={`待审批 ${badge} 项`}>{badge}</span>}
     </button>
   );
 
@@ -110,11 +135,11 @@ export default function App() {
     "/home": ["新的学习任务"],
     "/chat": ["即时对话"],
     "/planning": ["课程规划"],
+    "/courses": ["课程"],
     "/materials": ["资料准备"],
-    "/lecture": ["讲次教学"],
     "/tasks": ["任务状态"],
     "/admin": ["管理员审批"],
-    "/capabilities": ["能力配置"],
+    "/capabilities": ["设置"],
   };
   const crumbHere = CRUMBS[route] || (route.startsWith("/route/") ? ["学习路线"] : route.startsWith("/course/") ? ["课程"] : []);
   const sideOpen = () => document.getElementById("side")?.classList.toggle("open");
@@ -124,31 +149,25 @@ export default function App() {
       <nav className="side" id="side" aria-label="主导航">
         <div className="brand"><span className="wm">学伴</span><span className="sub">CS · STUDY</span></div>
         <div className="nav-g">
-          <span className="gl">空间</span>
+          <span className="gl">开始</span>
           {navItem("/home", "新的学习任务")}
-          {navItem("/chat", "即时对话")}
-          {navItem("/planning", "课程规划")}
         </div>
         <div className="nav-g">
           <span className="gl">学习</span>
+          {navItem("/courses", "课程")}
+          {navItem("/planning", "课程规划")}
           {navItem("/materials", "我的资料")}
-          {navItem("/tasks", "任务状态")}
         </div>
         {me?.is_admin && (
           <div className="nav-g">
             <span className="gl">管理</span>
-            {navItem("/admin", "管理员审批")}
-          </div>
-        )}
-        {me && (
-          <div className="nav-g">
-            <span className="gl">配置</span>
-            {navItem("/capabilities", "能力配置")}
+            {navItem("/admin", "注册审批", pendingCount)}
           </div>
         )}
         <div className="side-foot">
           {me ? (
             <>
+              <button className="nav-a" onClick={() => go("/capabilities")}>设置</button>
               <span className="who">{me.email}</span>
               <button
                 onClick={async () => {
@@ -183,13 +202,20 @@ export default function App() {
           {route === "/home" && (
             <TaskEntry me={me} onErr={setError} onOk={setNotice} go={go} />
           )}
+          {route === "/courses" && (
+            <CoursesPage me={me} onErr={setError} onOk={setNotice} go={go} />
+          )}
           {route === "/materials" && me && (
             <MaterialsPage onErr={setError} onOk={setNotice} />
           )}
           {route === "/tasks" && (
             <TasksView me={me} onErr={setError} onOk={setNotice} onNeedLogin={() => go("/login")} />
           )}
-          {route === "/admin" && me?.is_admin && <AdminView onErr={setError} onOk={setNotice} />}
+          {route === "/admin" && me?.is_admin && (
+            <AdminView onErr={setError} onOk={setNotice} onChanged={() => {
+              api.adminPending().then((r: any) => setPendingCount((r.data || []).length)).catch(() => {});
+            }} />
+          )}
           {route === "/canvas" && <CanvasView />}
           {route === "/capabilities" && me && (
             <CapabilityConfig isAdmin={me.is_admin} onErr={setError} onOk={setNotice} />
@@ -205,9 +231,6 @@ export default function App() {
           )}
           {route.startsWith("/course/") && (
             <CourseOverview courseId={route.slice("/course/".length)} onErr={setError} onOk={setNotice} go={go} />
-          )}
-          {route.startsWith("/lecture/") && (
-            <LectureView conversationId={route.slice("/lecture/".length)} onErr={setError} onOk={setNotice} go={go} />
           )}
         </main>
       </div>

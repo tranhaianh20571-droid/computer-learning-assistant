@@ -648,19 +648,17 @@ class TeachingService:
             adapter = self._model_adapter(owner, task_id)
             if adapter is None:
                 raise terr("MODEL_CAPABILITY_UNAVAILABLE", "no model adapter")
-            from ..planning.model_runner import run_structured
+            from ..agents.runner import run_structured_agent
 
             prompt = self.prompts.resolve_for_task(task_id)
-            run = run_structured(
+            answer = run_structured_agent(
                 adapter, FollowupCandidate,
                 [
                     {"role": "system", "content": "你是授课教师。只输出符合要求的 JSON。"},
                     {"role": "user", "content": f"{prompt.get('template_snapshot', '')}\n问题：{question_text}"},
                 ],
-                schema=FollowupCandidate.model_json_schema(),
                 tool_name="submit_followup",
             )
-            answer = run.payload
             with self.db.session() as sess:
                 if answer.board is not None:
                     scene = declaration_to_scene(answer.board)

@@ -419,7 +419,12 @@ class ChatService:
             {"role": "system", "content": "你是学习助手，用中文简洁回答。"},
             {"role": "user", "content": content},
         ]
-        answer = run_chat(adapter, messages, max_len=MAX_MESSAGE_LEN)
+        # S1b：经 AgentRunner（同步形态冻结，见 agents/runner.py docstring / R3）。
+        # 流式路径（stream_answer 的 adapter.stream）保留直连：delta 等价零风险
+        # 优先于"全走 Agent"，偏差记入方案 §9。
+        from ..agents.runner import run_chat_agent
+
+        answer = run_chat_agent(adapter, messages, max_len=MAX_MESSAGE_LEN)
         answer_message = self._record_answer(conversation_id, generation, status="completed", content=answer)
         self.events.record(task_id, stage="generate", status="succeeded")
         return {

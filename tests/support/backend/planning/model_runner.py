@@ -45,6 +45,20 @@ def _adapter_signature(adapter: Any) -> str:
 
 def reset_mode_capability_cache() -> None:
     _MODE_FAIL_CACHE.clear()
+
+
+def mark_mode_failure(adapter: Any, mode: str, tool_name: str) -> None:
+    """Agent 路径共用（方案 S1a）：某模式耗尽后写入运行时失败缓存。
+
+    与 run_structured 内部语义一致：仅真实网关签名入缓存；prompted=text
+    不缓存（最终兜底不可被连锁杀死）。
+    """
+    capability = _REQUIRED_CAPABILITY[mode]
+    sig = _adapter_signature(adapter)
+    if sig and capability != "text":
+        _MODE_FAIL_CACHE[(sig, capability, tool_name)] = monotonic_ms() + _MODE_FAIL_TTL_MS
+
+
 from .errors import error
 from .outputs import PROMPTED_PARSE_RETRIES
 

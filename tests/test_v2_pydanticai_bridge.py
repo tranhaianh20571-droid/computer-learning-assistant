@@ -116,3 +116,142 @@ def test_messages_to_adapter_translation():
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "hello"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# S1a：runner 门控降级 / 失败缓存 / 请求装配 / 内容捕获 / 上限映射 / 流式
+# ---------------------------------------------------------------------------
+
+from backend.agents.limits import to_controlled_error  # noqa: E402
+from backend.agents.runner import run_chat_agent, run_structured_agent  # noqa: E402
+from backend.logging_audit.contracts import validate_error_code  # noqa: E402
+from backend.planning.model_runner import reset_mode_capability_cache  # noqa: E402
+
+
+class _GatedAdapter:
+    """带 capability_status 的合成适配器：记录调用选项，按脚本回包。"""
+
+    kind = "content_model"
+
+    def __init__(self, *, tool_ok=True, result=None):
+        self.capability_status = {
+            "text": "available", "tool_call": "available" if tool_ok else "unavailable",
+            "json_schema": "unavailable",
+        }
+        self.result = result or {"tool_arguments": '{"title": "t", "text": "x"}'}
+        self.calls: list[dict] = []
+
+    def generate(self, messages, **opts):
+        self.calls.append({"messages": list(messages), "opts": opts})
+        return self.result
+
+
+def test_agent_loop_limit_registered_and_mapped():
+    spec = validate_error_code("AGENT_LOOP_LIMIT")
+    assert spec.retryable and spec.stage.value == "generate"
+    from pydantic_ai.exceptions import UsageLimitExceeded
+
+    err = to_controlled_error(UsageLimitExceeded("requests"))
+    assert err.code == "AGENT_LOOP_LIMIT"
+
+
+def test_runner_tool_mode_assembles_forced_tools():
+    ad = _GatedAdapter()
+    out = run_structured_agent(
+        ad, _StepOut, [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"}],
+        tool_name="submit_test",
+    )
+    assert isinstance(out, _StepOut) and out.title == "t"
+    opts = ad.calls[0]["opts"]
+    assert "tools" in opts and opts["tool_choice"]["function"]["name"]
+    assert opts["tools"][0]["function"]["name"] == "final_result"
+
+
+def test_runner_falls_back_to_prompted_when_tool_unavailable():
+    ad = _GatedAdapter(tool_ok=False, result={"content": '{"title": "p", "text": "y"}'})
+    out = run_structured_agent(ad, _StepOut, [{"role": "user", "content": "go"}])
+    assert out.title == "p"
+    assert all("tools" not in c["opts"] for c in ad.calls), "prompted 档不应带 tools"
+
+
+def test_runner_marks_failure_cache_and_degrades():
+    reset_mode_capability_cache()
+
+    class _RealSig(_GatedAdapter):
+        endpoint, model_name = "https://synth.example", "synth-model"
+
+        def generate(self, messages, **opts):
+            self.calls.append({"messages": list(messages), "opts": opts})
+            if "tools" in opts:
+                return {"content": "garbage-not-json"}  # tool 档持续无效
+            return {"content": '{"title": "d", "text": "z"}'}
+
+    ad = _RealSig()
+    out = run_structured_agent(ad, _StepOut, [{"role": "user", "content": "go"}])
+    assert out.title == "d"
+    # 第二次：失败缓存应直接跳过 tool 档（全部调用无 tools）
+    ad2 = _RealSig()
+    out2 = run_structured_agent(ad2, _StepOut, [{"role": "user", "content": "go"}])
+    assert out2.title == "d"
+    assert all("tools" not in c["opts"] for c in ad2.calls)
+    reset_mode_capability_cache()
+
+
+def test_runner_bridge_failure_maps_controlled():
+    class _Timeout(Exception):
+        code = "timeout"
+
+    ad = _GatedAdapter()
+    ad.generate = lambda messages, **opts: (_ for _ in ()).throw(_Timeout())
+    import pytest as _pytest
+
+    from backend.planning.errors import PlanningError
+
+    with _pytest.raises(PlanningError) as ei:
+        run_structured_agent(ad, _StepOut, [{"role": "user", "content": "go"}])
+    assert ei.value.code == "MODEL_TIMEOUT"
+
+
+def test_bridge_emits_content_trace(monkeypatch):
+    from backend.logging_audit.content_trace import reset_content_trace, get_content_trace
+    from backend.logging_audit.logger import MemoryLogStream, StructuredLogger
+
+    monkeypatch.setenv("CONTENT_TRACE_ENABLED", "1")
+    reset_content_trace()
+    main, content = MemoryLogStream(), MemoryLogStream()
+    tr = get_content_trace()
+    tr.attach_logger(StructuredLogger(service="api", stream=main, content_stream=content))
+    ad = _GatedAdapter()
+    run_structured_agent(ad, _StepOut, [{"role": "user", "content": "合成问"}])
+    recs = content.records()
+    assert len(recs) >= 1 and recs[0]["event"] == "model.call.content"
+    assert "合成问" in recs[0]["model_prompt"] and "t" in str(recs[0]["model_answer"])
+    assert main.records() == []
+    reset_content_trace()
+
+
+def test_chat_agent_returns_truncated_text():
+    ad = _GatedAdapter(result={"content": "答案" * 500})
+    text = run_chat_agent(ad, [{"role": "user", "content": "q"}], max_len=100)
+    assert len(text) <= 100
+
+
+def test_stream_function_yields_deltas():
+    import asyncio
+
+    from backend.agents import make_stream_function
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    class _StreamAdapter:
+        kind = "content_model"
+
+        def generate_stream_text(self, messages):
+            yield from ["你", "好", "！"]
+
+    fn = make_stream_function(_StreamAdapter())
+    msgs = [ModelRequest(parts=[UserPromptPart(content="hi")])]
+
+    async def _run():
+        return [d async for d in fn(msgs, None)]
+
+    assert asyncio.run(_run()) == ["你", "好", "！"]

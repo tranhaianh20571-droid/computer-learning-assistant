@@ -303,6 +303,10 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "外部观测内容删除任务失败（ADR-022 删除联动）",
         ),
         ErrorCodeSpec(
+            "AGENT_LOOP_LIMIT", TaskStage.GENERATE, True, True, AlertLevel.WARNING,
+            "Agent 循环上限触发（方案 S1a：UsageLimits 受控映射）",
+        ),
+        ErrorCodeSpec(
             "BOARD_SCHEMA_INVALID", TaskStage.BOARD, True, True, AlertLevel.WARNING,
             "板书 schema 校验失败",
         ),

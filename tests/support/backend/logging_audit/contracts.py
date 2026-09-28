@@ -142,6 +142,8 @@ ALLOWED_FIELDS: FrozenSet[str] = frozenset(
         "dropped_count",
         # 外部观测平台标识（ADR-022 删除联动：langfuse 等受控枚举值）
         "platform",
+        # Agent 轮次低基数计数（方案 S4：模型请求次数）
+        "requests",
         # 内容 trace 通道（ADR-022：仅内容事件可用；其余通道出现即被 sanitize 拒绝）
         "model_prompt",
         "model_answer",
@@ -713,7 +715,7 @@ EVENT_REGISTRY: Mapping[str, EventSpec] = {
             "model.call.completed",
             (LogEventType.RUNTIME, LogEventType.METRIC),
             _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms"}),
-            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "capability", "reason"}),
+            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "capability", "reason", "requests"}),
             user_visible=False,
             description="模型/生成调用成功（聚合指标，无内容字段）",
         ),
@@ -721,9 +723,25 @@ EVENT_REGISTRY: Mapping[str, EventSpec] = {
             "model.call.failed",
             (LogEventType.RUNTIME, LogEventType.METRIC),
             _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms", "error_code"}),
-            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "capability", "reason"}),
+            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "capability", "reason", "requests"}),
             user_visible=False,
             description="模型/生成调用失败（聚合指标，无内容字段）",
+        ),
+        EventSpec(
+            "agent.turn.completed",
+            (LogEventType.RUNTIME, LogEventType.METRIC),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms"}),
+            frozenset({"trace_id", "task_id", "mode", "requests", "degraded"}),
+            user_visible=False,
+            description="Agent 轮次成功（低基数：档位/请求次数，无内容字段）",
+        ),
+        EventSpec(
+            "agent.turn.failed",
+            (LogEventType.RUNTIME, LogEventType.METRIC),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms", "error_code"}),
+            frozenset({"trace_id", "task_id", "mode", "requests", "degraded"}),
+            user_visible=False,
+            description="Agent 轮次失败（低基数，无内容字段）",
         ),
         EventSpec(
             "model.call.content",

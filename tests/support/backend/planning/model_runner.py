@@ -1,5 +1,9 @@
 """模型运行器（T04）：能力状态 → 输出模式选择 → 结构化输出 + 降级链。
 
+ADR-023 后状态：`ModelCapabilityGate`/失败缓存/`mark_mode_failure` 为 Agent
+路径（app/agents/runner.py）复用的活组件；`run_structured`/`run_chat` 已无
+生产调用点，保留为回退兜底（过渡期回滚安全），S4 后视稳定情况再议删除。
+
 T01 降级默认结论（evidence/slice3-model-capability-spike.md §4）落地：
 1. native（JSON Schema 受限生成）→ tool（函数调用）→ prompted（文本 JSON 解析，
    重试上限 2 次）→ 全部不可用时受控错误码 MODEL_CAPABILITY_UNAVAILABLE；

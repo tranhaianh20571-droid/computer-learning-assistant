@@ -26,6 +26,28 @@ from .limits import agent_usage_limits, to_controlled_error
 BRIDGE_MODES = ("tool", "prompted")
 OUTPUT_RETRIES = 2  # 与 model_runner prompted 档重试上限对齐
 
+_turn_logger = None
+
+
+def _emit_turn(stage: str, status: str, duration_ms: int, *, mode: str = None,
+               requests: int = None, degraded: bool = False, error_code: str = None) -> None:
+    """S4：agent 轮次低基数事件（无内容字段；发射失败不影响业务）。"""
+    global _turn_logger
+    from ..logging_audit.logger import StructuredLogger
+
+    if _turn_logger is None:
+        _turn_logger = StructuredLogger(service="api")
+    try:
+        _turn_logger.log(
+            "agent.turn.completed" if status == "succeeded" else "agent.turn.failed",
+            level="INFO" if status == "succeeded" else "WARN",
+            stage=stage, status=status, duration_ms=duration_ms,
+            mode=mode, requests=requests, degraded=degraded or None,
+            error_code=error_code,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
 
 @dataclass
 class AgentRunResult:
@@ -111,6 +133,7 @@ def run_structured_agent(
                 error_code="AGENT_LOOP_LIMIT" if "limit" in type(exc).__name__.lower() else "MODEL_CAPABILITY_UNAVAILABLE",
                 duration_ms=monotonic_ms() - started,
             )
+            _emit_turn(stage, "failed", monotonic_ms() - started, mode=mode, degraded=True)
             if _is_bridge_failure(exc):
                 raise to_controlled_error(exc) from exc
             # 校验/循环耗尽 → 记失败缓存，降下一档（与 run_structured 同语义；
@@ -118,10 +141,13 @@ def run_structured_agent(
             mark_mode_failure(adapter, mode, tool_name)
             degraded.append(mode)
             continue
+        requests = getattr(result.usage, "requests", None) or 1
         get_model_call_metrics().record(
             stage=stage, outcome="succeeded", mode=mode,
-            duration_ms=monotonic_ms() - started,
+            duration_ms=monotonic_ms() - started, attempts=requests,
         )
+        _emit_turn(stage, "succeeded", monotonic_ms() - started, mode=mode,
+                   requests=requests, degraded=bool(degraded))
         return AgentRunResult(payload=result.output, mode=mode, degraded_from=list(degraded))
     raise error("MODEL_CAPABILITY_UNAVAILABLE", "all agent modes failed")
 

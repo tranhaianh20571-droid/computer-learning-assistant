@@ -193,4 +193,12 @@ uv run --project server/backend pytest tests -k "slice3 or slice4 or t07 or t08 
 
 ## 9. 执行记录
 
-- 2026-09-28 v1.1 修订（本次）：依 ADR-022 实施后评估更新漂移、拆分 S1、新增 R1–R6；未新增代码改动。
+- 2026-09-28 v1.1 修订：依 ADR-022 实施后评估更新漂移、拆分 S1、新增 R1–R6。
+- 2026-09-28 **S0–S4 全部执行完成**：
+  - S0 ✅ b479f01（ADR-023；O-B 残骸清理含 D3 修正；O-A assembler 入口收敛，启动验证 docs/health 200、教学路由 401）
+  - S1a ✅ bf059a3（桥补全：装配/流式/内容捕获迁入/门控复用+失败缓存/AGENT_LOOP_LIMIT；R4 spike 结论：PromptedOutput 可用，native 不经桥）
+  - S1b ✅ 7c50adf（followup+chat 同步路径切换；**偏差**：流式路径保留适配器直连，delta 等价优先于全走 Agent）
+  - S2 ✅ 81a9f1d（教学步骤 Agent + 板书业务校验 ModelRetry 字段级回喂）
+  - S3 ✅ ebf0a9c（规划三调用点 + search_materials 工具 + intake_followup_v1 模板消 D6 + make_fallback_model 默认关；测试语义随 ADR-023 更新：mode 链 tool→prompted）
+  - S4 ✅（本次提交：agent.turn.* 事件 + model.call requests 维度 + registry-v3 + PRD 1.15 + AGENTS.md 指针；全量 511 passed/2 skipped；前端 build 通过，浏览器走查待执行）
+  - model_runner 处置：保留为回退兜底（gate/失败缓存被 runner 复用；run_structured/run_chat 零调用点，标注遗产）

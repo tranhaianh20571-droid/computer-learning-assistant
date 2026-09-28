@@ -328,10 +328,15 @@ class PlanningService:
                 raise error("route_not_found", status=404)
         adapter = self._require_model_adapter(state.owner_user_id, task_id)
         messages = self._compose_messages("route_generate", state, prompt, search_outcome)
-        run = run_structured(
+        from ..agents.runner import run_structured_agent
+        from ..agents.tools import make_search_materials_tool
+
+        material_ids = load_json_field(state.material_ids_json, [])
+        tools = [make_search_materials_tool(self.retrieval, owner_user_id=state.owner_user_id,
+                                            material_ids=material_ids)] if material_ids else None
+        run = run_structured_agent(
             adapter, RouteCandidate, messages,
-            schema=RouteCandidate.model_json_schema(),
-            tool_name="submit_route_candidate",
+            tool_name="submit_route_candidate", tools=tools,
         )
         candidate = run.payload
         summary = validate_route_candidate(candidate)
@@ -371,10 +376,15 @@ class PlanningService:
                         "outline_version_id": course.current_outline_version_id}
         adapter = self._require_model_adapter(state.owner_user_id, task_id)
         messages = self._compose_messages("outline_generate", state, prompt, search_outcome)
-        run = run_structured(
+        from ..agents.runner import run_structured_agent
+        from ..agents.tools import make_search_materials_tool
+
+        material_ids = load_json_field(state.material_ids_json, [])
+        tools = [make_search_materials_tool(self.retrieval, owner_user_id=state.owner_user_id,
+                                            material_ids=material_ids)] if material_ids else None
+        run = run_structured_agent(
             adapter, OutlineCandidate, messages,
-            schema=OutlineCandidate.model_json_schema(),
-            tool_name="submit_outline_candidate",
+            tool_name="submit_outline_candidate", tools=tools,
         )
         candidate = run.payload
         summary = validate_outline_candidate(candidate)
@@ -473,18 +483,19 @@ class PlanningService:
         except PlanningError:
             return []
         profile = self._profile_text(answers)
+        # S3（消 D6）：访谈追问指令走模板快照（intake_followup_v1，SHA-256 校验）
+        template = self.prompts.load_local_template("intake_followup_v1")["template"]
+        body = template.format(profile=profile)
+        system_line, _, user_body = body.partition("\n")
         messages = [
-            {"role": "system", "content": "你是学习规划助手。基于学习者已回答的内容，只输出符合要求的 JSON。"},
-            {"role": "user", "content": (
-                "学习者目标与已回答内容：\n" + profile +
-                "\n请判断是否还有真正影响规划内容的问题（例如目标场景、时间投入、先修背景）。"
-                "最多 3 个问题，kind 为 single 或 multi，每题 2-6 个选项；若信息已足够，返回空 questions。"
-            )},
+            {"role": "system", "content": system_line},
+            {"role": "user", "content": user_body.lstrip("\n")},
         ]
         try:
-            run = run_structured(
+            from ..agents.runner import run_structured_agent
+
+            run = run_structured_agent(
                 adapter, IntakeQuestionSet, messages,
-                schema=IntakeQuestionSet.model_json_schema(),
                 tool_name="submit_intake_questions",
             )
         except PlanningError:

@@ -29,10 +29,14 @@ OUTPUT_RETRIES = 2  # 与 model_runner prompted 档重试上限对齐
 
 @dataclass
 class AgentRunResult:
-    """结构化生成结果：payload 为模型类实例；mode 为成功档位（事件参数用）。"""
+    """结构化生成结果（对齐 model_runner.ModelRunResult 的消费字段）。
+
+    payload 为模型类实例；mode 为成功档位；degraded_from 为已降级档位列表。
+    """
 
     payload: Any
     mode: str
+    degraded_from: List[str]
 
 
 def _split_messages(messages: List[dict]) -> tuple[str, str]:
@@ -43,7 +47,7 @@ def _split_messages(messages: List[dict]) -> tuple[str, str]:
 
 
 def _build_agent(adapter: Any, output_type, instructions: str, *, stream: bool = False,
-                 output_validator=None):
+                 output_validator=None, tools=None):
     from pydantic_ai import Agent
 
     agent = Agent(
@@ -54,6 +58,8 @@ def _build_agent(adapter: Any, output_type, instructions: str, *, stream: bool =
     )
     if output_validator is not None:
         agent.output_validator(output_validator)
+    for tool in tools or []:
+        agent.tool_plain(tool)
     return agent
 
 
@@ -78,11 +84,13 @@ def run_structured_agent(
     stage: str = "generate",
     max_requests: Optional[int] = None,
     output_validator=None,
+    tools=None,
 ) -> Any:
-    """按 tool→prompted 降级跑结构化生成；返回 model_cls 实例。
+    """按 tool→prompted 降级跑结构化生成；返回 AgentRunResult。
 
     output_validator：业务校验钩子（Agent.output_validator），失败抛
     ModelRetry 时框架带错误清单重试（S2 字段级回喂）。
+    tools：受控工具函数列表（S3 检索等，tool_plain 注册）。
     """
     from pydantic_ai.output import PromptedOutput, ToolOutput
 
@@ -92,7 +100,8 @@ def run_structured_agent(
     degraded: List[str] = []
     for mode in candidate_modes:
         output_type = ToolOutput(model_cls) if mode == "tool" else PromptedOutput(model_cls)
-        agent = _build_agent(adapter, output_type, instructions, output_validator=output_validator)
+        agent = _build_agent(adapter, output_type, instructions,
+                             output_validator=output_validator, tools=tools)
         started = monotonic_ms()
         try:
             result = agent.run_sync(prompt, usage_limits=agent_usage_limits(max_requests))
@@ -113,7 +122,7 @@ def run_structured_agent(
             stage=stage, outcome="succeeded", mode=mode,
             duration_ms=monotonic_ms() - started,
         )
-        return AgentRunResult(payload=result.output, mode=mode)
+        return AgentRunResult(payload=result.output, mode=mode, degraded_from=list(degraded))
     raise error("MODEL_CAPABILITY_UNAVAILABLE", "all agent modes failed")
 
 

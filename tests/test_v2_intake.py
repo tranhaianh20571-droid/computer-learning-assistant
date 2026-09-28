@@ -183,6 +183,9 @@ class TestModelFollowups:
                 joined = "".join(str(m.get("content", "")) for m in messages)
                 if "学习者目标与已回答内容" in joined:
                     payload = self.rounds.pop(0) if self.rounds else {"questions": []}
+                    # 按请求形状应答（ADR-023：Agent 路径 tool 档优先）
+                    if "tools" in options:
+                        return {"tool_arguments": json.dumps(payload, ensure_ascii=False)}
                     return {"content": json.dumps(payload, ensure_ascii=False)}
                 return super().generate(messages, **options)
 

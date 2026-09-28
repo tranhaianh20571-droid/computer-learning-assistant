@@ -210,11 +210,28 @@ def make_bridge_model(
     return FunctionModel(**kwargs)
 
 
+def make_fallback_model(primary_adapter: Any, fallback_adapter: Any, *, model_name: Optional[str] = None):
+    """S3：模型级兜底（默认关闭，灰度启用——方案 §3 S3）。
+
+    FallbackModel 只换模型不重试同一模型（官方语义）；fallback_on 捕获
+    桥受控错误（供应商请求失败）。已知坑（必测）：不因重试耗尽触发
+    （上游 #2837）、不与适配器层重试叠加（#3267）。
+    """
+    from pydantic_ai.models.fallback import FallbackModel
+
+    return FallbackModel(
+        make_bridge_model(primary_adapter),
+        make_bridge_model(fallback_adapter),
+        fallback_on=(AdapterBridgeError,),
+    )
+
+
 __all__ = [
     "AdapterBridgeError",
     "make_bridge_function",
     "make_stream_function",
     "make_bridge_model",
+    "make_fallback_model",
     "messages_to_adapter",
     "raw_to_model_response",
 ]

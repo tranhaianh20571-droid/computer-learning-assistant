@@ -138,7 +138,7 @@ class TestPlanningWorker:
 
         body = _run_with_intake(env["client"], token, task_id)
         assert body["task_status"] == "succeeded"
-        assert body["mode"] == "native"
+        assert body["mode"] == "tool"   # ADR-023：Agent 路径首选 tool 档（native 不经桥）
 
         # 草稿与候选落库
         state = env["client"].app.state.slice3
@@ -327,8 +327,8 @@ class TestDegradation:
         ).json()["task_id"]
         body = _run_with_intake(env["client"], token, task_id)
         assert body["task_status"] == "succeeded"
-        assert body["mode"] == "prompted"           # 降级到第三档
-        assert body["degraded_from"] == ["native", "tool"]
+        assert body["mode"] == "prompted"           # 降级到末档（ADR-023：Agent 路径 tool→prompted，无 native）
+        assert body["degraded_from"] == ["tool"]
 
     def test_model_capability_unavailable_no_infinite_retry(self, env) -> None:
         _, token, route_id = _setup_route(env)

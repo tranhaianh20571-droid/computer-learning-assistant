@@ -318,3 +318,77 @@ def test_lesson_step_output_validator_retries_with_feedback():
     # 回喂信息进入对话历史（RetryPromptPart 文本含具体问题）
     history = " ".join(str(getattr(m, "parts", "")) for m in [])
     assert ad.calls[1]["messages"], "第二次调用应携带重试上下文"
+
+
+# ---------------------------------------------------------------------------
+# S3：检索工具 / FallbackModel 兜底 / intake 模板
+# ---------------------------------------------------------------------------
+
+def test_search_materials_tool_returns_limited_summary():
+    from backend.agents.tools import make_search_materials_tool
+
+    class _Retrieval:
+        def assemble(self, **kw):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                excerpts=[{"title": "资料A", "excerpt": "摘录" * 100}],
+                chars_total=1234, truncation_reasons=["budget"],
+            )
+
+    tool = make_search_materials_tool(_Retrieval(), owner_user_id="u1", material_ids=["m1"])
+    out = tool("数据库", limit=2)
+    import json as _json
+
+    payload = _json.loads(out)
+    assert payload["items"][0]["title"] == "资料A"
+    assert len(payload["items"][0]["excerpt"]) <= 200
+    assert payload["truncated"] is True
+
+
+def test_search_materials_tool_degrades_to_model_retry():
+    import pytest as _pytest
+
+    from pydantic_ai.exceptions import ModelRetry
+
+    from backend.agents.tools import make_search_materials_tool
+
+    class _Broken:
+        def assemble(self, **kw):
+            raise RuntimeError("boom")
+
+    tool = make_search_materials_tool(_Broken(), owner_user_id="u1", material_ids=["m1"])
+    with _pytest.raises(ModelRetry):
+        tool("q")
+
+
+def test_fallback_model_switches_on_bridge_error():
+    """S3 必测（上游 #2837/#3267 邻域）：主模型桥失败 → 备模型接管。"""
+    from pydantic_ai import Agent
+
+    from backend.agents import make_fallback_model
+
+    class _Primary(_GatedAdapter):
+        def generate(self, messages, **opts):
+            raise RuntimeError("primary down")
+
+    good = _GatedAdapter(result={"tool_arguments": '{"title": "fb", "text": "y"}'})
+    model = make_fallback_model(_Primary(), good)
+    agent = Agent(model=model, output_type=_StepOut, retries=1)
+    result = agent.run_sync("go")
+    assert result.output.title == "fb"
+
+
+def test_intake_followup_template_hashed_and_formats():
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "tests" / "support"))
+    from backend.prompts.service import PromptService
+
+    svc = PromptService.__new__(PromptService)  # 只用本地模板读取，不接 DB
+    svc.fallback_dir = _Path(__file__).resolve().parents[1] / "tests/support/backend/prompts/fallback_templates"
+    data = svc.load_local_template("intake_followup_v1")
+    assert data["sha256"]
+    body = data["template"].format(profile="目标：数据库")
+    assert "目标：数据库" in body and "返回空 questions" in body

@@ -49,4 +49,38 @@ def lesson_step_output_validator(ctx, output: LessonPlanCandidate) -> LessonPlan
     return output
 
 
-__all__ = ["lesson_step_issues", "lesson_step_output_validator"]
+__all__ = ["lesson_step_issues", "lesson_step_output_validator", "make_search_materials_tool"]
+
+
+def make_search_materials_tool(retrieval_service, *, owner_user_id: str, material_ids):
+    """S3：受控检索工具（挂到路线/大纲 Agent）。
+
+    返回受限摘要 JSON（材料标题 + 限长摘录），不透传正文全集；
+    检索失败抛 ModelRetry 让模型改走无检索路径，不炸整个 run。
+    """
+
+    def search_materials(query: str, limit: int = 3) -> str:
+        """按关键词检索学习者已选资料，返回受限摘要（标题+限长摘录）。
+
+        query：检索关键词；limit：返回条数上限（默认 3）。
+        """
+        import json as _json
+
+        try:
+            result = retrieval_service.assemble(
+                owner_user_id=owner_user_id, material_ids=list(material_ids), query=query,
+            )
+        except Exception:  # noqa: BLE001 — 检索失败降级为提示，不终止
+            raise ModelRetry("检索暂不可用，请基于已有信息继续") from None
+        items = [
+            {
+                "title": str(e.get("title", ""))[:60],
+                "excerpt": str(e.get("excerpt", e.get("text", "")))[:200],
+            }
+            for e in result.excerpts[: max(1, min(limit, 5))]
+        ]
+        payload = {"items": items, "chars_total": result.chars_total,
+                   "truncated": bool(result.truncation_reasons)}
+        return _json.dumps(payload, ensure_ascii=False)
+
+    return search_materials

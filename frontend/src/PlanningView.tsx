@@ -305,8 +305,15 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
         setSaveState(d.saved_state);
       }
       await refreshTask(taskId);
+      if (body.task_status === "failed") {
+        // 生成失败要可见可重试，而不是无声地停在当前页面
+        setRunError(body.error_code || "生成失败");
+        onOk("");
+        return;
+      }
       onOk("已按你的选择继续。");
     } catch (e: any) {
+      setRunError(e?.code || "决策失败");
       onErr(`决策失败：${e?.code || "错误"}`);
     } finally {
       setRunning(false);
@@ -356,7 +363,17 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
           <div className="note note-err" role="alert">
             <span className="tag">失败</span>
             <div className="tt">生成失败 · {runError}</div>
-            <div>不无限重试；可调整输入后重新生成。</div>
+            <div>不无限重试；访谈回答已保留，可直接重试生成（大 JSON 生成通常需要 1–2 分钟）。</div>
+            <div className="acts">
+              <button
+                className="btn btn-pri btn-sm"
+                disabled={running || !taskId}
+                onClick={() => { setRunError(""); runTask(taskId); }}
+              >
+                重试生成
+              </button>
+              <button className="btn btn-sm" onClick={() => go("/home")}>调整目标</button>
+            </div>
           </div>
         )}
       </div>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, getSessionToken, setSessionToken } from "./api";
+import { api, setSessionToken } from "./api";
 import CapabilityConfig from "./CapabilityConfig";
 import PlanningView from "./PlanningView";
 import ChatView from "./ChatView";
@@ -105,9 +105,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // 登录态恢复：无条件调 me()——服务端 14 天持久 Cookie 随请求自动携带，
+    // 刷新/重开浏览器后据此恢复；401 才落到登录页（内存 token 仅为 Bearer 备用）。
     (async () => {
-      if (getSessionToken()) {
-        try { setMe(await api.me()); } catch { setSessionToken(null); }
+      try {
+        setMe(await api.me());
+      } catch {
+        setSessionToken(null);
       }
       setBooted(true);
     })();
@@ -370,7 +374,7 @@ function VerifyView({ onDone, onErr }: any) {
 }
 
 function LoginView({ onDone, onErr }: any) {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(() => localStorage.getItem("slice3.rememberEmail") || "");
   const [password, setPassword] = useState("");
   return (
     <form className="od-stack" style={{ ["--od-gap" as any]: "18px" }} onSubmit={(e) => e.preventDefault()}>
@@ -384,6 +388,8 @@ function LoginView({ onDone, onErr }: any) {
           onClick={async () => {
             try {
               await api.login(email, password);
+              // 只记住邮箱字符串；密码永不落浏览器
+              localStorage.setItem("slice3.rememberEmail", email);
               onDone("已登录");
             } catch (e) { onErr(errText(e)); }
           }}

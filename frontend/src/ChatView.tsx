@@ -90,6 +90,25 @@ export default function ChatView({ onErr, onOk, needLogin }: {
       }
       setInput("");
       setLiveText("");
+      // 打字机平滑渲染：网络增量先入缓冲，按固定速率上屏（积压越多追赶越快）。
+      // 网关批量倒字时依旧呈现逐字效果；真流式供应商下自动表现为原生打字机。
+      let buffer = "";
+      let revealed = 0;
+      let streamDone = false;
+      const drained = new Promise<void>((resolve) => {
+        const iv = window.setInterval(() => {
+          if (revealed >= buffer.length) {
+            if (streamDone) {
+              window.clearInterval(iv);
+              resolve();
+            }
+            return; // 等 Typewriter 追上网络流
+          }
+          const take = Math.max(1, Math.ceil((buffer.length - revealed) / 40));
+          revealed = Math.min(buffer.length, revealed + take);
+          setLiveText(buffer.slice(0, revealed));
+        }, 50);
+      });
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
@@ -108,17 +127,20 @@ export default function ChatView({ onErr, onOk, needLogin }: {
           try { data = JSON.parse(dataLine.slice(6)); } catch { continue; }
           const type = evLine?.slice(7) || "";
           if (type === "delta") {
-            setLiveText((t) => (t || "") + String(data.text || ""));
+            buffer += String(data.text || ""); // 入缓冲，由 Typewriter 上屏
           } else if (type === "done") {
             finished = true;
+            streamDone = true;
             if (typeof data.external_result_count === "number" && data.external_result_count > 0) {
               setLastExternal(data.external_result_count);
             }
           } else if (type === "wait") {
+            streamDone = true;
             await refresh(id);
             onErr("联网搜索失败：请选择重试或离线继续。");
             return;
           } else if (type === "error") {
+            streamDone = true;
             if (data.error_code === "MODEL_CAPABILITY_UNAVAILABLE") {
               onErr("该模型不支持所需能力，已停止调用（不无限重试）。");
             } else {
@@ -128,6 +150,8 @@ export default function ChatView({ onErr, onOk, needLogin }: {
           }
         }
       }
+      streamDone = true;
+      await drained; // 等 Typewriter 把缓冲播完
       await refresh(id);
       onOk("已回答。");
     } catch (e: any) {

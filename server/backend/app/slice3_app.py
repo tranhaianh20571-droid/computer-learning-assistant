@@ -282,6 +282,41 @@ def _dev_synthetic_factories() -> tuple[Optional[Any], Optional[Any]]:
     )
 
 
+def _config_model_factory(configs) -> Optional[Any]:
+    """按用户已存能力配置构建模型适配器（设置页为真相源）。
+
+    取属主最新一条活跃 content_model 配置，按协议映射适配器；
+    gemini/anthropic 端点剥掉 /v1 后缀（适配器自带路径），openai 保留。
+    """
+    def factory(owner_user_id: str, task_id: str):
+        view = configs.latest_active_for_owner(owner_user_id, "content_model")
+        if view is None:
+            return None
+        credentials = configs.resolve_credentials(view["config_id"])
+        endpoint = view["endpoint"]
+        model_name = view["model_name"]
+        protocol = (view["protocol"] or "").lower()
+        if protocol == "gemini":
+            from .slice1.adapters.gemini import GeminiAdapter
+
+            return GeminiAdapter(
+                endpoint=endpoint.removesuffix("/v1").rstrip("/"),
+                model_name=model_name, credentials=credentials,
+            )
+        if protocol == "anthropic":
+            from .slice1.adapters.anthropic import AnthropicAdapter
+
+            return AnthropicAdapter(
+                endpoint=endpoint.removesuffix("/v1").rstrip("/"),
+                model_name=model_name, credentials=credentials,
+            )
+        from .slice1.adapters.openai import OpenAIAdapter
+
+        return OpenAIAdapter(endpoint=endpoint, model_name=model_name, credentials=credentials)
+
+    return factory
+
+
 def _real_model_factory() -> Optional[Any]:
     """真实模型工厂（LEARNING_REAL_MODEL_* 环境变量）。
 
@@ -333,24 +368,34 @@ def create_slice3_app(
     ocr_adapter_factory: Optional[Any] = None,
     tts_adapter_factory: Optional[Any] = None,
 ) -> FastAPI:
-    # 工厂优先级：显式传入 > 真实凭据（env）> 本地合成走查
-    if model_adapter_factory is None:
-        model_adapter_factory = _real_model_factory()
+    # 工厂优先级：显式传入 > 用户已存配置（设置页）> 真实凭据（env）> 本地合成走查；
+    # 模型工厂在 slice1 状态就绪后解析（配置工厂需要 ConfigService）。
     if tts_adapter_factory is None:
         tts_adapter_factory = _real_tts_factory()
-    if model_adapter_factory is None or search_adapter_factory is None:
-        dev_model, dev_search = _dev_synthetic_factories()
-        model_adapter_factory = model_adapter_factory or dev_model
-        search_adapter_factory = search_adapter_factory or dev_search
-    if ocr_adapter_factory is None and os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") == "1":
-        ocr_adapter_factory = lambda owner, task_id: _DevSyntheticOcrAdapter()  # noqa: E731
-    if tts_adapter_factory is None and os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") == "1":
-        tts_adapter_factory = lambda owner, task_id: _DevSyntheticTTSAdapter()  # noqa: E731
     storage = state.storage if state is not None else None
     holder = state.pipeline_holder if state is not None else {"pipeline": None}
     app = create_slice2_app(state=slice2_state, storage=storage, pipeline_holder=holder)
     if state is None:
         base = app.state.slice1
+        if model_adapter_factory is None:
+            config_factory = _config_model_factory(base.configs)
+            env_factory = _real_model_factory()
+            if config_factory is not None or env_factory is not None:
+                def _model_factory_chain(owner_user_id: str, task_id: str):  # noqa: E306
+                    adapter = config_factory(owner_user_id, task_id) if config_factory else None
+                    if adapter is None:
+                        adapter = env_factory(owner_user_id, task_id) if env_factory else None
+                    return adapter
+
+                model_adapter_factory = _model_factory_chain
+        if model_adapter_factory is None or search_adapter_factory is None:
+            dev_model, dev_search = _dev_synthetic_factories()
+            model_adapter_factory = model_adapter_factory or dev_model
+            search_adapter_factory = search_adapter_factory or dev_search
+        if ocr_adapter_factory is None and os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") == "1":
+            ocr_adapter_factory = lambda owner, task_id: _DevSyntheticOcrAdapter()  # noqa: E731
+        if tts_adapter_factory is None and os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") == "1":
+            tts_adapter_factory = lambda owner, task_id: _DevSyntheticTTSAdapter()  # noqa: E731
         from .materials.storage import MaterialStorage
 
         state = Slice3State(

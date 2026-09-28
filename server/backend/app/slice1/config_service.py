@@ -83,6 +83,25 @@ class ConfigService:
                 raise error("config_not_found", "config inactive")
             return self._decrypt(row.encrypted_credentials)
 
+    def latest_active_for_owner(self, owner_user_id: str, kind: str) -> Optional[dict]:
+        """适配器工厂用：属主某类最新活跃配置（元数据，不含凭据；仅 user 作用域）。"""
+        with self.db.session() as sess:
+            row = (
+                sess.execute(
+                    select(ServiceConfigRow)
+                    .where(
+                        ServiceConfigRow.is_active.is_(True),
+                        ServiceConfigRow.kind == kind,
+                        ServiceConfigRow.owner_user_id == owner_user_id,
+                    )
+                    .order_by(ServiceConfigRow.created_at.desc(), ServiceConfigRow.config_id.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            return self.public_view(row) if row else None
+
     # ---- 序列化 ----
     @staticmethod
     def public_view(row: ServiceConfigRow) -> dict:

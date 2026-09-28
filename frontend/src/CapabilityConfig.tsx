@@ -308,9 +308,7 @@ function ContentModelForm({ onErr, onOk, onBusy }: any) {
               model_name: model,
               credentials: { api_key: apiKey },
               owner_scope: "user",
-            });
-            setApiKey("");
-            onOk?.("模型配置已保存（凭据已加密）");
+            });            onOk?.("模型配置已保存（凭据已加密）");
           } catch (e: any) { onErr?.(e?.message || "保存失败"); }
           finally { onBusy?.(false); }
         }}
@@ -353,9 +351,7 @@ function TtsForm({ onErr, onOk, onBusy }: any) {
               model_name: "speech-2.8-hd",
               credentials: { api_key: apiKey, voice_id: voice },
               owner_scope: "user",
-            });
-            setApiKey("");
-            onOk?.("TTS 配置已保存（默认 speech-2.8-hd）");
+            });            onOk?.("TTS 配置已保存（默认 speech-2.8-hd）");
           } catch (e: any) { onErr?.(e?.message || "保存失败"); }
           finally { onBusy?.(false); }
         }}
@@ -421,9 +417,7 @@ function AdminCloudForm({ onErr, onOk, onBusy }: any) {
               model_name: model,
               credentials: { api_key: apiKey },
               owner_scope: "admin",
-            });
-            setApiKey("");
-            onOk?.("云能力配置已保存");
+            });            onOk?.("云能力配置已保存");
           } catch (e: any) { onErr?.(e?.message || "保存失败"); }
           finally { onBusy?.(false); }
         }}

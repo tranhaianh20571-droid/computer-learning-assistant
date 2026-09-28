@@ -6,7 +6,8 @@ import { parseSseFrames } from "./lib/sse";
  * 即时对话（设计稿 9 节 chat 布局）：
  * - turn me/ai 消息流；新追问 generation 加一；旧回答留历史不回填；
  * - 刷新只恢复已保存消息，不自动重发；
- * - 搜索失败 → searchfail 等待决策（重试/离线继续）；外部结果仅计数标记；
+ * - 搜索失败 → searchfail 等待决策（重试/离线继续）；模型不可用等失败按错误码标注轮次；
+ * - 外部结果仅计数标记；
  * - 边界：即时路径不调用板书、TTS 或播放 API。
  */
 
@@ -23,6 +24,8 @@ export default function ChatView({ onErr, onOk, needLogin }: {
   const [busy, setBusy] = useState(false);
   const [lastExternal, setLastExternal] = useState<number | null>(null);
   const [liveText, setLiveText] = useState<string | null>(null);
+  // 本会话内各轮失败原因（generation → 错误码/"search_wait"）；刷新后丢失，回退到会话级等待语义
+  const [turnNotes, setTurnNotes] = useState<Record<number, string>>({});
   const bootRef = useRef(false);
   const streamRef = useRef<HTMLDivElement | null>(null);
 
@@ -31,7 +34,8 @@ export default function ChatView({ onErr, onOk, needLogin }: {
       const got = await api.getChat(id);
       setMessages(got.messages);
       setGeneration(got.generation);
-    } catch { /* 会话不可用保持本地 */ }
+      return got;
+    } catch { /* 会话不可用保持本地 */ return null; }
   }, []);
 
   const ensureConversation = useCallback(async () => {
@@ -43,6 +47,7 @@ export default function ChatView({ onErr, onOk, needLogin }: {
     try {
       const conv = await api.createChat({ material_ids: [], scenario: "self_study" });
       setConvId(conv.conversation_id);
+      setTurnNotes({});
       return conv.conversation_id;
     } catch (e: any) {
       onErr(e?.message || "会话创建失败");
@@ -132,15 +137,19 @@ export default function ChatView({ onErr, onOk, needLogin }: {
             }
           } else if (frame.event === "wait") {
             streamDone = true;
-            await refresh(id);
+            const got = await refresh(id);
+            if (got) setTurnNotes((p) => ({ ...p, [got.generation]: "search_wait" }));
             onErr("联网搜索失败：请选择重试或离线继续。");
             return;
           } else if (frame.event === "error") {
             streamDone = true;
-            if (data.error_code === "MODEL_CAPABILITY_UNAVAILABLE") {
-              onErr("该模型不支持所需能力，已停止调用（不无限重试）。");
+            const code = String(data.error_code || "ERROR");
+            const got = await refresh(id);
+            if (got) setTurnNotes((p) => ({ ...p, [got.generation]: code }));
+            if (code === "MODEL_CAPABILITY_UNAVAILABLE") {
+              onErr("未配置可用模型：请到设置页保存内容模型配置。");
             } else {
-              onErr(`回答失败：${data.error_code}`);
+              onErr(`回答失败：${code}`);
             }
             return;
           }
@@ -232,15 +241,29 @@ export default function ChatView({ onErr, onOk, needLogin }: {
                 <div className="turn ai">
                   <span className="who">学伴</span>
                   <div className="body">
-                    <div className="note note-warn" role="alert">
-                      <span className="tag">等待</span>
-                      <div className="tt">联网搜索失败</div>
-                      <div>可以重试搜索，或明确选择离线继续（不会伪造联网依据）。</div>
-                      <div className="acts">
-                        <button className="btn btn-sm" onClick={() => resume("retry")} disabled={busy}>重试搜索</button>
-                        <button className="btn btn-sm btn-ink" onClick={() => resume("offline_continue")} disabled={busy}>离线继续</button>
+                    {turnNotes[t.gen] === "MODEL_CAPABILITY_UNAVAILABLE" ? (
+                      <div className="note note-warn" role="alert">
+                        <span className="tag">未回答</span>
+                        <div className="tt">未配置可用模型</div>
+                        <div>当前账号没有已保存的内容模型配置。到设置页 → 个人内容模型保存后，重新提问即可。</div>
                       </div>
-                    </div>
+                    ) : turnNotes[t.gen] && turnNotes[t.gen] !== "search_wait" ? (
+                      <div className="note note-warn" role="alert">
+                        <span className="tag">未回答</span>
+                        <div className="tt">回答失败：{turnNotes[t.gen]}</div>
+                        <div>可直接重新提问（会开启新一轮）。</div>
+                      </div>
+                    ) : (
+                      <div className="note note-warn" role="alert">
+                        <span className="tag">等待</span>
+                        <div className="tt">联网搜索失败</div>
+                        <div>可以重试搜索，或明确选择离线继续（不会伪造联网依据）。</div>
+                        <div className="acts">
+                          <button className="btn btn-sm" onClick={() => resume("retry")} disabled={busy}>重试搜索</button>
+                          <button className="btn btn-sm btn-ink" onClick={() => resume("offline_continue")} disabled={busy}>离线继续</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

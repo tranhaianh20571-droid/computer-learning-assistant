@@ -1,0 +1,43 @@
+{
+ "generated_at": "2026-09-28T02:50:43.214035+00:00",
+ "samples": 8,
+ "accounts": 2,
+ "note": "真实凭据抽查（--real）：模型=deepkey.example/gemini-3.8-flash（OpenAI 兼容，桥接回显法测供应商往返），TTS=MiniMax speech-2.8-hd 真实合成；两账户并发 × 各 8 样例。正式部署仍需在目标规格与样本协议下全量 30 次重跑。",
+ "first_text_seconds": {
+  "p29_min": 19.805,
+  "median": 4.524,
+  "max": 19.805,
+  "threshold": 30.0,
+  "pass": true
+ },
+ "audio_playable_seconds": {
+  "p29_min": 7.637,
+  "median": 5.048,
+  "max": 7.637,
+  "threshold": 60.0,
+  "pass": true
+ },
+ "raw": {
+  "text": [
+   3.851,
+   7.046,
+   4.163,
+   4.76,
+   3.816,
+   19.805,
+   7.546,
+   4.289
+  ],
+  "audio": [
+   7.637,
+   7.068,
+   4.154,
+   7.472,
+   3.788,
+   5.305,
+   4.79,
+   3.896
+  ]
+ },
+ "mode": "real-credentials-spot-check"
+}

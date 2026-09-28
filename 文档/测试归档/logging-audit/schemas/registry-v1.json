@@ -1,0 +1,1242 @@
+{
+  "schema_version": 1,
+  "required_common_fields": [
+    "environment",
+    "event",
+    "level",
+    "schema_version",
+    "service",
+    "timestamp"
+  ],
+  "allowed_fields": [
+    "actor_id",
+    "admin_id",
+    "attempt",
+    "attempt_id",
+    "audit_action",
+    "capability",
+    "cleaned_count",
+    "cleanup_stage",
+    "config_id",
+    "config_version",
+    "cursor",
+    "degraded",
+    "dropped_count",
+    "duration_ms",
+    "environment",
+    "error_code",
+    "event",
+    "event_id",
+    "exporter",
+    "external_request_id",
+    "generation",
+    "http_status",
+    "last_sequence",
+    "level",
+    "message",
+    "mode",
+    "object_id",
+    "object_type",
+    "owner_user_id",
+    "page_count",
+    "page_no",
+    "pending_count",
+    "progress_current",
+    "progress_total",
+    "query_id",
+    "queue_length",
+    "reason",
+    "region_id",
+    "request_id",
+    "resource_id",
+    "resource_type",
+    "result",
+    "retryable",
+    "revision",
+    "role",
+    "schema_version",
+    "sequence",
+    "service",
+    "span_id",
+    "stage",
+    "status",
+    "subject_id",
+    "target_actor_id",
+    "task_id",
+    "template_id",
+    "template_params",
+    "timestamp",
+    "tombstone_id",
+    "trace_id"
+  ],
+  "forbidden_field_names": [
+    "access_token",
+    "api_key",
+    "apikey",
+    "audio",
+    "authorization",
+    "body",
+    "connection_string",
+    "content",
+    "cookie",
+    "dsn",
+    "email",
+    "exception",
+    "file_name",
+    "file_path",
+    "filename",
+    "filepath",
+    "image",
+    "mail",
+    "master_key",
+    "ocr_text",
+    "passwd",
+    "password",
+    "payload",
+    "private_key",
+    "prompt",
+    "query",
+    "raw_error",
+    "refresh_token",
+    "request_body",
+    "response",
+    "response_body",
+    "secret",
+    "session_id",
+    "stack_trace",
+    "stacktrace",
+    "text",
+    "token",
+    "transcript",
+    "url"
+  ],
+  "field_max_length": {
+    "message": 200,
+    "reason": 200,
+    "template_id": 100,
+    "error_code": 64,
+    "event": 120,
+    "service": 40,
+    "environment": 40,
+    "stage": 40,
+    "mode": 16,
+    "status": 40,
+    "capability": 64,
+    "exporter": 40,
+    "resource_type": 40,
+    "object_type": 40,
+    "audit_action": 64,
+    "cleanup_stage": 40
+  },
+  "default_field_max_length": 120,
+  "stages": [
+    "upload",
+    "parse",
+    "ocr",
+    "figure_crop",
+    "index",
+    "retrieve",
+    "search",
+    "generate",
+    "board",
+    "tts",
+    "save",
+    "cleanup"
+  ],
+  "statuses": [
+    "started",
+    "succeeded",
+    "partial",
+    "failed",
+    "retry_scheduled",
+    "cancelled",
+    "stale_discarded"
+  ],
+  "levels": [
+    "DEBUG",
+    "INFO",
+    "WARN",
+    "ERROR"
+  ],
+  "error_codes": {
+    "UPLOAD_TYPE_REJECTED": {
+      "stage": "upload",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "文件类型或签名校验失败"
+    },
+    "UPLOAD_QUOTA_EXCEEDED": {
+      "stage": "upload",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "超出个人配额"
+    },
+    "PDF_ENCRYPTED": {
+      "stage": "parse",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "PDF 加密无法解析"
+    },
+    "PDF_PAGE_RENDER_FAILED": {
+      "stage": "parse",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "单页渲染失败"
+    },
+    "OCR_PAGE_TIMEOUT": {
+      "stage": "ocr",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "单页 OCR 超时"
+    },
+    "OCR_OUTPUT_INVALID": {
+      "stage": "ocr",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "OCR 输出结构无效"
+    },
+    "FIGURE_CROP_FAILED": {
+      "stage": "figure_crop",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "图块裁切失败"
+    },
+    "RETRIEVAL_UNAVAILABLE": {
+      "stage": "retrieve",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "检索索引不可用"
+    },
+    "SEARCH_TIMEOUT": {
+      "stage": "search",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "联网搜索超时"
+    },
+    "MODEL_NOT_CONFIGURED": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "模型未配置"
+    },
+    "MODEL_TIMEOUT": {
+      "stage": "generate",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "模型调用超时"
+    },
+    "BOARD_SCHEMA_INVALID": {
+      "stage": "board",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "板书 schema 校验失败"
+    },
+    "TTS_TIMEOUT": {
+      "stage": "tts",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "TTS 生成超时"
+    },
+    "CHECKPOINT_SAVE_FAILED": {
+      "stage": "save",
+      "retryable": true,
+      "user_visible": true,
+      "alert_level": "critical",
+      "description": "位置保存失败"
+    },
+    "STALE_RESULT_DISCARDED": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": false,
+      "alert_level": "warning",
+      "description": "旧 generation/迟到结果被拒绝"
+    },
+    "CLEANUP_OVERDUE": {
+      "stage": "cleanup",
+      "retryable": true,
+      "user_visible": false,
+      "alert_level": "critical",
+      "description": "在线清理逾期"
+    },
+    "TASK_LEASE_EXPIRED": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": false,
+      "alert_level": "warning",
+      "description": "任务租约过期，结果只能写诊断"
+    },
+    "EVENTS_EXPIRED": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "SSE 事件游标过期，需 REST 全量重建"
+    },
+    "ACCESS_DENIED": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": false,
+      "alert_level": "warning",
+      "description": "跨账户或越权访问被拒绝"
+    },
+    "AUDIT_WRITE_FAILED": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": false,
+      "alert_level": "critical",
+      "description": "安全审计写入失败"
+    },
+    "OBSERVABILITY_EXPORT_FAILED": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": false,
+      "alert_level": "warning",
+      "description": "观测导出失败，业务继续"
+    },
+    "PROMPT_UNAVAILABLE": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "提示词绑定不可用，禁止调用模型"
+    },
+    "DRAFT_CONFLICT": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "草稿并发冲突，拒绝后到写入"
+    },
+    "DRAFT_REVISION_MISMATCH": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "草稿 revision 不匹配（乐观锁）"
+    },
+    "INVALID_OUTLINE_STRUCTURE": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "大纲结构无效（空单元/讲次归属非法）"
+    },
+    "DAG_CYCLE": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "先修关系存在环"
+    },
+    "INVALID_PREREQUISITE": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "先修引用超出允许范围"
+    },
+    "ROUTE_STRUCTURE_INVALID": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "路线结构无效（至少一门课程）"
+    },
+    "DUPLICATE_IDEMPOTENCY_KEY": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "幂等键与既有请求冲突"
+    },
+    "AWAITING_SCOPE_CLARIFICATION": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "规划范围存在歧义，等待用户澄清"
+    },
+    "AWAITING_INTAKE": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "生成前访谈等待用户作答"
+    },
+    "AWAITING_SEARCH_DECISION": {
+      "stage": "search",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "搜索失败，等待用户选择重试或离线继续"
+    },
+    "MODEL_CAPABILITY_UNAVAILABLE": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "模型不支持所需能力，已停止调用"
+    },
+    "CONTEXT_BUDGET_EXCEEDED": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "warning",
+      "description": "上下文超出预算，需要缩小范围或补充资料"
+    },
+    "LESSON_UNLOCK_REQUIRED": {
+      "stage": "generate",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "未确认大纲，禁止启动教学"
+    },
+    "CHECKPOINT_STALE": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": true,
+      "alert_level": "none",
+      "description": "播放位置保存的 client_seq 已过期（单调校验拒绝旧请求）"
+    },
+    "INTERNAL_ERROR": {
+      "stage": "save",
+      "retryable": false,
+      "user_visible": false,
+      "alert_level": "critical",
+      "description": "内部错误，已映射为受控错误码"
+    }
+  },
+  "vendor_error_map": {
+    "timeout": "MODEL_TIMEOUT",
+    "connection_error": "RETRIEVAL_UNAVAILABLE",
+    "rate_limit": "SEARCH_TIMEOUT",
+    "invalid_api_key": "MODEL_NOT_CONFIGURED",
+    "quota_exceeded": "UPLOAD_QUOTA_EXCEEDED",
+    "encrypted_pdf": "PDF_ENCRYPTED",
+    "output_schema_mismatch": "OCR_OUTPUT_INVALID"
+  },
+  "events": {
+    "task.accepted": {
+      "types": [
+        "runtime",
+        "task"
+      ],
+      "required_fields": [
+        "attempt",
+        "environment",
+        "event",
+        "level",
+        "schema_version",
+        "service",
+        "task_id",
+        "timestamp",
+        "trace_id"
+      ],
+      "optional_fields": [
+        "actor_id",
+        "generation",
+        "request_id",
+        "stage",
+        "subject_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "任务受理"
+    },
+    "task.started": {
+      "types": [
+        "runtime",
+        "task"
+      ],
+      "required_fields": [
+        "attempt",
+        "environment",
+        "event",
+        "level",
+        "schema_version",
+        "service",
+        "stage",
+        "task_id",
+        "timestamp",
+        "trace_id"
+      ],
+      "optional_fields": [
+        "actor_id",
+        "generation",
+        "request_id",
+        "subject_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "任务阶段开始"
+    },
+    "task.stage.succeeded": {
+      "types": [
+        "runtime",
+        "task"
+      ],
+      "required_fields": [
+        "duration_ms",
+        "environment",
+        "event",
+        "level",
+        "schema_version",
+        "service",
+        "stage",
+        "status",
+        "task_id",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "actor_id",
+        "attempt",
+        "page_count",
+        "page_no",
+        "progress_current",
+        "progress_total",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "阶段成功"
+    },
+    "task.stage.partial": {
+      "types": [
+        "runtime",
+        "task"
+      ],
+      "required_fields": [
+        "duration_ms",
+        "environment",
+        "event",
+        "level",
+        "schema_version",
+        "service",
+        "stage",
+        "status",
+        "task_id",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "attempt",
+        "error_code",
+        "page_no",
+        "reason",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "阶段部分可用"
+    },
+    "task.stage.failed": {
+      "types": [
+        "runtime",
+        "task"
+      ],
+      "required_fields": [
+        "duration_ms",
+        "environment",
+        "error_code",
+        "event",
+        "level",
+        "schema_version",
+        "service",
+        "stage",
+        "status",
+        "task_id",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "attempt",
+        "page_no",
+        "reason",
+        "retryable",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "阶段失败"
+    },
+    "task.retry_scheduled": {
+      "types": [
+        "runtime",
+        "task"
+      ],
+      "required_fields": [
+        "attempt",
+        "environment",
+        "error_code",
+        "event",
+        "level",
+        "schema_version",
+        "service",
+        "task_id",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "generation",
+        "retryable",
+        "stage",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "已安排重试"
+    },
+    "task.cancelled": {
+      "types": [
+        "runtime",
+        "task"
+      ],
+      "required_fields": [
+        "environment",
+        "event",
+        "level",
+        "schema_version",
+        "service",
+        "status",
+        "task_id",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "actor_id",
+        "attempt",
+        "generation",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "任务取消"
+    },
+    "task.stale_discarded": {
+      "types": [
+        "runtime",
+        "task"
+      ],
+      "required_fields": [
+        "attempt",
+        "environment",
+        "event",
+        "generation",
+        "level",
+        "schema_version",
+        "service",
+        "task_id",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "error_code",
+        "status",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "过期结果仅显示状态，不覆盖当前结果"
+    },
+    "task.events.expired": {
+      "types": [
+        "runtime"
+      ],
+      "required_fields": [
+        "environment",
+        "event",
+        "last_sequence",
+        "level",
+        "schema_version",
+        "service",
+        "task_id",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "actor_id",
+        "cursor",
+        "request_id"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "SSE 游标过期，映射为客户端全量刷新"
+    },
+    "auth.login.failed": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp",
+        "trace_id"
+      ],
+      "optional_fields": [
+        "reason",
+        "request_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "登录失败（仅必要的个人历史）"
+    },
+    "auth.register.submitted": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "object_id",
+        "object_type",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "注册提交"
+    },
+    "auth.email.verified": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "object_id",
+        "object_type",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "邮箱验证成功"
+    },
+    "auth.password.reset_requested": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "object_id",
+        "object_type",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "申请密码重置"
+    },
+    "auth.password.reset_completed": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "object_id",
+        "object_type",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "密码重置完成"
+    },
+    "auth.session.revoked": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp",
+        "trace_id"
+      ],
+      "optional_fields": [
+        "reason",
+        "target_actor_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "会话撤销"
+    },
+    "admin.approval.changed": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "admin_id",
+        "environment",
+        "event",
+        "level",
+        "object_id",
+        "object_type",
+        "result",
+        "schema_version",
+        "service",
+        "target_actor_id",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "reason",
+        "trace_id"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "管理员审批变更"
+    },
+    "config.changed": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "object_id",
+        "object_type",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "capability",
+        "config_id",
+        "config_version",
+        "trace_id"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "能力配置变更"
+    },
+    "external.disclosure.confirmed": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "capability",
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "config_id",
+        "object_id",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "外发确认"
+    },
+    "connector.bound": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "object_id",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "连接器绑定"
+    },
+    "connector.revoked": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "object_id",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "reason",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "连接器撤销"
+    },
+    "access.denied": {
+      "types": [
+        "runtime",
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "reason",
+        "resource_id",
+        "resource_type",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "request_id",
+        "task_id",
+        "trace_id"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "越权访问拒绝"
+    },
+    "resource.delete.requested": {
+      "types": [
+        "audit",
+        "runtime"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "object_id",
+        "object_type",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "cleanup_stage",
+        "tombstone_id",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "资源删除请求"
+    },
+    "cleanup.completed": {
+      "types": [
+        "audit",
+        "runtime"
+      ],
+      "required_fields": [
+        "cleanup_stage",
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "cleaned_count",
+        "duration_ms",
+        "object_id",
+        "object_type",
+        "pending_count",
+        "tombstone_id",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "清理完成"
+    },
+    "restore.locked": {
+      "types": [
+        "audit",
+        "runtime"
+      ],
+      "required_fields": [
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "reason",
+        "tombstone_id",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "备份恢复锁定"
+    },
+    "restore.replayed": {
+      "types": [
+        "audit",
+        "runtime"
+      ],
+      "required_fields": [
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "reason",
+        "tombstone_id",
+        "trace_id"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "恢复期间墓碑重放（被删除对象重新移除）"
+    },
+    "restore.unlocked": {
+      "types": [
+        "audit",
+        "runtime"
+      ],
+      "required_fields": [
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "reason",
+        "tombstone_id",
+        "trace_id"
+      ],
+      "user_visible": true,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "恢复核验完成并解除锁定"
+    },
+    "restore.verify_failed": {
+      "types": [
+        "audit",
+        "runtime"
+      ],
+      "required_fields": [
+        "environment",
+        "event",
+        "level",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "reason",
+        "tombstone_id",
+        "trace_id"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "恢复核验失败（仍存在可访问的已删除对象），保持锁定"
+    },
+    "audit.query.executed": {
+      "types": [
+        "audit"
+      ],
+      "required_fields": [
+        "actor_id",
+        "environment",
+        "event",
+        "level",
+        "query_id",
+        "result",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "object_type",
+        "role",
+        "trace_id"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "管理员审计查询自身留痕"
+    },
+    "observability.export.failed": {
+      "types": [
+        "runtime",
+        "metric"
+      ],
+      "required_fields": [
+        "environment",
+        "error_code",
+        "event",
+        "exporter",
+        "level",
+        "schema_version",
+        "service",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "degraded",
+        "dropped_count",
+        "queue_length"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "观测导出失败"
+    },
+    "model.call.completed": {
+      "types": [
+        "runtime",
+        "metric"
+      ],
+      "required_fields": [
+        "duration_ms",
+        "environment",
+        "event",
+        "level",
+        "schema_version",
+        "service",
+        "stage",
+        "status",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "attempt",
+        "capability",
+        "config_id",
+        "mode",
+        "reason",
+        "task_id",
+        "trace_id"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "模型/生成调用成功（聚合指标，无内容字段）"
+    },
+    "model.call.failed": {
+      "types": [
+        "runtime",
+        "metric"
+      ],
+      "required_fields": [
+        "duration_ms",
+        "environment",
+        "error_code",
+        "event",
+        "level",
+        "schema_version",
+        "service",
+        "stage",
+        "status",
+        "timestamp"
+      ],
+      "optional_fields": [
+        "attempt",
+        "capability",
+        "config_id",
+        "mode",
+        "reason",
+        "task_id",
+        "trace_id"
+      ],
+      "user_visible": false,
+      "retryable": false,
+      "alert_level": "none",
+      "description": "模型/生成调用失败（聚合指标，无内容字段）"
+    }
+  }
+}

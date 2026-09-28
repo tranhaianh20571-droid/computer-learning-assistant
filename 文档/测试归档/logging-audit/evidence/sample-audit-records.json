@@ -1,0 +1,40 @@
+[
+  {
+    "schema_version": 1,
+    "timestamp": "2026-09-26T08:13:00.000Z",
+    "level": "INFO",
+    "event": "admin.approval.changed",
+    "service": "api",
+    "environment": "test",
+    "audit_action": "admin.approval.changed",
+    "actor_id": "admin_0001",
+    "object_type": "user",
+    "object_id": "user_9aa1",
+    "result": "failed",
+    "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reason": "already_disabled",
+    "admin_id": "admin_0001",
+    "role": "app",
+    "event_id": "aud_5394a6e1e4b5422d",
+    "target_actor_id": "user_9aa1"
+  },
+  {
+    "schema_version": 1,
+    "timestamp": "2026-09-26T08:13:00.000Z",
+    "level": "INFO",
+    "event": "auth.login.failed",
+    "service": "api",
+    "environment": "test",
+    "audit_action": "auth.login.failed",
+    "actor_id": "user_9aa1",
+    "object_type": null,
+    "object_id": null,
+    "result": "failed",
+    "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "reason": "bad_password",
+    "admin_id": null,
+    "role": "app",
+    "event_id": "aud_c090933105274b4e",
+    "target_actor_id": null
+  }
+]

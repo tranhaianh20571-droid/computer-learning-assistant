@@ -1,0 +1,33 @@
+{
+  "description": "合成测试夹具：禁止真实密钥、邮箱、教材或供应商响应",
+  "users": [
+    { "actor_id": "user_4c21", "role": "user", "email": "synthetic.a@fake.test" },
+    { "actor_id": "user_9aa1", "role": "user", "email": "synthetic.b@fake.test" },
+    { "actor_id": "admin_0001", "role": "admin", "email": "synthetic.admin@fake.test" }
+  ],
+  "resources": [
+    { "resource_type": "material", "resource_id": "material_81b0", "owner_user_id": "user_4c21" },
+    { "resource_type": "task", "resource_id": "task_7f3a", "owner_user_id": "user_4c21" },
+    { "resource_type": "task", "resource_id": "task_other", "owner_user_id": "user_9aa1" }
+  ],
+  "fake_secrets": {
+    "api_key": "sk-test-fake-key-000000000000",
+    "email": "synthetic.user@fake.test",
+    "url_with_query": "https://vendor.example.test/v1/ocr?api_key=REDACT&file=secret.pdf",
+    "material_text": "这是教材正文段落，不得出现在日志中。"
+  },
+  "vendor_errors": [
+    { "raw": "Timeout while waiting for model", "expected_code": "MODEL_TIMEOUT" },
+    { "raw": "invalid_api_key provided", "expected_code": "MODEL_NOT_CONFIGURED" },
+    { "raw": "connection reset by peer", "expected_code": "RETRIEVAL_UNAVAILABLE" },
+    { "raw": "rate limit exceeded", "expected_code": "SEARCH_TIMEOUT" },
+    { "raw": "encrypted_pdf cannot parse", "expected_code": "PDF_ENCRYPTED" },
+    { "raw": "unknown vendor chatter", "expected_code": "INTERNAL_ERROR" }
+  ],
+  "traceparent_samples": [
+    { "header": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "valid": true },
+    { "header": "garbage", "valid": false },
+    { "header": null, "valid": false },
+    { "header": "00-00000000000000000000000000000000-00f067aa0ba902b7-01", "valid": false }
+  ]
+}

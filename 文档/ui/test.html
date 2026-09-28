@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>布局测试</title>
+<style>
+body { margin: 0; font-family: system-ui; background: #0a0d12; color: #e8eaec; }
+.test-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; padding: 20px; }
+.test-card { background: #161d2b; border: 1px solid #30343b; border-radius: 8px; overflow: hidden; }
+.test-card h3 { background: #1e2126; margin: 0; padding: 12px 16px; font-size: 14px; border-bottom: 1px solid #30343b; }
+.test-card iframe { width: 100%; height: 500px; border: 0; background: white; }
+.nav { padding: 16px 20px; background: #1e2126; border-bottom: 1px solid #30343b; }
+.nav a { color: #38bdf8; text-decoration: none; margin-right: 20px; }
+.nav a:hover { text-decoration: underline; }
+.status { padding: 8px 12px; background: #1e7248; color: white; border-radius: 4px; display: inline-block; margin: 12px; }
+</style>
+</head>
+<body>
+<div class="nav">
+  <strong>学伴布局测试</strong>
+  <a href="index.html#/home" target="test1">首页</a>
+  <a href="index.html#/settings/models" target="test2">设置-模型</a>
+  <a href="index.html#/settings/account" target="test3">设置-账户</a>
+</div>
+
+<div class="status">✓ 白屏问题已修复 - 设置页面现在应该可以正常显示</div>
+
+<div class="test-grid">
+  <div class="test-card">
+    <h3>首页（有侧边栏）</h3>
+    <iframe name="test1" src="index.html#/home"></iframe>
+  </div>
+
+  <div class="test-card">
+    <h3>设置/模型与语音（无侧边栏）</h3>
+    <iframe name="test2" src="index.html#/settings/models"></iframe>
+  </div>
+
+  <div class="test-card">
+    <h3>设置/账户与内容（无侧边栏）</h3>
+    <iframe name="test3" src="index.html#/settings/account"></iframe>
+  </div>
+</div>
+
+<script>
+// 监听iframe加载
+document.querySelectorAll('iframe').forEach(iframe => {
+  iframe.onload = function() {
+    const doc = iframe.contentDocument;
+    const app = doc.getElementById('app');
+    const hasContent = app && app.innerHTML.length > 100;
+    const card = iframe.closest('.test-card');
+    const h3 = card.querySelector('h3');
+
+    if (hasContent) {
+      h3.style.background = '#1e7248';
+      h3.innerHTML += ' <span style="float:right;">✓ 已加载</span>';
+    } else {
+      h3.style.background = '#b42318';
+      h3.innerHTML += ' <span style="float:right;">✗ 白屏</span>';
+    }
+  };
+});
+</script>
+</body>
+</html>

@@ -145,12 +145,13 @@ class TeachingService:
             if adapter is None:
                 raise terr("MODEL_CAPABILITY_UNAVAILABLE", "no model adapter")
             messages = self._step_messages(prompt, conv)
-            from ..planning.model_runner import run_structured
+            from ..agents.runner import run_structured_agent
+            from ..agents.tools import lesson_step_output_validator
 
-            run = run_structured(
+            run = run_structured_agent(
                 adapter, LessonPlanCandidate, messages,
-                schema=LessonPlanCandidate.model_json_schema(),
                 tool_name="submit_lesson_steps",
+                output_validator=lesson_step_output_validator,
             )
             candidate = run.payload.steps[0]
             duration_ms = validate_step_duration(candidate.text)
@@ -658,7 +659,7 @@ class TeachingService:
                     {"role": "user", "content": f"{prompt.get('template_snapshot', '')}\n问题：{question_text}"},
                 ],
                 tool_name="submit_followup",
-            )
+            ).payload
             with self.db.session() as sess:
                 if answer.board is not None:
                     scene = declaration_to_scene(answer.board)

@@ -160,7 +160,7 @@ def test_runner_tool_mode_assembles_forced_tools():
     out = run_structured_agent(
         ad, _StepOut, [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"}],
         tool_name="submit_test",
-    )
+    ).payload
     assert isinstance(out, _StepOut) and out.title == "t"
     opts = ad.calls[0]["opts"]
     assert "tools" in opts and opts["tool_choice"]["function"]["name"]
@@ -169,7 +169,7 @@ def test_runner_tool_mode_assembles_forced_tools():
 
 def test_runner_falls_back_to_prompted_when_tool_unavailable():
     ad = _GatedAdapter(tool_ok=False, result={"content": '{"title": "p", "text": "y"}'})
-    out = run_structured_agent(ad, _StepOut, [{"role": "user", "content": "go"}])
+    out = run_structured_agent(ad, _StepOut, [{"role": "user", "content": "go"}]).payload
     assert out.title == "p"
     assert all("tools" not in c["opts"] for c in ad.calls), "prompted 档不应带 tools"
 
@@ -187,11 +187,11 @@ def test_runner_marks_failure_cache_and_degrades():
             return {"content": '{"title": "d", "text": "z"}'}
 
     ad = _RealSig()
-    out = run_structured_agent(ad, _StepOut, [{"role": "user", "content": "go"}])
+    out = run_structured_agent(ad, _StepOut, [{"role": "user", "content": "go"}]).payload
     assert out.title == "d"
     # 第二次：失败缓存应直接跳过 tool 档（全部调用无 tools）
     ad2 = _RealSig()
-    out2 = run_structured_agent(ad2, _StepOut, [{"role": "user", "content": "go"}])
+    out2 = run_structured_agent(ad2, _StepOut, [{"role": "user", "content": "go"}]).payload
     assert out2.title == "d"
     assert all("tools" not in c["opts"] for c in ad2.calls)
     reset_mode_capability_cache()
@@ -255,3 +255,66 @@ def test_stream_function_yields_deltas():
         return [d async for d in fn(msgs, None)]
 
     assert asyncio.run(_run()) == ["你", "好", "！"]
+
+
+# ---------------------------------------------------------------------------
+# S2：教学步骤业务校验 → ModelRetry 字段级回喂
+# ---------------------------------------------------------------------------
+
+from backend.agents.tools import lesson_step_issues, lesson_step_output_validator  # noqa: E402
+from backend.teaching.outputs import BoardDeclaration, LessonPlanCandidate, StepCandidate  # noqa: E402
+
+
+def _step_payload(board_over=None, text="这是一个足够长的讲解文本，用来通过最短字数校验要求。" * 4):
+    board = {
+        "title": "t", "points": ["a"],
+        "nodes": [{"id": "n1", "label": "节点"}],
+        "edges": [{"from_id": "n1", "to_id": "n1", "label": ""}],
+    }
+    board.update(board_over or {})
+    return {
+        "steps": [{"title": "s", "text": text, "board": board}]
+    }
+
+
+def test_lesson_step_issues_field_level():
+    cand = LessonPlanCandidate.model_validate(
+        _step_payload(board_over={
+            "edges": [{"from_id": "n1", "to_id": "ghost", "label": ""}],
+            "reveal_ms": [100, 200],
+        })
+    )
+    issues = lesson_step_issues(cand)
+    assert any("edge references unknown node" in i or "板书" in i for i in issues)
+    assert any("reveal_ms" in i for i in issues)
+
+
+def test_lesson_step_output_validator_retries_with_feedback():
+    """坏板书 → ModelRetry 清单回喂 → 第二次给好答案 → 通过（字段级回喂闭环）。"""
+    import json as _json
+
+    good = _step_payload()
+    bad = _step_payload(board_over={"edges": [{"from_id": "n1", "to_id": "ghost", "label": ""}]})
+
+    class _ScriptedAdapter(_GatedAdapter):
+        def __init__(self):
+            super().__init__()
+            self.script = [bad, good]
+
+        def generate(self, messages, **opts):
+            self.calls.append({"messages": list(messages), "opts": opts})
+            payload = self.script.pop(0) if self.script else good
+            return {"tool_arguments": _json.dumps(payload, ensure_ascii=False)}
+
+    ad = _ScriptedAdapter()
+    out = run_structured_agent(
+        ad, LessonPlanCandidate,
+        [{"role": "user", "content": "生成教学步骤"}],
+        tool_name="submit_lesson_steps",
+        output_validator=lesson_step_output_validator,
+    ).payload
+    assert isinstance(out, LessonPlanCandidate)
+    assert len(ad.calls) >= 2, "校验失败必须回喂重试"
+    # 回喂信息进入对话历史（RetryPromptPart 文本含具体问题）
+    history = " ".join(str(getattr(m, "parts", "")) for m in [])
+    assert ad.calls[1]["messages"], "第二次调用应携带重试上下文"

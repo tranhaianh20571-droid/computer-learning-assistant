@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, List, Optional, Type
 
 from pydantic import BaseModel
@@ -26,6 +27,14 @@ BRIDGE_MODES = ("tool", "prompted")
 OUTPUT_RETRIES = 2  # 与 model_runner prompted 档重试上限对齐
 
 
+@dataclass
+class AgentRunResult:
+    """结构化生成结果：payload 为模型类实例；mode 为成功档位（事件参数用）。"""
+
+    payload: Any
+    mode: str
+
+
 def _split_messages(messages: List[dict]) -> tuple[str, str]:
     """适配器形 messages → (instructions, user_prompt)。"""
     system_parts = [str(m["content"]) for m in messages if m.get("role") == "system"]
@@ -33,15 +42,19 @@ def _split_messages(messages: List[dict]) -> tuple[str, str]:
     return "\n".join(system_parts), "\n\n".join(user_parts)
 
 
-def _build_agent(adapter: Any, output_type, instructions: str, *, stream: bool = False):
+def _build_agent(adapter: Any, output_type, instructions: str, *, stream: bool = False,
+                 output_validator=None):
     from pydantic_ai import Agent
 
-    return Agent(
+    agent = Agent(
         model=make_bridge_model(adapter, stream=stream),
         output_type=output_type,
         instructions=instructions,
         retries=OUTPUT_RETRIES,
     )
+    if output_validator is not None:
+        agent.output_validator(output_validator)
+    return agent
 
 
 def _is_bridge_failure(exc: BaseException) -> bool:
@@ -64,8 +77,13 @@ def run_structured_agent(
     tool_name: str = "submit_candidate",
     stage: str = "generate",
     max_requests: Optional[int] = None,
+    output_validator=None,
 ) -> Any:
-    """按 tool→prompted 降级跑结构化生成；返回 model_cls 实例。"""
+    """按 tool→prompted 降级跑结构化生成；返回 model_cls 实例。
+
+    output_validator：业务校验钩子（Agent.output_validator），失败抛
+    ModelRetry 时框架带错误清单重试（S2 字段级回喂）。
+    """
     from pydantic_ai.output import PromptedOutput, ToolOutput
 
     gate = ModelCapabilityGate(adapter, tool_name=tool_name)
@@ -74,7 +92,7 @@ def run_structured_agent(
     degraded: List[str] = []
     for mode in candidate_modes:
         output_type = ToolOutput(model_cls) if mode == "tool" else PromptedOutput(model_cls)
-        agent = _build_agent(adapter, output_type, instructions)
+        agent = _build_agent(adapter, output_type, instructions, output_validator=output_validator)
         started = monotonic_ms()
         try:
             result = agent.run_sync(prompt, usage_limits=agent_usage_limits(max_requests))
@@ -95,7 +113,7 @@ def run_structured_agent(
             stage=stage, outcome="succeeded", mode=mode,
             duration_ms=monotonic_ms() - started,
         )
-        return result.output
+        return AgentRunResult(payload=result.output, mode=mode)
     raise error("MODEL_CAPABILITY_UNAVAILABLE", "all agent modes failed")
 
 

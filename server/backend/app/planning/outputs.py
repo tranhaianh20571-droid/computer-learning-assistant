@@ -164,6 +164,42 @@ def _validate_prereq_indices(edges, node_total: int, key) -> None:
         raise error("DAG_CYCLE", "prerequisite graph has a cycle")
 
 
+# ---- 生成前访谈（v2）：问题集由模型产出，服务端校验数量/类型/选项 ----
+
+class IntakeOption(BaseModel):
+    key: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=60)
+    detail: str = Field(default="", max_length=120)
+
+
+class IntakeQuestion(BaseModel):
+    question_id: str = Field(min_length=1, max_length=40)
+    question: str = Field(min_length=1, max_length=200)
+    kind: str  # single | multi
+    options: list[IntakeOption] = Field(min_length=2, max_length=8)
+    skippable: bool = True
+
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, v: str) -> str:
+        if v not in ("single", "multi"):
+            raise ValueError("kind must be single|multi")
+        return v
+
+
+class IntakeQuestionSet(BaseModel):
+    questions: list[IntakeQuestion] = Field(max_length=3)
+
+
+def validate_intake_question_set(s: IntakeQuestionSet) -> dict:
+    if not s.questions:
+        return {"questions": []}
+    ids = [q.question_id for q in s.questions]
+    if len(set(ids)) != len(ids):
+        raise error("OUTPUT_INVALID", "duplicate intake question_id")
+    return s.model_dump()
+
+
 def validate_content_json(kind: str, content: dict) -> dict:
     """草稿/候选 content_json 的入口校验：按 kind 解析并二次校验。
 
@@ -187,6 +223,8 @@ def validate_content_json(kind: str, content: dict) -> dict:
 
 
 __all__ = [
+    "IntakeOption", "IntakeQuestion", "IntakeQuestionSet", "validate_intake_question_set",
+    
     "RouteCandidate", "OutlineCandidate", "ChatAnswer",
     "RouteStageOut", "RouteCourseOut", "OutlineUnitOut", "OutlineLessonOut",
     "CONTEXT_BUDGET_DEFAULTS", "TRUNCATION_PRIORITY", "SCENE_ELEMENT_WHITELIST",

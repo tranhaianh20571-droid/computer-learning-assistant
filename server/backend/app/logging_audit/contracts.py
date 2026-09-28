@@ -360,6 +360,10 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "规划范围存在歧义，等待用户澄清",
         ),
         ErrorCodeSpec(
+            "AWAITING_INTAKE", TaskStage.GENERATE, False, True, AlertLevel.NONE,
+            "生成前访谈等待用户作答",
+        ),
+        ErrorCodeSpec(
             "AWAITING_SEARCH_DECISION", TaskStage.SEARCH, False, True, AlertLevel.NONE,
             "搜索失败，等待用户选择重试或离线继续",
         ),

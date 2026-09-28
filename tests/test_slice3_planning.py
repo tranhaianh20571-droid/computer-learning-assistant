@@ -60,6 +60,29 @@ def _setup_route(env) -> tuple[str, str]:
     return user_id, token, r.json()["route_id"]
 
 
+def _run_with_intake(client, token: str, task_id: str, *, scope: str | None = "route") -> dict:
+    """v2：执行任务；落入生成前访谈则按规则作答后继续，返回最终 run body。
+
+    scope=None 表示跳过范围题（保留旧的范围澄清路径可被测到）。
+    """
+    headers = auth_headers(token)
+    r = client.post(f"/api/planning/tasks/{task_id}/run", headers=headers)
+    body = r.json()
+    if body.get("wait_state") != "awaiting_intake":
+        return body
+    answers = []
+    if scope:
+        answers.append({"question_id": "scope", "selections": [scope]})
+    answers.append({"question_id": "foundation", "selections": ["some"]})
+    answers.append({"question_id": "depth", "selections": ["practice"]})
+    r = client.post(
+        f"/api/planning/tasks/{task_id}/decision", headers=headers,
+        json={"kind": "intake", "answers": answers},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 class TestScopeResolution:
     def test_explicit_scope_wins(self, env) -> None:
         from backend.planning.scope import ScopeSignals, resolve_scope
@@ -113,9 +136,7 @@ class TestPlanningWorker:
         task_id = r.json()["task_id"]
         assert r.json()["prompt_binding_id"]
 
-        r = env["client"].post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-        assert r.status_code == 200, r.text
-        body = r.json()
+        body = _run_with_intake(env["client"], token, task_id)
         assert body["task_status"] == "succeeded"
         assert body["mode"] == "native"
 
@@ -160,9 +181,9 @@ class TestPlanningWorker:
                   "planning_scope": "route", "target_route_id": route_id},
         ).json()["task_id"]
 
-        r = env["client"].post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-        assert r.json()["task_status"] == "partial"
-        assert r.json()["wait_state"] == "awaiting_search_decision"
+        body = _run_with_intake(env["client"], token, task_id)
+        assert body["task_status"] == "partial"
+        assert body["wait_state"] == "awaiting_search_decision"
 
         state = env["client"].get(
             f"/api/planning/tasks/{task_id}", headers=auth_headers(token)
@@ -204,8 +225,8 @@ class TestPlanningWorker:
             json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
                   "planning_scope": "route", "target_route_id": route_id},
         ).json()["task_id"]
-        r = env["client"].post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-        assert r.json()["wait_state"] == "awaiting_search_decision"
+        body = _run_with_intake(env["client"], token, task_id)
+        assert body["wait_state"] == "awaiting_search_decision"
 
         # 适配器恢复后重试
         search.fail = None
@@ -227,9 +248,9 @@ class TestPlanningWorker:
                   "planning_scope": "auto", "target_route_id": route_id,
                   "signals": {"cross_domain_goal": True, "single_textbook": True}},
         ).json()["task_id"]
-        r = env["client"].post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-        assert r.json()["task_status"] == "partial"
-        assert r.json()["wait_state"] == "awaiting_scope_clarification"
+        body = _run_with_intake(env["client"], token, task_id, scope=None)
+        assert body["task_status"] == "partial"
+        assert body["wait_state"] == "awaiting_scope_clarification"
 
         r = env["client"].post(
             f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(token),
@@ -251,7 +272,7 @@ class TestPlanningWorker:
             json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
                   "planning_scope": "route", "target_route_id": route_id},
         ).json()["task_id"]
-        body = client.post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token)).json()
+        body = _run_with_intake(client, token, task_id)
         draft_id = body["draft"]["draft_id"]
         draft = state = None
         state = client.app.state.slice3
@@ -304,9 +325,7 @@ class TestDegradation:
             json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
                   "planning_scope": "route", "target_route_id": route_id},
         ).json()["task_id"]
-        r = env["client"].post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-        assert r.status_code == 200, r.text
-        body = r.json()
+        body = _run_with_intake(env["client"], token, task_id)
         assert body["task_status"] == "succeeded"
         assert body["mode"] == "prompted"           # 降级到第三档
         assert body["degraded_from"] == ["native", "tool"]
@@ -322,8 +341,7 @@ class TestDegradation:
             json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
                   "planning_scope": "route", "target_route_id": route_id},
         ).json()["task_id"]
-        r = env["client"].post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-        body = r.json()
+        body = _run_with_intake(env["client"], token, task_id)
         assert body["task_status"] == "failed"
         assert body["error_code"] == "MODEL_CAPABILITY_UNAVAILABLE"
         assert adapter.generate_calls == []  # 未发起任何模型调用
@@ -360,7 +378,7 @@ class TestDegradation:
                   "planning_scope": "route", "target_route_id": route_id},
         ).json()["task_id"]
         binding_before = client.get(f"/api/tasks/{task_id}/prompt", headers=auth_headers(token)).json()
-        client.post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
+        _run_with_intake(client, token, task_id)
         # 恢复（离线继续）
         client.post(f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(token),
                     json={"decision": "offline_continue"})

@@ -43,6 +43,7 @@ from .outputs import (
     validate_outline_candidate,
     validate_route_candidate,
 )
+from .outputs import IntakeQuestionSet, validate_intake_question_set
 from .retrieval import PlanningRetrievalService, RetrievalResult, validate_material_ownership
 from .scope import ScopeSignals, resolve_scope
 from .search import SearchGate, SearchOutcome
@@ -52,6 +53,36 @@ PLAN_PROMPTS = {
     "outline_generate": "outline_generate_v1",
     "planning_revise": "planning_revise_v1",
 }
+
+# 生成前访谈：轮次硬上限 4（<5）；第一轮规则问卷（范围并入第一题，合并旧的范围澄清），
+# 后续轮次由模型按已答内容追问，失败/无必要 → 直接进入生成（降级不阻塞）。
+MAX_INTAKE_ROUNDS = 4
+
+INTAKE_ROUND1 = [
+    {
+        "question_id": "scope", "question": "这次想怎么规划？", "kind": "single", "skippable": False,
+        "options": [
+            {"key": "course", "label": "单门课程", "detail": "聚焦一个主题，一份大纲若干讲次"},
+            {"key": "route", "label": "多课程路线", "detail": "覆盖一个领域，分阶段与先修关系"},
+        ],
+    },
+    {
+        "question_id": "foundation", "question": "你在相关领域的基础如何？", "kind": "single", "skippable": True,
+        "options": [
+            {"key": "zero", "label": "零基础", "detail": "从概念讲起"},
+            {"key": "some", "label": "有一些概念", "detail": "需要系统梳理"},
+            {"key": "solid", "label": "较熟练", "detail": "查漏补缺、进阶为主"},
+        ],
+    },
+    {
+        "question_id": "depth", "question": "希望学到多细？", "kind": "single", "skippable": True,
+        "options": [
+            {"key": "concept", "label": "概念入门", "detail": "知道是什么、什么时候用"},
+            {"key": "practice", "label": "工程实战", "detail": "能上手做项目"},
+            {"key": "deep", "label": "原理深挖", "detail": "底层为什么这么设计"},
+        ],
+    },
+]
 
 
 class PlanningService:
@@ -226,6 +257,11 @@ class PlanningService:
     def _pipeline(self, lease: Lease, task_id: str, kind: str, state: PlanningTaskStateRow, prompt: dict) -> dict:
         material_ids = load_json_field(state.material_ids_json, [])
 
+        # 0. 生成前访谈（route_generate 入口；范围并入第一轮；上限 4 轮，失败降级直接生成）
+        intake_profile = None
+        if kind == "route_generate":
+            intake_profile = self._intake_gate(lease, task_id, state)
+
         # 1. 范围解析
         resolved_scope = state.resolved_scope
         if not resolved_scope:
@@ -378,10 +414,133 @@ class PlanningService:
         if search_outcome and search_outcome.ok:
             external_note = f"（联网参考：{len(search_outcome.results)} 条外部来源）"
         user_content = f"{template}\n目标对象：{state.target_id or 'route'} {external_note}"
+        intake = load_json_field(state.intake_json, None)
+        if intake and intake.get("answers"):
+            profile = self._profile_text(intake["answers"])
+            if profile:
+                user_content += f"\n学习者画像（来自生成前访谈）：{profile}"
         return [
             {"role": "system", "content": "你是学习规划助手。只输出符合要求的 JSON。"},
             {"role": "user", "content": user_content},
         ]
+
+    # ------------------------------------------------------------------
+    # 生成前访谈（v2）：规则第一轮 + 模型追问（上限 MAX_INTAKE_ROUNDS 轮）
+    # ------------------------------------------------------------------
+    def _intake_gate(self, lease: Lease, task_id: str, state: PlanningTaskStateRow) -> Optional[dict]:
+        """无访谈记录 → 抛第一轮问卷；已有答案 → 视需要追问或完成（返回学习者答案）。"""
+        data = load_json_field(state.intake_json, None)
+        if data and data.get("done"):
+            return {"answers": data.get("answers", [])}
+        round_no = int(data.get("round", 0)) if data else 0
+        if round_no >= MAX_INTAKE_ROUNDS:
+            self._intake_mark_done(task_id, data or {})
+            return {"answers": (data or {}).get("answers", [])}
+        if not data:
+            questions = INTAKE_ROUND1
+            self._intake_save(task_id, {"round": 1, "questions": questions, "answers": [], "done": False})
+            raise WaitStateSignal(
+                "awaiting_intake",
+                question=f"{len(questions)} 个问题，了解你的基础与期望（可跳过）",
+            )
+        questions = self._intake_followups(task_id, state, data.get("answers", []))
+        if not questions:
+            self._intake_mark_done(task_id, data)
+            return {"answers": data.get("answers", [])}
+        self._intake_save(task_id, {**data, "round": round_no + 1, "questions": questions, "done": False})
+        raise WaitStateSignal(
+            "awaiting_intake",
+            question=f"还有 {len(questions)} 个问题，帮助把规划调得更准（可跳过）",
+        )
+
+    def _intake_save(self, task_id: str, payload: dict) -> None:
+        with self.db.session() as sess:
+            row = sess.get(PlanningTaskStateRow, task_id)
+            if row is not None:
+                row.intake_json = json.dumps(payload, ensure_ascii=False)
+                row.updated_at = utcnow()
+                sess.commit()
+
+    def _intake_mark_done(self, task_id: str, data: dict) -> None:
+        self._intake_save(task_id, {**data, "done": True})
+
+    def _intake_followups(self, task_id: str, state: PlanningTaskStateRow, answers: list[dict]) -> list[dict]:
+        """模型追问：失败/无 adapter/无必要 → 返回空（降级直接生成）。"""
+        if self.model_adapter_factory is None:
+            return []
+        try:
+            adapter = self._require_model_adapter(state.owner_user_id, task_id)
+        except PlanningError:
+            return []
+        profile = self._profile_text(answers)
+        messages = [
+            {"role": "system", "content": "你是学习规划助手。基于学习者已回答的内容，只输出符合要求的 JSON。"},
+            {"role": "user", "content": (
+                "学习者目标与已回答内容：\n" + profile +
+                "\n请判断是否还有真正影响规划内容的问题（例如目标场景、时间投入、先修背景）。"
+                "最多 3 个问题，kind 为 single 或 multi，每题 2-6 个选项；若信息已足够，返回空 questions。"
+            )},
+        ]
+        try:
+            run = run_structured(
+                adapter, IntakeQuestionSet, messages,
+                schema=IntakeQuestionSet.model_json_schema(),
+                tool_name="submit_intake_questions",
+            )
+        except PlanningError:
+            return []
+        return validate_intake_question_set(run.payload)["questions"]
+
+    def _profile_text(self, answers: list[dict]) -> str:
+        labels = {
+            q["question_id"]: {o["key"]: o["label"] for o in q["options"]}
+            for q in INTAKE_ROUND1
+        }
+        parts: list[str] = []
+        for a in answers:
+            qid = str(a.get("question_id", ""))
+            names = labels.get(qid, {})
+            sel = "、".join(names.get(x, x) for x in a.get("selections", []))
+            free = a.get("free_text") or ""
+            parts.append(f"{qid}={sel}{('；补充：' + free) if free else ''}")
+        return "；".join(parts)[:800]
+
+    def decide_intake(self, task_id: str, *, actor_id: str, answers: list[dict]) -> dict:
+        """记录访谈答案；范围题答案直接落 resolved_scope（合并旧的范围澄清）。"""
+        if not isinstance(answers, list) or not answers or len(answers) > 8:
+            raise error("invalid_field", "answers must be 1..8 items")
+        cleaned: list[dict] = []
+        scope_choice: Optional[str] = None
+        for a in answers:
+            qid = str(a.get("question_id", ""))[:40]
+            if not qid:
+                raise error("invalid_field", "missing question_id")
+            sels = [str(x)[:40] for x in (a.get("selections") or [])][:8]
+            free = str(a.get("free_text") or "")[:300]
+            if not sels and not free:
+                continue  # 跳过的题不记录
+            cleaned.append({"question_id": qid, "selections": sels, "free_text": free})
+            if qid == "scope" and sels and sels[0] in RESOLVED_SCOPES:
+                scope_choice = sels[0]
+        if not cleaned:
+            raise error("invalid_field", "no answered questions")
+        with self.db.session() as sess:
+            row = sess.get(PlanningTaskStateRow, task_id)
+            if row is None or row.owner_user_id != actor_id:
+                raise error("task_not_found", status=404)
+            if row.wait_state != "awaiting_intake":
+                raise error("state_invalid", "task not awaiting intake", status=409)
+            data = load_json_field(row.intake_json, {"round": 1, "questions": [], "answers": []})
+            data["answers"] = data.get("answers", []) + cleaned
+            # round = 当前问题轮次（由 _intake_gate 推进）；此处只追加答案
+            row.intake_json = json.dumps(data, ensure_ascii=False)
+            row.wait_state = None
+            row.clarification_question = None
+            if scope_choice:
+                row.resolved_scope = scope_choice
+            row.updated_at = utcnow()
+            sess.commit()
+        return {"task_id": task_id, "round": data["round"], "wait_state": None}
 
     # ------------------------------------------------------------------
     # 用户决策恢复
@@ -423,6 +582,7 @@ class PlanningService:
             row = sess.get(PlanningTaskStateRow, task_id)
             if row is None or row.owner_user_id != actor_id:
                 raise error("task_not_found", status=404)
+            intake = load_json_field(row.intake_json, None)
             return {
                 "task_id": row.task_id,
                 "planning_scope": row.planning_scope,
@@ -433,7 +593,14 @@ class PlanningService:
                 "wait_state": row.wait_state,
                 "clarification_question": row.clarification_question,
                 "search_decision": row.search_decision,
+                "intake": {
+                    "round": (intake or {}).get("round", 0),
+                    "max_rounds": MAX_INTAKE_ROUNDS,
+                    "questions": (intake or {}).get("questions", []),
+                    "answers": (intake or {}).get("answers", []),
+                    "done": bool((intake or {}).get("done")),
+                },
             }
 
 
-__all__ = ["PlanningService", "PLAN_PROMPTS"]
+__all__ = ["PlanningService", "PLAN_PROMPTS", "MAX_INTAKE_ROUNDS", "INTAKE_ROUND1"]

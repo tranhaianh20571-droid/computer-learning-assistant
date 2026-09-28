@@ -75,6 +75,9 @@ class ViewstateIn(BaseModel):
 class DecisionIn(BaseModel):
     resolved_scope: str | None = None
     decision: str | None = None
+    # v2 生成前访谈：kind="intake" + answers=[{question_id, selections[], free_text?}]
+    kind: str | None = None
+    answers: list[dict] | None = None
 
 
 class RouteShellIn(BaseModel):
@@ -211,6 +214,10 @@ def create_planning_router(
     @router.post("/api/planning/tasks/{task_id}/decision")
     def decide(task_id: str, body: DecisionIn, request: Request) -> dict:
         user = _user(request)
+        if body.kind == "intake" or body.answers is not None:
+            result = planning.decide_intake(task_id, actor_id=user.user_id, answers=body.answers or [])
+            tasks.requeue_after_wait(task_id, actor_id=user.user_id)
+            return result | planning.run_task(task_id)
         if body.resolved_scope is not None:
             result = planning.decide_scope(task_id, actor_id=user.user_id, resolved_scope=body.resolved_scope)
             tasks.requeue_after_wait(task_id, actor_id=user.user_id)

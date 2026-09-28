@@ -429,6 +429,8 @@ class PlanningTaskStateRow(Base):
     source_route_node_id: Mapped[str | None] = mapped_column(String(64))
     wait_state: Mapped[str | None] = mapped_column(String(40))
     clarification_question: Mapped[str | None] = mapped_column(String(300))
+    # 生成前访谈（v2）：{round, questions:[{question_id,question,kind,options,skippable}], answers:[...], done}
+    intake_json: Mapped[str | None] = mapped_column(Text)
     material_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     search_decision: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)

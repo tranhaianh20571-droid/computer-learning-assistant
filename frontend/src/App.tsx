@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, setSessionToken } from "./api";
+import { api } from "./api";
 import { useEventStream } from "./hooks/useEventStream";
-import { errText, STATUS_LABEL, type Me } from "./lib/errors";
+import { useHashRoute } from "./hooks/useHashRoute";
+import { useSession } from "./hooks/useSession";
+import { errText, STATUS_LABEL } from "./lib/errors";
 import Badge from "./ui/Badge";
 import CapabilityConfig from "./CapabilityConfig";
 import PlanningView from "./PlanningView";
@@ -35,38 +37,17 @@ const AUTH_LEFT = (
 );
 
 export default function App() {
-  const [me, setMe] = useState<Me | null>(null);
-  const [route, setRoute] = useState<string>(() => location.hash.replace(/^#/, "") || "/home");
+  const { me, setMe, booted } = useSession();
+  const { route, navigate } = useHashRoute();
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [booted, setBooted] = useState(false);
 
   const go = useCallback((path: string) => {
     setError("");
     setNotice("");
     document.getElementById("side")?.classList.remove("open");
-    location.hash = path;
-    setRoute(path);
-  }, []);
-
-  useEffect(() => {
-    const onHash = () => setRoute(location.hash.replace(/^#/, "") || "/home");
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
-
-  useEffect(() => {
-    // 登录态恢复：无条件调 me()——服务端 14 天持久 Cookie 随请求自动携带，
-    // 刷新/重开浏览器后据此恢复；401 才落到登录页（内存 token 仅为 Bearer 备用）。
-    (async () => {
-      try {
-        setMe(await api.me());
-      } catch {
-        setSessionToken(null);
-      }
-      setBooted(true);
-    })();
-  }, []);
+    navigate(path);
+  }, [navigate]);
 
   // 移动端抽屉侧栏：点外部 / Escape / 导航跳转时收起
   // （hooks 必须位于早退 return 之前）

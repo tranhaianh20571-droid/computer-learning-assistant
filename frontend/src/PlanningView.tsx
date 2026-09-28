@@ -3,11 +3,11 @@ import { api } from "./api";
 import ReadonlyCanvas from "./excalidraw/ReadonlyCanvas";
 
 /**
- * 课程规划工作台（设计稿 mm-clean / verbar / tree）：
- * - 版本栏：基线版本 / 编辑中草稿（虚线斜纹 + 自动保存状态机）/ 确认与范围操作；
- * - 左侧画布：只读 Excalidraw（已确认版本场景）；右侧层级列表承载业务编辑；
- * - 停止编辑 1 秒自动保存，服务端成功后才更新已保存 revision，失败可见可重试；
- * - 等待态（范围澄清 / 搜索决策）以 note + radio-row 呈现。
+ * 课程规划工作台（v2 三态：访谈 → 生成 → 草稿）：
+ * - intake：生成前访谈（选项卡问答，范围并入第一轮，上限 4 轮），画布此阶段不渲染；
+ * - generating：任务运行横幅（长任务，请勿刷新）；内部 ID（task_id/draft_id）不外显；
+ * - draft：版本栏 + 只读画布 + 层级列表（1 秒自动保存，服务端确认后才更新 revision）；
+ * - 等待态（范围澄清[跳过范围题时的回落] / 搜索决策）以 note 呈现。
  */
 
 const SAVE_TEXT: Record<string, string> = {
@@ -38,11 +38,110 @@ function SaveBadge({ state, onRetry }: { state: string; onRetry: () => void }) {
   return <span className="save"><span className="dot" />{SAVE_TEXT.saved}</span>;
 }
 
+/** 访谈问卷：选项卡网格（单选/多选）+ 跳过 + 自由补充 */
+function IntakeForm({ intake, onDecide, busy }: {
+  intake: any; onDecide: (answers: any[]) => void; busy: boolean;
+}) {
+  const [sel, setSel] = useState<Record<string, string[]>>({});
+  const [freetext, setFreetext] = useState<Record<string, string>>({});
+  const questions: any[] = intake.questions || [];
+
+  const toggle = (qid: string, key: string, kind: string) => {
+    setSel((prev) => {
+      const cur = prev[qid] || [];
+      if (kind === "multi") {
+        return { ...prev, [qid]: cur.includes(key) ? cur.filter((x) => x !== key) : [...cur, key] };
+      }
+      return { ...prev, [qid]: [key] };
+    });
+  };
+
+  const submit = () => {
+    const answers = questions
+      .map((q) => ({
+        question_id: q.question_id,
+        selections: sel[q.question_id] || [],
+        free_text: (freetext[q.question_id] || "").trim() || undefined,
+      }))
+      .filter((a) => a.selections.length > 0 || a.free_text);
+    onDecide(answers);
+  };
+
+  const answered = questions.filter((q) => (sel[q.question_id] || []).length > 0 || freetext[q.question_id]).length;
+
+  return (
+    <div className="intake-wrap">
+      <div className="intake-head">
+        <span className="kicker">开始前，先了解你</span>
+        <span className="help">第 {intake.round} 轮 · 至多 {intake.max_rounds} 轮 · 可跳过不确定的问题</span>
+      </div>
+      {questions.map((q) => (
+        <fieldset className="q-card" key={q.question_id}>
+          <legend>
+            {q.question}
+            {q.kind === "multi" && <span className="badge queued" style={{ marginLeft: 8 }}>多选</span>}
+          </legend>
+          <div className="opt-grid">
+            {q.options.map((o: any) => {
+              const on = (sel[q.question_id] || []).includes(o.key);
+              return (
+                <button
+                  key={o.key}
+                  type="button"
+                  className={`opt-card${on ? " on" : ""}`}
+                  aria-pressed={on}
+                  onClick={() => toggle(q.question_id, o.key, q.kind)}
+                >
+                  <b>{o.label}</b>
+                  {o.detail && <span>{o.detail}</span>}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              className={`opt-card other${freetext[q.question_id] ? " on" : ""}`}
+              aria-pressed={!!freetext[q.question_id]}
+              onClick={() => setFreetext((p) => ({ ...p, [q.question_id]: p[q.question_id] ?? "" }))}
+            >
+              都不太对？写个自己的
+            </button>
+          </div>
+          {freetext[q.question_id] !== undefined && (
+            <input
+              className="inp"
+              style={{ marginTop: 10, maxWidth: 520 }}
+              placeholder="用自己的话补充…"
+              value={freetext[q.question_id]}
+              aria-label={`补充 ${q.question}`}
+              onChange={(e) => setFreetext((p) => ({ ...p, [q.question_id]: e.target.value }))}
+            />
+          )}
+          {q.skippable && (
+            <button
+              type="button"
+              className="linkbtn"
+              style={{ marginTop: 8 }}
+              onClick={() => setSel((p) => ({ ...p, [q.question_id]: [] }))}
+            >
+              跳过这题
+            </button>
+          )}
+        </fieldset>
+      ))}
+      <div className="row" style={{ marginTop: 18, gap: 12 }}>
+        <button className="btn btn-pri" onClick={submit} disabled={busy || answered === 0}>
+          {busy ? <><span className="spin" />提交中…</> : "提交并生成"}
+        </button>
+        <span className="help">已答 {answered}/{questions.length} 题；跳过的题按默认方式处理。</span>
+      </div>
+    </div>
+  );
+}
+
 export default function PlanningView({ onErr, onOk, needLogin, go }: {
   onErr: (s: string) => void; onOk: (s: string) => void; needLogin: boolean; go: (p: string) => void;
 }) {
   const [title, setTitle] = useState("");
-  const [scope, setScope] = useState("auto");
   const [routeId, setRouteId] = useState("");
   const [taskId, setTaskId] = useState("");
   const [task, setTask] = useState<any>(null);
@@ -51,6 +150,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
   const [saveState, setSaveState] = useState("saved");
   const [scene, setScene] = useState<any>(null);
   const [runError, setRunError] = useState("");
+  const [running, setRunning] = useState(false);
   const saveTimer = useRef<number | null>(null);
   const dirtyRef = useRef(false);
   const bootRef = useRef(false);
@@ -65,6 +165,8 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
   }, []);
 
   const runTask = useCallback(async (id: string) => {
+    localStorage.setItem("slice3.lastPlanningTask", id);
+    setRunning(true);
     try {
       const body = await api.runPlanningTask(id);
       if (body.draft?.draft_id) {
@@ -74,28 +176,51 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
         setSaveState(d.saved_state);
       }
       await refreshTask(id);
-      if (body.wait_state === "awaiting_scope_clarification") onOk("规划范围存在歧义，请回答一个问题。");
+      if (body.wait_state === "awaiting_intake") onOk("先回答几个问题，帮我们把规划调得更准。");
+      else if (body.wait_state === "awaiting_scope_clarification") onOk("规划范围存在歧义，请回答一个问题。");
       else if (body.wait_state === "awaiting_search_decision") onOk("联网搜索失败，请选择重试或离线继续。");
       else if (body.task_status === "succeeded") onOk("候选已生成，请在草稿中查看并确认。");
       else if (body.task_status === "failed") setRunError(body.error_code || "生成失败");
     } catch (e: any) {
       setRunError(e?.code || "任务执行失败");
+    } finally {
+      setRunning(false);
     }
   }, [onOk, refreshTask]);
 
-  // 从首页跳转而来：自动执行待处理任务
+  // 从首页跳转而来：自动执行待处理任务；另恢复最近一次规划任务（刷新后仍可见访谈/草稿状态）
   useEffect(() => {
     if (bootRef.current) return;
     bootRef.current = true;
     const pending = sessionStorage.getItem("slice3.pendingTask");
     const pendingRoute = sessionStorage.getItem("slice3.pendingRoute");
     if (pendingRoute) setRouteId(pendingRoute);
+    const last = localStorage.getItem("slice3.lastPlanningTask");
+    if (last) {
+      setTaskId(last);
+      (async () => {
+        try {
+          const t = await api.getPlanningTask(last);
+          setTask(t);
+          if (t.target_id) {
+            setRouteId(t.target_id);
+            if (t.draft_id) {
+              const d = await api.getDraft(t.draft_id);
+              setDraft(d);
+              setLocalContent(d.content);
+              setSaveState(d.saved_state);
+              try { setScene(await api.routeScene(t.target_id)); } catch { setScene(null); }
+            }
+          }
+        } catch { /* 最近任务不可用则忽略 */ }
+      })();
+    }
     if (pending) {
       sessionStorage.removeItem("slice3.pendingTask");
       setTaskId(pending);
       runTask(pending);
     }
-  }, [runTask]);
+  }, [runTask, refreshTask]);
 
   const createAndRun = useCallback(async () => {
     if (needLogin) return onErr("请先登录。");
@@ -109,7 +234,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
       const body = await api.createPlanningTask({
         idempotency_key: `web-${Date.now()}`,
         task_kind: "route_generate",
-        planning_scope: scope,
+        planning_scope: "auto", // 范围由访谈第一轮决定（用户作答落 resolved_scope）
         target_route_id: rid,
       });
       setTaskId(body.task_id);
@@ -117,7 +242,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
     } catch (e: any) {
       onErr(e?.message || "创建任务失败");
     }
-  }, [needLogin, onErr, routeId, runTask, scope, title]);
+  }, [needLogin, onErr, routeId, runTask, title]);
 
   // 1 秒自动保存（停止编辑后）
   const scheduleSave = useCallback((next: any) => {
@@ -170,6 +295,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
 
   const decision = useCallback(async (payload: Record<string, unknown>) => {
     if (!taskId) return;
+    setRunning(true);
     try {
       const body = await api.decidePlanningTask(taskId, payload);
       if (body.draft?.draft_id) {
@@ -182,8 +308,15 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
       onOk("已按你的选择继续。");
     } catch (e: any) {
       onErr(`决策失败：${e?.code || "错误"}`);
+    } finally {
+      setRunning(false);
     }
   }, [onErr, onOk, refreshTask, taskId]);
+
+  const submitIntake = useCallback((answers: any[]) => {
+    onOk("");
+    decision({ kind: "intake", answers });
+  }, [decision]);
 
   const setScopeAndNewDraft = useCallback(async (next: string) => {
     if (!draft) return;
@@ -198,6 +331,9 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
   }, [draft, onErr, onOk]);
 
   const waitState = task?.wait_state;
+  const intake = task?.intake;
+  const showIntake = waitState === "awaiting_intake" && intake?.questions?.length > 0;
+  const hasBoard = Boolean(draft || scene);
 
   return (
     <div className="mm-clean">
@@ -213,13 +349,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
             onChange={(e) => setTitle(e.target.value)}
             aria-label="路线标题"
           />
-          <span className="seg" role="radiogroup" aria-label="规划范围">
-            <button role="radio" aria-checked={scope === "auto"} onClick={() => setScope("auto")}>自动判断</button>
-            <button role="radio" aria-checked={scope === "course"} onClick={() => setScope("course")}>单门课程</button>
-            <button role="radio" aria-checked={scope === "route"} onClick={() => setScope("route")}>多课程路线</button>
-          </span>
-          <button className="btn btn-pri" onClick={createAndRun} disabled={needLogin}>生成路线候选</button>
-          {taskId && <span className="idtag">task_id={taskId}</span>}
+          <button className="btn btn-pri" onClick={createAndRun} disabled={needLogin || running}>生成路线候选</button>
           {routeId && <button className="btn btn-sm" onClick={() => go(`/route/${routeId}`)}>查看路线总览 →</button>}
         </div>
         {runError && (
@@ -230,6 +360,20 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
           </div>
         )}
       </div>
+
+      {running && (
+        <div className="note note-accent" role="status" style={{ margin: "0 32px 12px" }}>
+          <span className="tag"><span className="spin" style={{ marginRight: 6 }} />生成中</span>
+          <div className="tt">正在按你的回答生成规划…</div>
+          <div>长任务，请勿刷新或离开页面（刷新或离开将停止生成）。</div>
+        </div>
+      )}
+
+      {showIntake && (
+        <div style={{ padding: "4px 32px 12px" }}>
+          <IntakeForm intake={intake} onDecide={submitIntake} busy={running} />
+        </div>
+      )}
 
       {waitState === "awaiting_scope_clarification" && (
         <div style={{ padding: "12px 32px" }}>
@@ -263,7 +407,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
         </div>
       )}
 
-      {routeId && (
+      {routeId && hasBoard && (
         <>
           <div className="verbar">
             <div className="cell">
@@ -301,8 +445,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
 
           <div className="mm-tools">
             <span className="hint">画布位置只影响视角；业务排序与重命名在右侧层级列表进行（写草稿，不直接改已确认版本）。</span>
-            <span className="sp" />
-            {draft && <span className="idtag">draft_id={draft.draft_id}</span>}
           </div>
 
           <div className="mm-body">
@@ -333,6 +475,15 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
             </aside>
           </div>
         </>
+      )}
+
+      {routeId && !hasBoard && !running && !showIntake && waitState !== "awaiting_scope_clarification" && waitState !== "awaiting_search_decision" && !runError && (
+        <div className="note note-info" style={{ margin: "8px 32px" }} role="note">
+          <span className="tag">空的</span>
+          <div className="tt">还没有规划内容</div>
+          <div>回到「新的学习任务」写下目标并回答几个小问题，学伴会先访谈、再生成，画布只在草稿生成后出现。</div>
+          <div className="acts"><button className="btn btn-pri btn-sm" onClick={() => go("/home")}>去创建</button></div>
+        </div>
       )}
     </div>
   );

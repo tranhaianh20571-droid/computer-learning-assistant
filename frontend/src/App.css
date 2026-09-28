@@ -243,3 +243,16 @@
   .ccard-side { border-left: none; border-top: 1px solid var(--rule); }
   .ccourse { grid-template-columns: 1fr; }
 }
+
+/* ==================== v2 生成前访谈 ==================== */
+.intake-wrap { max-width: 860px; margin: 0 auto; padding: 8px 0 24px; }
+.intake-head { display: flex; justify-content: space-between; align-items: baseline; margin: 6px 0 14px; }
+.q-card { border: 1px solid var(--rule); border-radius: 14px; background: #fff; padding: 16px 18px 14px; margin: 0 0 16px; }
+.q-card legend { font: 600 16px/1.5 var(--sans, inherit); padding: 0 6px; }
+.opt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin-top: 10px; }
+.opt-card { display: flex; flex-direction: column; gap: 6px; text-align: center; align-items: center; justify-content: center; min-height: 96px; padding: 14px 12px; border: 1px solid var(--rule); border-radius: 12px; background: #fff; cursor: pointer; font: inherit; }
+.opt-card b { font-size: 15px; }
+.opt-card span { font-size: 12.5px; color: var(--ink2); line-height: 1.5; }
+.opt-card:hover { border-color: var(--accent); }
+.opt-card.on { border-color: var(--accent); background: var(--accent-w); box-shadow: inset 0 0 0 1px var(--accent); }
+.opt-card.other { border-style: dashed; color: var(--ink2); min-height: 96px; }

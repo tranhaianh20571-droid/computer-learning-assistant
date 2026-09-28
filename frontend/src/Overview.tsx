@@ -141,7 +141,6 @@ export function RouteOverview({ routeId, onErr, go }: {
           </ol>
         </section>
       ))}
-      <div className="idtag" style={{ marginTop: 16 }}>route_id={routeId}</div>
     </div>
   );
 }

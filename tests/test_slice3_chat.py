@@ -249,3 +249,139 @@ class TestChatBoundaries:
         _, other_token = make_user(client, env["database"])
         r = client.get(f"/api/chat/{conv_id}", headers=auth_headers(other_token))
         assert r.status_code == 404
+
+
+class StreamingChatAdapter:
+    """合成流式聊天适配器：固定分段 yield，记录调用。"""
+
+    CHUNKS = ["TCP ", "三次握手", "的目的是建立可靠连接。"]
+
+    def probe(self, capability: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(capability=capability, state="available")
+
+    def generate(self, messages, **options):
+        return {"content": "".join(self.CHUNKS)}
+
+    def stream(self, messages, **options):
+        for chunk in self.CHUNKS:
+            yield chunk
+
+
+class TestStreamingChat:
+    @pytest.fixture()
+    def streaming_env(self, env):
+        env["container"]["model"] = StreamingChatAdapter()
+        return env
+
+    def test_stream_deltas_persist_full_answer(self, streaming_env) -> None:
+        """delta 按序到达；done 后完整回答落库（generation 语义不变）。"""
+        client = streaming_env["client"]
+        user_id, token = make_user(client, streaming_env["database"])
+        conv_id = client.post("/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
+        r = client.post(
+            f"/api/chat/{conv_id}/messages/stream", headers=auth_headers(token),
+            json={"content": "什么是三次握手？", "use_search": False,
+                  "idempotency_key": f"m{uuid.uuid4().hex[:8]}"},
+        )
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/event-stream")
+        events = _parse_sse(r.text)
+        types = [e["type"] for e in events]
+        assert types[0] == "meta" and types[-1] == "done"
+        deltas = [e["text"] for e in events if e["type"] == "delta"]
+        assert deltas == StreamingChatAdapter.CHUNKS  # 按序逐段
+        got = client.get(f"/api/chat/{conv_id}", headers=auth_headers(token)).json()
+        assert got["generation"] == 1
+        assistant = [m for m in got["messages"] if m["role"] == "assistant"]
+        assert len(assistant) == 1
+        assert assistant[0]["content"] == "".join(deltas)
+        assert assistant[0]["status"] == "completed"
+
+    def test_stream_wait_event_on_search_failure(self, streaming_env) -> None:
+        """流式下的搜索失败以 wait 事件呈现；会话进入等待态。"""
+        client = streaming_env["client"]
+        user_id, token = make_user(client, streaming_env["database"])
+        streaming_env["container"]["search"] = SyntheticSearchAdapter(fail="timeout")
+        conv_id = client.post("/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
+        r = client.post(
+            f"/api/chat/{conv_id}/messages/stream", headers=auth_headers(token),
+            json={"content": "联网查一下", "use_search": True,
+                  "idempotency_key": f"m{uuid.uuid4().hex[:8]}"},
+        )
+        events = _parse_sse(r.text)
+        assert events[-1]["type"] == "wait"
+        got = client.get(f"/api/chat/{conv_id}", headers=auth_headers(token)).json()
+        assert got["wait_state"] == "awaiting_search_decision"
+        # 恢复（离线继续）走既有非流式路径
+        r2 = client.post(f"/api/chat/{conv_id}/resume", headers=auth_headers(token),
+                         json={"decision": "offline_continue"})
+        assert r2.status_code == 200
+
+    def test_stream_error_event_on_no_adapter(self, streaming_env) -> None:
+        client = streaming_env["client"]
+        user_id, token = make_user(client, streaming_env["database"])
+        streaming_env["container"]["model"] = None
+        conv_id = client.post("/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
+        r = client.post(
+            f"/api/chat/{conv_id}/messages/stream", headers=auth_headers(token),
+            json={"content": "hi", "idempotency_key": f"m{uuid.uuid4().hex[:8]}"},
+        )
+        events = _parse_sse(r.text)
+        assert events[-1]["type"] == "error"
+        assert events[-1]["error_code"] == "MODEL_CAPABILITY_UNAVAILABLE"
+
+    def test_stream_cross_user_denied(self, streaming_env) -> None:
+        user_id, token = make_user(streaming_env["client"], streaming_env["database"])
+        _, other = make_user(streaming_env["client"], streaming_env["database"])
+        conv_id = streaming_env["client"].post(
+            "/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
+        r = streaming_env["client"].post(
+            f"/api/chat/{conv_id}/messages/stream", headers=auth_headers(other),
+            json={"content": "x", "idempotency_key": f"m{uuid.uuid4().hex[:8]}"})
+        assert r.status_code == 404
+
+    def test_client_disconnect_saves_interrupted(self, streaming_env) -> None:
+        """注入：客户端中断流 → 已产出文本以 interrupted 状态保留。"""
+        user_id, token = make_user(streaming_env["client"], streaming_env["database"])
+        client = streaming_env["client"]
+        streaming_env["container"]["model"] = StreamingChatAdapter()
+        conv_id = client.post("/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
+        # 直接取服务层生成器，消费 2 段后模拟客户端断开
+        meta, gen = streaming_env["state"].chat.stream_answer(
+            conv_id, actor_id=user_id, content="讲讲三次握手",
+            use_search=False, idempotency_key=f"m{uuid.uuid4().hex[:8]}")
+        got = []
+        for evt in gen:
+            got.append(evt)
+            if evt["type"] == "delta" and len([x for x in got if x["type"] == "delta"]) >= 2:
+                break
+        gen.close()  # 触发 GeneratorExit → interrupted 落库
+        got_conv = client.get(f"/api/chat/{conv_id}", headers=auth_headers(token)).json()
+        assistant = [m for m in got_conv["messages"] if m["role"] == "assistant"]
+        assert len(assistant) == 1
+        assert assistant[0]["status"] == "interrupted"
+        assert assistant[0]["content"] == "TCP 三次握手"
+        # 刷新恢复：已保存的 interrupted 回答仍在历史里
+        again = client.get(f"/api/chat/{conv_id}", headers=auth_headers(token)).json()
+        assert [m["content"] for m in again["messages"]].count("TCP 三次握手") == 1
+
+
+def _parse_sse(text: str) -> list[dict]:
+    """解析 SSE 帧：事件名取自 event: 行并合并进 data（type 字段）。"""
+    events = []
+    for frame in text.split("\n\n"):
+        lines = frame.split("\n")
+        ev_name = next((l[7:] for l in lines if l.startswith("event: ")), None)
+        data_line = next((l for l in lines if l.startswith("data: ")), None)
+        if not data_line:
+            continue
+        try:
+            data = json.loads(data_line[6:])
+        except ValueError:
+            continue
+        if ev_name:
+            data.setdefault("type", ev_name)
+        events.append(data)
+    return events

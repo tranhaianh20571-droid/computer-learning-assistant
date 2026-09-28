@@ -99,6 +99,13 @@ export const api = {
     req(`/api/materials/${materialId}`, { method: "DELETE" }),
   searchMaterials: (body: Record<string, unknown>) =>
     req("/api/materials/search", { method: "POST", body: JSON.stringify(body) }),
+  // 切片 4 补充：流式即时回答（返回原始 Response，调用方解析 SSE）
+  streamChat: (conversationId: string, body: Record<string, unknown>) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (sessionToken) headers["Authorization"] = `Bearer ${sessionToken}`;
+    return fetch(`${API}/api/chat/${conversationId}/messages/stream`,
+      { method: "POST", headers, credentials: "include", body: JSON.stringify(body) });
+  },
   // 切片 4：讲次教学
   startLessonV2: (courseId: string, lessonId: string) =>
     req(`/api/courses/${courseId}/lessons/${lessonId}/start`, { method: "POST" }),

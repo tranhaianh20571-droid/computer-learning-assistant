@@ -21,6 +21,7 @@ export default function ChatView({ onErr, onOk, needLogin }: {
   const [useSearch, setUseSearch] = useState(false);
   const [busy, setBusy] = useState(false);
   const [lastExternal, setLastExternal] = useState<number | null>(null);
+  const [liveText, setLiveText] = useState<string | null>(null);
   const bootRef = useRef(false);
   const streamRef = useRef<HTMLDivElement | null>(null);
 
@@ -71,30 +72,73 @@ export default function ChatView({ onErr, onOk, needLogin }: {
   const send = useCallback(async () => {
     const id = await ensureConversation();
     if (!id || !input.trim()) return;
+    const question = input;
     setBusy(true);
     try {
-      const r = await api.sendChat(id, {
-        content: input, use_search: useSearch, idempotency_key: `web-${Date.now()}`,
+      const res = await api.streamChat(id, {
+        content: question, use_search: useSearch, idempotency_key: `web-${Date.now()}`,
       });
+      if (!res.ok || !res.body) {
+        let code = "ERROR";
+        try { code = (await res.json())?.error_code || code; } catch { /* keep */ }
+        if (res.status === 409 && code === "AWAITING_SEARCH_DECISION") {
+          await refresh(id);
+          onErr("联网搜索失败：请选择重试或离线继续。");
+          return;
+        }
+        throw new Error(code);
+      }
       setInput("");
-      if (typeof r.external_result_count === "number" && r.external_result_count > 0) {
-        setLastExternal(r.external_result_count);
+      setLiveText("");
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      let finished = false;
+      while (!finished) {
+        const { value, done: rdDone } = await reader.read();
+        if (rdDone) break;
+        buf += dec.decode(value, { stream: true });
+        const frames = buf.split("\n\n");
+        buf = frames.pop() || "";
+        for (const frame of frames) {
+          const evLine = frame.split("\n").find((l) => l.startsWith("event: "));
+          const dataLine = frame.split("\n").find((l) => l.startsWith("data: "));
+          if (!dataLine) continue;
+          let data: any = {};
+          try { data = JSON.parse(dataLine.slice(6)); } catch { continue; }
+          const type = evLine?.slice(7) || "";
+          if (type === "delta") {
+            setLiveText((t) => (t || "") + String(data.text || ""));
+          } else if (type === "done") {
+            finished = true;
+            if (typeof data.external_result_count === "number" && data.external_result_count > 0) {
+              setLastExternal(data.external_result_count);
+            }
+          } else if (type === "wait") {
+            await refresh(id);
+            onErr("联网搜索失败：请选择重试或离线继续。");
+            return;
+          } else if (type === "error") {
+            if (data.error_code === "MODEL_CAPABILITY_UNAVAILABLE") {
+              onErr("该模型不支持所需能力，已停止调用（不无限重试）。");
+            } else {
+              onErr(`回答失败：${data.error_code}`);
+            }
+            return;
+          }
+        }
       }
       await refresh(id);
-      if (r.error_code === "MODEL_CAPABILITY_UNAVAILABLE") {
-        onErr("该模型不支持所需能力，已停止调用（不无限重试）。");
-      }
+      onOk("已回答。");
     } catch (e: any) {
-      if (e?.code === "AWAITING_SEARCH_DECISION") {
-        await refresh(id);
-        onErr("联网搜索失败：请选择重试或离线继续。");
-      } else {
-        onErr(e?.message || "发送失败");
-      }
+      onErr(e?.code === "MODEL_CAPABILITY_UNAVAILABLE"
+        ? "该模型不支持所需能力，已停止调用。"
+        : e?.message || "发送失败");
     } finally {
+      setLiveText(null);
       setBusy(false);
     }
-  }, [ensureConversation, input, onErr, refresh, useSearch]);
+  }, [ensureConversation, input, onErr, onOk, refresh, useSearch]);
 
   const resume = useCallback(async (decision: string) => {
     if (!convId) return;
@@ -189,7 +233,25 @@ export default function ChatView({ onErr, onOk, needLogin }: {
               <span>本次回答参考了 <b className="num">{lastExternal}</b> 条外部搜索结果（source=external，与资料内容分开标记）。</span>
             </div>
           )}
-          {turns.length === 0 && <p className="muted">暂无消息。提问后回答将在此显示；被打断的旧回答会保留。</p>}
+          {liveText !== null && (
+            <div className="turn ai">
+              <span className="who">学伴</span>
+              <div className="body">
+                {liveText === "" ? (
+                  <p className="muted">
+                    <span className="spin" style={{ marginRight: 8 }} />正在生成回答…
+                    <span className="sr">回答生成中</span>
+                  </p>
+                ) : (
+                  <p>{liveText}
+                    <span className="live-cursor" aria-hidden="true">▍</span>
+                    <span className="sr">回答生成中</span>
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+          {turns.length === 0 && liveText === null && <p className="muted">暂无消息。提问后回答将在此显示；被打断的旧回答会保留。</p>}
         </div>
       </div>
 

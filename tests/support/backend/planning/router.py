@@ -425,6 +425,30 @@ def create_planning_router(
             use_search=body.use_search, idempotency_key=body.idempotency_key,
         )
 
+    @router.post("/api/chat/{conversation_id}/messages/stream")
+    def send_chat_stream(conversation_id: str, body: ChatSendIn, request: Request):
+        """流式即时回答：SSE（meta → delta* → done | error | wait）。"""
+        import json as _json
+
+        from fastapi.responses import StreamingResponse
+
+        user = _user(request)
+        meta, gen = chat.stream_answer(
+            conversation_id, actor_id=user.user_id, content=body.content,
+            use_search=body.use_search, idempotency_key=body.idempotency_key,
+        )
+
+        def sse():
+            meta_line = "event: meta\ndata: " + _json.dumps(meta, ensure_ascii=False) + "\n\n"
+            yield meta_line
+            for evt in gen:
+                yield "event: " + evt["type"] + "\ndata: " + _json.dumps(evt, ensure_ascii=False) + "\n\n"
+
+        return StreamingResponse(
+            sse(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     @router.post("/api/chat/{conversation_id}/resume")
     def resume_chat(conversation_id: str, body: ChatResumeIn, request: Request) -> dict:
         user = _user(request)

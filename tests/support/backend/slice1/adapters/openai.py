@@ -51,6 +51,47 @@ class OpenAIAdapter(AdapterBase):
             tool_arguments = fn.get("arguments")
         return {"content": msg.get("content") or "", "tool_arguments": tool_arguments}
 
+    def stream(self, messages: list[dict], **options: Any):
+        """SSE 流式纯文本生成（切片 4 补充）：逐段 yield 文本增量。
+
+        - 解析 chat.completions SSE（delta.content 与 [DONE] 终止符）；
+        - 超时/HTTP 错误映射与 generate 一致（AdapterError 受控错误码）；
+        - 仅用于纯文字路径（即时对话/讲次追问文字）；结构化输出不走流式。
+        """
+        import json as _json
+
+        payload: dict[str, Any] = {"model": self.model_name, "messages": messages, "stream": True}
+        client = self._client_or_new()
+        try:
+            with client.stream(
+                "POST", self._chat_url(), json=payload,
+                headers={**self.headers, "Accept": "text/event-stream"},
+            ) as response:
+                if not (200 <= response.status_code < 300):
+                    self._map_status(response.status_code, {"raw": response.read()[:256]})
+                for line in response.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = _json.loads(data)
+                    except ValueError:
+                        continue
+                    choices = chunk.get("choices") or [{}]
+                    delta = (choices[0].get("delta") or {}).get("content")
+                    if delta:
+                        yield delta
+        except httpx.TimeoutException as exc:
+            from .base import AdapterError
+
+            raise AdapterError("timeout", status=504) from exc
+        except httpx.HTTPError as exc:
+            from .base import AdapterError
+
+            raise AdapterError("connection_error", status=502) from exc
+
     def _probe(self, capability: str) -> None:
         if capability == "streaming":
             self._probe_streaming()

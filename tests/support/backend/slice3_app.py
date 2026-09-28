@@ -127,6 +127,11 @@ class DevSyntheticModelAdapter:
             return {"content": "事务隔离级别描述的是并发事务之间的可见性约定："
                      "读未提交最低，读已提交避免脏读，可重复读避免不可重复读，"
                      "串行化最高但并发最差（合成走查回答，非真实模型）。"}
+
+    def stream(self, messages, **options):
+        text = "事务隔离级别描述的是并发事务之间的可见性约定：读未提交最低，读已提交避免脏读，可重复读避免不可重复读，串行化最高但并发最差（合成走查回答，非真实模型）。"
+        for i in range(0, len(text), 8):
+            yield text[i:i + 8]
         last = ""
         for m in messages:
             if m.get("role") == "user":

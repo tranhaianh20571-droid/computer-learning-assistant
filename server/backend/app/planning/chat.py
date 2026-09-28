@@ -21,7 +21,7 @@ from ..logging_audit.db import Database
 from ..logging_audit.repositories import PgTaskEventStore
 from ..prompts.service import PromptService, PromptUnavailable
 from ..tasks.service import TaskService
-from .errors import WaitStateSignal, error
+from .errors import PlanningError, WaitStateSignal, error
 from .models import (
     ConversationRow,
     MessageRow,
@@ -185,6 +185,143 @@ class ChatService:
             content=content, material_ids=material_ids,
             use_search=use_search, search_decision=None, binding_id=binding["binding_id"],
         )
+
+    # ------------------------------------------------------------------
+    # 流式回答（切片 4 补充）：delta 为易失事件；完成才落库；断存 interrupted
+    # ------------------------------------------------------------------
+    def _begin_turn(self, conversation_id: str, *, actor_id: str, content: str,
+                    idempotency_key: str) -> dict:
+        """与 send_message 相同的准备语义：校验 → 幂等任务 → generation/用户消息。"""
+        content = (content or "").strip()
+        if not content or len(content) > MAX_MESSAGE_LEN:
+            raise error("invalid_field", "message length out of range")
+        with self.db.session() as sess:
+            conv = sess.get(ConversationRow, conversation_id)
+            if conv is None or conv.owner_user_id != actor_id or conv.deleted_at is not None:
+                raise error("conversation_not_found", status=404)
+            material_ids = load_json_field(conv.material_snapshot_json, [])
+        created = self.tasks.create_task(
+            owner_user_id=actor_id,
+            kind="chat_answer",
+            subject_id=conversation_id,
+            idempotency_key=idempotency_key or f"chat:{conversation_id}:{uuid.uuid4().hex[:8]}",
+            stage="generate",
+        )
+        task_id = created["task_id"]
+        if created.get("deduped"):
+            with self.db.session() as sess:
+                conv = sess.get(ConversationRow, conversation_id)
+                generation = conv.generation
+            return {"conversation_id": conversation_id, "generation": generation,
+                    "task_id": task_id, "material_ids": material_ids, "deduped": True}
+        with self.db.session() as sess:
+            conv = sess.get(ConversationRow, conversation_id)
+            conv.generation += 1
+            generation = conv.generation
+            sess.add(
+                MessageRow(
+                    message_id=f"msg_{uuid.uuid4().hex[:12]}",
+                    conversation_id=conversation_id,
+                    generation=generation,
+                    role="user",
+                    content_ref=content,
+                    status="completed",
+                )
+            )
+            sess.flush()
+        return {"conversation_id": conversation_id, "generation": generation,
+                "task_id": task_id, "material_ids": material_ids, "deduped": False}
+
+    def stream_answer(self, conversation_id: str, *, actor_id: str, content: str,
+                      use_search: bool, idempotency_key: str):
+        """流式版即时回答：完成准备（4xx 在此处抛出），返回 (meta, 事件生成器)。
+
+        事件（SSE data JSON）：delta{text} / done{message_id, content} /
+        error{error_code} / wait{wait_state}。delta 不落库；done 时完整
+        回答落库；客户端断开时已产出文本以 interrupted 状态保留。
+        """
+        turn = self._begin_turn(conversation_id, actor_id=actor_id,
+                                content=content, idempotency_key=idempotency_key)
+        meta = {"task_id": turn["task_id"], "generation": turn["generation"],
+                "conversation_id": conversation_id, "deduped": turn["deduped"]}
+
+        def gen():
+            accumulated = ""
+            try:
+                if turn["deduped"]:
+                    yield {"type": "error", "error_code": "DUPLICATE_REQUEST"}
+                    return
+                try:
+                    binding = self.prompts.bind_for_task(turn["task_id"], CHAT_PROMPT_NAME,
+                                                         allow_fallback=True)
+                except PromptUnavailable as exc:
+                    yield {"type": "error", "error_code": "PROMPT_UNAVAILABLE"}
+                    self.events.record(turn["task_id"], stage="generate", status="failed",
+                                       error_code="PROMPT_UNAVAILABLE")
+                    return
+                retrieval = self.retrieval.assemble(
+                    owner_user_id=actor_id, material_ids=turn["material_ids"], query=content)
+                history_rows = self._history(conversation_id, actor_id, turn["generation"])
+                kept, history_range = build_history_range(
+                    history_rows, CONTEXT_BUDGET_DEFAULTS["max_history_messages"])
+                external_refs: list[dict] = []
+                if use_search:
+                    try:
+                        outcome = self._search(actor_id, turn["task_id"], content, None)
+                        if outcome is not None:
+                            external_refs = outcome.external_refs
+                    except WaitStateSignal:
+                        yield {"type": "wait", "wait_state": "awaiting_search_decision"}
+                        return
+                manifest = self.retrieval.save_manifest(
+                    task_id=turn["task_id"], retrieval=retrieval,
+                    history_range=history_range, extra_refs=external_refs)
+                _ = (kept, manifest, binding)
+
+                adapter = (self.model_adapter_factory(actor_id, turn["task_id"])
+                           if self.model_adapter_factory else None)
+                if adapter is None:
+                    self.events.record(turn["task_id"], stage="generate", status="failed",
+                                       error_code="MODEL_CAPABILITY_UNAVAILABLE")
+                    yield {"type": "error", "error_code": "MODEL_CAPABILITY_UNAVAILABLE"}
+                    return
+                messages = [
+                    {"role": "system", "content": "你是学习助手，用中文简洁回答。"},
+                    {"role": "user", "content": content},
+                ]
+                if hasattr(adapter, "stream"):
+                    for delta in adapter.stream(messages, plain_text=True):
+                        accumulated += str(delta)
+                        yield {"type": "delta", "text": str(delta)}
+                else:
+                    answer = run_chat(adapter, messages, max_len=MAX_MESSAGE_LEN)
+                    accumulated = answer
+                    yield {"type": "delta", "text": answer}
+                if not accumulated.strip():
+                    self.events.record(turn["task_id"], stage="generate", status="failed",
+                                       error_code="MODEL_CAPABILITY_UNAVAILABLE")
+                    yield {"type": "error", "error_code": "MODEL_CAPABILITY_UNAVAILABLE"}
+                    return
+                msg = self._record_answer(conversation_id, turn["generation"],
+                                          status="completed", content=accumulated)
+                self.events.record(turn["task_id"], stage="generate", status="succeeded")
+                yield {"type": "done", "message_id": msg["message_id"],
+                       "content": accumulated,
+                       "external_result_count": len(external_refs)}
+            except WaitStateSignal:
+                yield {"type": "wait", "wait_state": "awaiting_search_decision"}
+            except PlanningError as exc:
+                self.events.record(turn["task_id"], stage="generate", status="failed",
+                                   error_code=exc.code)
+                yield {"type": "error", "error_code": exc.code}
+            except GeneratorExit:
+                # 客户端断开：已产出文本以 interrupted 状态保留（留历史、不覆盖）
+                if accumulated.strip():
+                    self._record_answer(conversation_id, turn["generation"],
+                                        status="interrupted", content=accumulated)
+                raise
+
+        return meta, gen()
 
     def resume_message(
         self,

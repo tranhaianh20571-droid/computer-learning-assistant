@@ -469,3 +469,15 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
 button.secondary { background: var(--surface); color: var(--ink); border-color: var(--rule2); }
 button.danger { color: var(--err); border-color: #E3B5AF; background: var(--surface); }
 input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; }
+
+/* 流式输出：打字光标（切片 4 补充） */
+.live-cursor {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--accent);
+  animation: cursor-blink 0.9s steps(2, start) infinite;
+}
+@keyframes cursor-blink { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) {
+  .live-cursor { animation: none; }
+}

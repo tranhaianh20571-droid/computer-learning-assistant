@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from slice3_common import (  # noqa: F401
+from common_fixtures import (  # noqa: F401
     OUTLINE_OK_PAYLOAD,
     ROUTE_OK_PAYLOAD,
     ROOT,

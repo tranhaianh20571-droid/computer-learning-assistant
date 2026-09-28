@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from slice3_common import (
+from common_fixtures import (
     OUTLINE_OK_PAYLOAD,
     ROUTE_OK_PAYLOAD,
     SyntheticModelAdapter,

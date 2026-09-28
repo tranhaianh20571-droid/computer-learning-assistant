@@ -25,7 +25,7 @@ from backend.logging_audit.repositories import PgAuditLog
 from backend.slice0_app import Slice0State
 from backend.slice3_app import Slice3State, create_slice3_app
 
-from slice3_common import (
+from common_fixtures import (
     ROUTE_OK_PAYLOAD,
     SyntheticModelAdapter,
     auth_headers,

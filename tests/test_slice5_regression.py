@@ -32,7 +32,7 @@ from backend.slice0_app import Slice0State  # noqa: E402
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from slice3_common import (  # noqa: E402
+from common_fixtures import (  # noqa: E402
     OUTLINE_OK_PAYLOAD,
     ROUTE_OK_PAYLOAD,
     SyntheticModelAdapter,

@@ -23,7 +23,7 @@ from backend.planning.model_runner import (  # noqa: E402
     reset_mode_capability_cache,
     run_structured,
 )
-from slice3_common import SyntheticModelAdapter  # noqa: E402
+from common_fixtures import SyntheticModelAdapter  # noqa: E402
 
 
 class _Payload(BaseModel):

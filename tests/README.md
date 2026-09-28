@@ -1,6 +1,8 @@
 # 测试执行入口
 
-本目录是仓库可执行测试的唯一真源。`tests/support/backend/` 与生产 `server/backend/app/` 保持镜像同步（契约层说明见 `support/backend/README.md`）：测试导入的是镜像实现，生产代码只从 `server/backend/` 运行。执行记录与 AC 验收归档在 `文档/规范/tests/`（不入 git）。
+本目录是仓库可执行测试的唯一真源。`tests/support/backend/` 与生产 `server/backend/app/` 保持镜像同步（契约与例外清单见 `support/backend/README.md`）：测试导入的是镜像实现，生产代码只从 `server/backend/` 运行，同步由 `test_mirror_sync.py` 哈希校验守护。执行记录与 AC 验收归档在 `文档/测试归档/`（不入 git）；组织约定见通用规范 `文档/规范/testing-spec.md`。
+
+当前基线：**495 passed / 2 skipped**（2026-09-28，ADR-022 后）。
 
 ## 运行
 
@@ -27,10 +29,13 @@ $env:LEARNING_DATABASE_URL="postgresql+psycopg://learning_assistant:<密码>@127
 
 | 分层 | 文件 | 覆盖 |
 | --- | --- | --- |
-| 日志审计地基 | `test_t01_contracts` / `test_t02_logger` / `test_t03_task_events` / `test_t04_audit` / `test_t05_frontend_boundary` / `test_t06_fault_injection` | 字段允许名单、脱敏、日志注入、trace 关联、任务序号、审计追加保护、观测降级 |
+| 日志审计地基 | `test_t01_contracts` ～ `test_t06_fault_injection` | 字段允许名单、脱敏、日志注入、trace 关联、任务序号、审计追加保护、观测降级 |
+| 观测与内容通道 | `test_t07_model_call_metrics` / `test_t08_content_trace` | 模型调用聚合指标、内容通道路由与脱敏边界、OTel 装配、删除联动 |
 | 切片 0–5 | `test_slice0_*` ～ `test_slice5_*`、`test_ac03_worker_chain` | 各切片核心、契约、调度与故障 |
+| 架构 v2 与 Agent 层 | `test_v2_model_streaming` / `test_v2_gemini_adapter` / `test_v2_intake` / `test_v2_ui_support` / `test_v2_pydanticai_bridge` | 流式生成、Gemini 适配器、访谈、UI 支撑、PydanticAI 桥（TestModel 冒烟 + FunctionModel 合成适配器） |
 | 集成与故障注入 | `test_integration_http` / `test_integration_faults` / `test_fastapi_pg` / `test_template_integration` | 真实 HTTP、SSE 补取与 `410 events_expired`、跨账户、PG 触发器 |
-| 共享夹具 | `slice3_common.py`、`support/` | 合成模型适配器、测试存储目录 |
+| 结构守护 | `test_mirror_sync` | 镜像树与生产树逐字节一致（登记例外白名单） |
+| 共享夹具 | `common_fixtures.py`（原 `slice3_common.py`）、`support/` | 合成模型适配器、测试存储目录 |
 
 ## 浏览器 / 前端回归
 
@@ -39,4 +44,4 @@ $env:LEARNING_DATABASE_URL="postgresql+psycopg://learning_assistant:<密码>@127
 
 ## 证据与验收归档
 
-各切片执行记录与 AC 汇总在 `文档/规范/tests/`（`logging-audit/evidence|reports`、`slice-0/`），注册表快照在 `logging-audit/schemas/`；这些目录不入 git，索引见 `文档/规范/tests/logging-audit/README.md`。
+各切片执行记录与 AC 汇总在 `文档/测试归档/`（`logging-audit/evidence|reports`、`slice-0/`），注册表快照在 `logging-audit/schemas/`（版本化，不覆盖旧快照）；这些目录不入 git，索引见 `文档/测试归档/logging-audit/README.md`。

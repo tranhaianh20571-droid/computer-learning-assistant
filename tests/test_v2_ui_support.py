@@ -21,7 +21,7 @@ from backend.logging_audit.repositories import PgAuditLog
 from backend.slice0_app import Slice0State
 from backend.slice3_app import Slice3State, create_slice3_app
 
-from slice3_common import auth_headers, make_user  # noqa: E402
+from common_fixtures import auth_headers, make_user  # noqa: E402
 
 PASSWORD = "synthetic-password-12345"
 

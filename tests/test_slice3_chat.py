@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from slice3_common import (
+from common_fixtures import (
     SyntheticModelAdapter,
     SyntheticSearchAdapter,
     auth_headers,

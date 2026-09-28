@@ -35,7 +35,7 @@ from backend.planning.drafts import DraftService  # noqa: E402
 from backend.planning.retrieval import PlanningRetrievalService  # noqa: E402
 from backend.planning.service import PlanningService  # noqa: E402
 from backend.slice3_app import Slice3State  # noqa: E402
-from slice3_common import (  # noqa: E402
+from common_fixtures import (  # noqa: E402
     OUTLINE_OK_PAYLOAD,
     ROUTE_OK_PAYLOAD,
     SyntheticModelAdapter,
@@ -310,7 +310,7 @@ class TestTTSModes:
 
 class TestAudioAccess:
     def test_audio_owner_ok_cross_user_denied(self, env) -> None:
-        from slice3_common import make_user
+        from common_fixtures import make_user
 
         user_id, token, course_id, lesson_id = _user_with_ready_lesson(env)
         client = env["client"]
@@ -451,7 +451,7 @@ class TestCheckpoints:
         assert newer.status_code == 200
 
     def test_cross_user_checkpoint_denied(self, env) -> None:
-        from slice3_common import make_user
+        from common_fixtures import make_user
 
         user_id, token, course_id, lesson_id = _user_with_ready_lesson(env)
         client = env["client"]

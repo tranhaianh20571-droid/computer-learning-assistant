@@ -283,14 +283,26 @@ def _dev_synthetic_factories() -> tuple[Optional[Any], Optional[Any]]:
 
 
 def _real_model_factory() -> Optional[Any]:
-    """真实模型工厂（LEARNING_REAL_MODEL_* 环境变量；OpenAI 兼容协议）。"""
+    """真实模型工厂（LEARNING_REAL_MODEL_* 环境变量）。
+
+    协议由 LEARNING_REAL_MODEL_PROTOCOL 选择：openai（默认，/v1 兼容端点）
+    或 gemini（原生 /v1beta generateContent + 原生 responseSchema；
+    endpoint 会自动去掉 /v1 后缀并追加 /v1beta/models/...）。
+    """
     key = os.environ.get("LEARNING_REAL_MODEL_KEY")
     endpoint = os.environ.get("LEARNING_REAL_MODEL_ENDPOINT")
     if not (key and endpoint):
         return None
+    model_name = os.environ.get("LEARNING_REAL_MODEL_NAME", "")
+    if os.environ.get("LEARNING_REAL_MODEL_PROTOCOL", "").lower() == "gemini":
+        from .slice1.adapters.gemini import GeminiAdapter
+
+        gemini_endpoint = endpoint.removesuffix("/v1").rstrip("/")
+        return lambda owner, task_id: GeminiAdapter(
+            endpoint=gemini_endpoint, model_name=model_name, credentials={"api_key": key}
+        )
     from .slice1.adapters.openai import OpenAIAdapter
 
-    model_name = os.environ.get("LEARNING_REAL_MODEL_NAME", "")
     return lambda owner, task_id: OpenAIAdapter(
         endpoint=endpoint, model_name=model_name, credentials={"api_key": key}
     )

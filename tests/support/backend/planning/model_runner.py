@@ -10,6 +10,7 @@ T01 降级默认结论（evidence/slice3-model-capability-spike.md §4）落地�
 
 生产适配器为切片 1 的内容模型适配器（本模块只依赖 `generate(messages, **options)`
 与 `probe(capability)` 契约）；测试注入合成适配器。
+每次 `adapter.generate` 调用记入 `model.call.*` 聚合指标（无内容字段）。
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ValidationError
 
+from ..logging_audit.logger import monotonic_ms
+from ..logging_audit.metrics import get_model_call_metrics
 from .errors import error
 from .outputs import PROMPTED_PARSE_RETRIES
 
@@ -105,6 +108,7 @@ def run_structured(
     schema: Optional[dict] = None,
     tool_name: str = "submit_candidate",
     prompt_suffix: str = "",
+    stage: str = "generate",
 ) -> ModelRunResult:
     """按模式顺序尝试结构化输出；全部失败抛受控错误码。
 
@@ -122,11 +126,21 @@ def run_structured(
         while attempts < max_attempts:
             attempts += 1
             options = _options_for_mode(mode, schema, tool_name, prompt_suffix, last_error)
+            call_started = monotonic_ms()
             try:
                 raw = adapter.generate(messages, **options)
             except Exception as exc:  # noqa: BLE001 - 供应商异常 → 受控错误码
                 code = getattr(exc, "code", "MODEL_TIMEOUT")
-                raise error("MODEL_TIMEOUT" if code == "timeout" else "MODEL_CAPABILITY_UNAVAILABLE") from exc
+                mapped = "MODEL_TIMEOUT" if code == "timeout" else "MODEL_CAPABILITY_UNAVAILABLE"
+                get_model_call_metrics().record(
+                    stage=stage, outcome="failed", mode=mode,
+                    error_code=mapped, duration_ms=monotonic_ms() - call_started,
+                )
+                raise error(mapped) from exc
+            get_model_call_metrics().record(
+                stage=stage, outcome="succeeded", mode=mode,
+                duration_ms=monotonic_ms() - call_started,
+            )
             payload_dict = _extract_payload(mode, raw)
             if payload_dict is None:
                 last_error = "unparseable_output"
@@ -177,14 +191,23 @@ def _extract_payload(mode: str, raw: Any) -> Optional[dict]:
     return _parse_json_payload(raw.get("content"))
 
 
-def run_chat(adapter: Any, messages: list[dict], *, max_len: int) -> str:
+def run_chat(adapter: Any, messages: list[dict], *, max_len: int, stage: str = "generate") -> str:
     """即时文字输出：结构化不可用时仍须交付纯文字（native 文字输出路径）。"""
+    call_started = monotonic_ms()
     try:
         raw = adapter.generate(messages, plain_text=True)
         content = raw.get("content") if isinstance(raw, dict) else raw
     except Exception as exc:  # noqa: BLE001
         code = getattr(exc, "code", "MODEL_TIMEOUT")
-        raise error("MODEL_TIMEOUT" if code == "timeout" else "MODEL_CAPABILITY_UNAVAILABLE") from exc
+        mapped = "MODEL_TIMEOUT" if code == "timeout" else "MODEL_CAPABILITY_UNAVAILABLE"
+        get_model_call_metrics().record(
+            stage=stage, outcome="failed", error_code=mapped,
+            duration_ms=monotonic_ms() - call_started,
+        )
+        raise error(mapped) from exc
+    get_model_call_metrics().record(
+        stage=stage, outcome="succeeded", duration_ms=monotonic_ms() - call_started,
+    )
     text = str(content or "").strip()
     if not text:
         raise error("MODEL_CAPABILITY_UNAVAILABLE", "empty chat answer")

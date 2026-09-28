@@ -21,6 +21,8 @@ from typing import Any, Callable, Optional
 from sqlalchemy import func, select
 
 from ..logging_audit.db import Database
+from ..logging_audit.logger import monotonic_ms
+from ..logging_audit.metrics import get_model_call_metrics
 from ..logging_audit.repositories import PgTaskEventStore
 from ..planning.errors import PlanningError, error
 from ..planning.models import (
@@ -353,8 +355,13 @@ class TeachingService:
                     audio.status = "invalid"
                     audio.invalid_reason = "tts_unconfigured"
                 else:
+                    tts_started = monotonic_ms()
                     try:
                         synth = adapter.synthesize(step.text)
+                        get_model_call_metrics().record(
+                            stage="tts", outcome="succeeded",
+                            duration_ms=monotonic_ms() - tts_started,
+                        )
                         audio_hex = synth.get("audio_hex", "")
                         subtitle = synth.get("subtitle")
                         # 字幕缺失或时标为空 → 音频不得发布为可播放内容
@@ -371,6 +378,13 @@ class TeachingService:
                             audio.status = "ready"
                             step.audio_id = audio.audio_id
                     except Exception as exc:  # noqa: BLE001 - 供应商异常映射受控错误码
+                        get_model_call_metrics().record(
+                            stage="tts", outcome="failed",
+                            duration_ms=monotonic_ms() - tts_started,
+                            error_code=(
+                                "TTS_TIMEOUT" if getattr(exc, "code", "") == "timeout" else "INTERNAL_ERROR"
+                            ),
+                        )
                         audio.status = "failed"
                         audio.invalid_reason = (getattr(exc, "code", "") or "tts_failed")[:40]
                 sess.flush()

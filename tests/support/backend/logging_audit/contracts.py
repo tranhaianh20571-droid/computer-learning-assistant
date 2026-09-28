@@ -109,6 +109,7 @@ ALLOWED_FIELDS: FrozenSet[str] = frozenset(
         "admin_id",
         # 阶段与结果
         "stage",
+        "mode",
         "status",
         "error_code",
         "duration_ms",
@@ -205,6 +206,7 @@ FIELD_MAX_LENGTH: Mapping[str, int] = {
     "service": 40,
     "environment": 40,
     "stage": 40,
+    "mode": 16,
     "status": 40,
     "capability": 64,
     "exporter": 40,
@@ -678,6 +680,22 @@ EVENT_REGISTRY: Mapping[str, EventSpec] = {
             frozenset({"queue_length", "dropped_count", "degraded"}),
             user_visible=False,
             description="观测导出失败",
+        ),
+        EventSpec(
+            "model.call.completed",
+            (LogEventType.RUNTIME, LogEventType.METRIC),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms"}),
+            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "capability", "reason"}),
+            user_visible=False,
+            description="模型/生成调用成功（聚合指标，无内容字段）",
+        ),
+        EventSpec(
+            "model.call.failed",
+            (LogEventType.RUNTIME, LogEventType.METRIC),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms", "error_code"}),
+            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "capability", "reason"}),
+            user_visible=False,
+            description="模型/生成调用失败（聚合指标，无内容字段）",
         ),
     )
 }

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import { useEventStream } from "./hooks/useEventStream";
 import { useHashRoute } from "./hooks/useHashRoute";
 import { useSession } from "./hooks/useSession";
-import { errText, STATUS_LABEL } from "./lib/errors";
-import Badge from "./ui/Badge";
+import { AUTH_LEFT, LoginView, RegisterView, ResetView, VerifyView } from "./views/auth/AuthPages";
+import AdminView from "./views/AdminView";
+import CanvasView from "./views/CanvasView";
+import TasksView from "./views/TasksView";
 import CapabilityConfig from "./CapabilityConfig";
 import PlanningView from "./PlanningView";
 import ChatView from "./ChatView";
@@ -15,27 +16,11 @@ import LectureView from "./LectureView";
 import "./tokens.css";
 
 /**
- * 切片 3 UI（对齐设计规范 ds-1「工程制图 / 技术手册」）：
- * - 登录/注册/验证/重置为独立整页路由（.auth 双栏，无侧栏，参考 Google 登录式布局）；
- * - 应用骨架为 .app 双栏：深色侧栏（分组导航 + 账户脚注）+ .main（顶栏面包屑 + .page）；
- * - 错误码 → 用户可见文案与状态徽章在 lib/errors.ts / ui/Badge.tsx。
+ * 应用骨架（对齐设计规范 ds-1「工程制图 / 技术手册」）：
+ * - 路由/会话状态在 hooks（useHashRoute / useSession），视图在 views/，共享原语在 lib/ 与 ui/；
+ * - 登录/注册/验证/重置为独立整页路由（.auth 双栏，无侧栏）；
+ * - 应用骨架为 .app 双栏：深色侧栏（分组导航 + 账户脚注）+ .main（顶栏面包屑 + .page）。
  */
-
-const AUTH_LEFT = (
-  <aside className="auth-l">
-    <div className="brand"><span className="wm">学伴</span><span className="sub">CS · STUDY</span></div>
-    <h1>一个邀请制的计算机学习空间</h1>
-    <p>在这里定学习目标、生成路线与课程大纲，然后跟着短步骤的讲解一步步学。首版只对项目成员开放。</p>
-    <ol className="how">
-      <li><span className="n">01</span><span><b>提交申请</b> · 邮箱和一句长密码</span></li>
-      <li><span className="n">02</span><span><b>验证邮箱</b> · 点开邮件里的链接</span></li>
-      <li><span className="n">03</span><span><b>等待审批</b> · 由项目所有者人工处理</span></li>
-      <li><span className="n">04</span><span><b>进入学习空间</b> · 两步都完成后才开放</span></li>
-    </ol>
-    <div className="foot">Chrome / Edge 最新版及上一个大版本</div>
-  </aside>
-);
-
 export default function App() {
   const { me, setMe, booted } = useSession();
   const { route, navigate } = useHashRoute();
@@ -75,7 +60,7 @@ export default function App() {
     };
   }, [closeSide]);
 
-  // 登录/注册/验证/重置：独立整页路由（无侧栏），参考 Google 登录式布局
+  // 登录/注册/验证/重置：独立整页路由（无侧栏）
   const isAuthRoute = ["/login", "/register", "/verify", "/reset"].includes(route);
   if (!booted) return <div className="auth"><div className="auth-r"><p className="muted">加载中…</p></div></div>;
 
@@ -202,7 +187,7 @@ export default function App() {
             <MaterialsPage onErr={setError} onOk={setNotice} />
           )}
           {route === "/tasks" && (
-            <HomeView me={me} onErr={setError} onOk={setNotice} onNeedLogin={() => go("/login")} />
+            <TasksView me={me} onErr={setError} onOk={setNotice} onNeedLogin={() => go("/login")} />
           )}
           {route === "/admin" && me?.is_admin && <AdminView onErr={setError} onOk={setNotice} />}
           {route === "/canvas" && <CanvasView />}
@@ -225,341 +210,6 @@ export default function App() {
             <LectureView conversationId={route.slice("/lecture/".length)} onErr={setError} onOk={setNotice} go={go} />
           )}
         </main>
-      </div>
-    </div>
-  );
-}
-
-function Field({ label, type, value, onChange, help, autoComplete }: any) {
-  return (
-    <div className="field">
-      <label>{label}</label>
-      <input
-        className="inp"
-        type={type}
-        value={value}
-        autoComplete={autoComplete}
-        onChange={(e) => onChange(e.target.value)}
-      />
-      {help && <span className="help">{help}</span>}
-    </div>
-  );
-}
-
-function RegisterView({ onDone, onErr }: any) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
-  return (
-    <form className="od-stack" style={{ ["--od-gap" as any]: "18px" }} onSubmit={(e) => e.preventDefault()}>
-      <span className="kicker">申请加入</span>
-      <h2 className="h1">注册账号</h2>
-      <p className="muted">创建账户后需验证邮箱并等待管理员审批。</p>
-      <Field label="邮箱" type="email" value={email} onChange={setEmail} autoComplete="email" />
-      <Field label="密码" type="password" value={password} onChange={setPassword} help="至少 15 个字符" autoComplete="new-password" />
-      <Field label="显示名（可选）" type="text" value={name} onChange={setName} autoComplete="nickname" />
-      <div className="row">
-        <button className="btn btn-pri" type="submit"
-          onClick={async () => {
-            try {
-              const r = await api.register(email, password, name);
-              onDone(`注册成功。验证令牌：${r.verify_token}（演示环境直接展示，生产走邮件）`);
-            } catch (e) { onErr(errText(e)); }
-          }}
-        >
-          提交注册
-        </button>
-      </div>
-      <span className="auth-switch">已有账号？<a href="#/login">登录</a></span>
-    </form>
-  );
-}
-
-function VerifyView({ onDone, onErr }: any) {
-  const [token, setToken] = useState("");
-  return (
-    <div className="od-stack" style={{ ["--od-gap" as any]: "18px" }}>
-      <span className="kicker">验证邮箱</span>
-      <h2 className="h1">确认你的邮箱</h2>
-      <ul className="track" aria-label="注册步骤">
-        <li className="done"><span className="n">STEP 1</span><b>提交申请</b></li>
-        <li className="now"><span className="n">STEP 2</span><b>验证邮箱</b></li>
-        <li><span className="n">STEP 3</span><b>等待审批</b></li>
-      </ul>
-      <Field label="验证令牌" type="text" value={token} onChange={setToken} />
-      <div className="row">
-        <button className="btn btn-pri"
-          onClick={async () => {
-            try {
-              const r = await api.verifyEmail(token);
-              onDone(`邮箱已验证，当前状态：${STATUS_LABEL[r.status] || r.status}`);
-            } catch (e) { onErr(errText(e)); }
-          }}
-        >
-          验证
-        </button>
-        <span className="auth-switch">注册成功后令牌会显示在注册页提示里。</span>
-      </div>
-      <span className="auth-switch">已验证？<a href="#/login">去登录</a></span>
-    </div>
-  );
-}
-
-function LoginView({ onDone, onErr }: any) {
-  const [email, setEmail] = useState(() => localStorage.getItem("slice3.rememberEmail") || "");
-  const [password, setPassword] = useState("");
-  return (
-    <form className="od-stack" style={{ ["--od-gap" as any]: "18px" }} onSubmit={(e) => e.preventDefault()}>
-      <span className="kicker">登录</span>
-      <h2 className="h1">回到你的学习空间</h2>
-      <Field label="邮箱" type="email" value={email} onChange={setEmail} autoComplete="email" />
-      <Field label="密码" type="password" value={password} onChange={setPassword} autoComplete="current-password" />
-      <div className="row" style={{ justifyContent: "flex-end", gap: "var(--s4)" }}>
-        <button className="linkbtn" type="button" onClick={() => (location.hash = "/reset")}>找回密码</button>
-        <button className="btn btn-pri" type="submit"
-          onClick={async () => {
-            try {
-              await api.login(email, password);
-              // 只记住邮箱字符串；密码永不落浏览器
-              localStorage.setItem("slice3.rememberEmail", email);
-              onDone("已登录");
-            } catch (e) { onErr(errText(e)); }
-          }}
-        >
-          登录
-        </button>
-      </div>
-      <span className="auth-switch">还没有账号？<a href="#/register">申请加入</a></span>
-    </form>
-  );
-}
-
-function ResetView({ onDone, onErr }: any) {
-  const [email, setEmail] = useState("");
-  const [token, setToken] = useState("");
-  const [password, setPassword] = useState("");
-  return (
-    <div className="od-stack" style={{ ["--od-gap" as any]: "18px" }}>
-      <span className="kicker">找回密码</span>
-      <h2 className="h1">通过邮件重设密码</h2>
-      <Field label="邮箱" type="email" value={email} onChange={setEmail} />
-      <div className="row">
-        <button className="btn"
-          onClick={async () => {
-            try {
-              const r = await api.resetRequest(email);
-              onDone(r.reset_token ? `重置令牌：${r.reset_token}` : "若邮箱存在将收到重置邮件。");
-            } catch (e) { onErr(errText(e)); }
-          }}
-        >
-          发送重置令牌
-        </button>
-      </div>
-      <Field label="重置令牌" type="text" value={token} onChange={setToken} />
-      <Field label="新密码" type="password" value={password} onChange={setPassword} help="至少 15 个字符" />
-      <div className="row">
-        <button className="btn btn-pri"
-          onClick={async () => {
-            try {
-              await api.resetConfirm(token, password);
-              onDone("密码已重置，旧会话已失效。");
-            } catch (e) { onErr(errText(e)); }
-          }}
-        >
-          确认重置
-        </button>
-      </div>
-      <span className="auth-switch">想起密码了？<a href="#/login">去登录</a></span>
-    </div>
-  );
-}
-
-function AdminView({ onErr, onOk }: any) {
-  const [userId, setUserId] = useState("");
-  return (
-    <div className="page-w">
-      <div className="phead">
-        <span className="kicker">管理员 · 账户状态</span>
-        <div className="row"><h1 className="h1">注册审批</h1></div>
-        <p className="lede">只展示已验证邮箱的申请。操作会写入追加式审计。</p>
-      </div>
-      <section className="card stack">
-        <Field label="目标 user_id" type="text" value={userId} onChange={setUserId} />
-        <div className="row">
-          <button className="btn btn-pri"
-            onClick={async () => {
-              try { const r = await api.approve(userId); onOk(`已通过 ${r.user_id}`); }
-              catch (e) { onErr(errText(e)); }
-            }}
-          >
-            通过
-          </button>
-          <button className="btn danger"
-            onClick={async () => {
-              try { const r = await api.reject(userId); onOk(`已拒绝 ${r.user_id}`); }
-              catch (e) { onErr(errText(e)); }
-            }}
-          >
-            拒绝
-          </button>
-          <button className="btn danger"
-            onClick={async () => {
-              try { const r = await api.disable(userId); onOk(`已停用 ${r.user_id}`); }
-              catch (e) { onErr(errText(e)); }
-            }}
-          >
-            停用
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-/** 任务状态（切片 0 演示页，保留模板化事件流） */
-function HomeView({ me, onErr, onOk, onNeedLogin }: any) {
-  const [taskId, setTaskId] = useState("");
-  const [status, setStatus] = useState<any>(null);
-  const [events, setEvents] = useState<any[]>([]);
-  const { runStream } = useEventStream();
-
-  const loadStatus = useCallback(async (id: string) => {
-    try {
-      const s = await api.taskStatus(id);
-      setStatus(s);
-    } catch (e) { onErr(errText(e)); }
-  }, [onErr]);
-
-  const openSse = useCallback(async (id: string) => {
-    try {
-      await runStream(
-        (signal) => api.taskSse(id, undefined, signal),
-        (frame) => {
-          const evt = frame.data;
-          setEvents((prev) => [...prev, evt]);
-          setStatus((s: any) =>
-            s
-              ? { ...s, status: evt.status, stage: evt.stage, revision: (s.revision || 0) }
-              : { status: evt.status, stage: evt.stage }
-          );
-        },
-        { onExpired: () => loadStatus(id) },
-      );
-    } catch (e) {
-      if ((e as Error).name !== "AbortError") onErr(errText(e));
-    }
-  }, [loadStatus, onErr, runStream]);
-
-  return (
-    <div className="page-w">
-      <div className="phead">
-        <span className="kicker">任务</span>
-        <div className="row"><h1 className="h1">任务状态</h1></div>
-        <p className="lede">{me ? `已登录：${me.email}` : "未登录。请先登录后再创建任务。"}</p>
-      </div>
-      {!me && <button className="btn btn-pri" onClick={onNeedLogin}>去登录</button>}
-      <section className="card stack">
-        <div className="row">
-          <button
-            className="btn"
-            disabled={!me}
-            onClick={async () => {
-              try {
-                const r = await api.createTask({
-                  idempotency_key: `web-${Date.now()}`,
-                  kind: "generic",
-                  subject_id: "demo_subject",
-                  prompt_name: "lesson_step_v1",
-                  allow_fallback: true,
-                });
-                setTaskId(r.task_id);
-                onOk(r.prompt_binding_id ? `任务已创建 ${r.task_id}` : `任务已创建，但 ${r.prompt_unavailable || "提示词不可用"}`);
-                await loadStatus(r.task_id);
-                await openSse(r.task_id);
-              } catch (e) { onErr(errText(e)); }
-            }}
-          >
-            创建最简任务
-          </button>
-          <input
-            className="inp"
-            style={{ maxWidth: 260 }}
-            placeholder="task_id"
-            value={taskId}
-            onChange={(e) => setTaskId(e.target.value)}
-            aria-label="任务 ID"
-          />
-          <button className="btn" disabled={!taskId} onClick={() => loadStatus(taskId)}>刷新状态</button>
-          <button className="btn" disabled={!taskId} onClick={() => openSse(taskId)}>订阅 SSE</button>
-        </div>
-      </section>
-
-      {status && (
-        <section className="card stack">
-          <div className="row">
-            <Badge status={status.status || "queued"} />
-            <span className="idtag">stage={status.stage || "-"}</span>
-            <span className="idtag">revision={status.revision ?? "-"}</span>
-          </div>
-          <span className="idtag">task_id={status.task_id || taskId}</span>
-        </section>
-      )}
-
-      {events.length > 0 && (
-        <section className="card stack">
-          <h2 className="h3">事件（模板化）</h2>
-          <div className="tscroll">
-            <table className="table">
-              <thead>
-                <tr><th>序号</th><th>阶段</th><th>状态</th><th>错误码</th></tr>
-              </thead>
-              <tbody>
-                {events.map((e, i) => (
-                  <tr key={e.event_id || i}>
-                    <td className="num">{e.sequence}</td>
-                    <td>{e.stage}</td>
-                    <td><Badge status={e.status} /></td>
-                    <td className="idtag">{e.error_code || "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-    </div>
-  );
-}
-
-/** Excalidraw 最小只读场景（画布底座，不把坐标当业务顺序） */
-function CanvasView() {
-  const [ready, setReady] = useState(false);
-  const [err, setErr] = useState("");
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        await Promise.all([
-          import("@excalidraw/excalidraw"),
-          import("@excalidraw/excalidraw/index.css"),
-        ]);
-        if (!cancelled) setReady(true);
-      } catch (e) {
-        if (!cancelled) setErr("画布组件加载失败（离线或构建限制）。核心身份/任务流程不受影响。");
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-  return (
-    <div className="page-w">
-      <div className="phead">
-        <span className="kicker">底座</span>
-        <h1 className="h1">画布底座</h1>
-        <p className="lede">Excalidraw 仅作为只读场景画布；业务节点、排序和权限由服务端结构化数据驱动。</p>
-      </div>
-      {err && <div className="notice">{err}</div>}
-      <div className="excalidraw-wrap" aria-label="板书区域，可滚动和缩放" style={{ padding: "1.5rem", color: "var(--ink3)" }}>
-        {ready ? "Excalidraw 已加载（只读场景将在生成链路接入）。" : "加载画布组件…"}
       </div>
     </div>
   );

@@ -61,6 +61,9 @@ def create_app() -> FastAPI:
     # ADR-022：内容通道开关经 settings 解析（真实环境变量 > .env）后同步到
     # 进程环境，供 logging_audit.content_trace 读取（沿用桥接模式）。
     os.environ["CONTENT_TRACE_ENABLED"] = "1" if settings.CONTENT_TRACE_ENABLED else "0"
+    # 凭据主密钥同 pattern 桥接：slice1 crypto 只读进程环境，settings 值不会自动传播。
+    if settings.APP_ENCRYPTION_KEY:
+        os.environ.setdefault("APP_ENCRYPTION_KEY", settings.APP_ENCRYPTION_KEY)
 
     from app.slice3_app import create_slice3_app
 

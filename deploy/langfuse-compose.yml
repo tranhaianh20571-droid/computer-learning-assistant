@@ -1,0 +1,216 @@
+# Langfuse 自托管观测栈（切片 5 / 架构 §7.1，单机开发版）
+#
+# 资源配额依据：
+# - 架构 v1.7 §7.1：官方对「单独运行 Langfuse」建议 4 核 16 GiB + ~100 GiB；
+#   本项目把核心业务与观测平台分为 core / observability 两套配置，观测故障不阻断核心。
+# - 本机（16 核 / 11 GiB / WSL2）为开发机：observability 栈总配额压到
+#   ~2.5 核 / 5.3 GiB，与既有 core 容器（postgres、tavily-hikari 等）共存。
+# - 正式试用（生产）配额建议：独立 4 核 16 GiB + 100 GiB 数据盘，
+#   本文件配额通过 deploy.resources.limits 表达，生产按官方建议放大并加持久卷。
+#
+# 启动（WSL）：
+#   cd /mnt/g/有趣的小项目/学习助手伙伴/deploy
+#   docker compose -f langfuse-compose.yml up -d
+# 健康检查： curl http://127.0.0.1:3001/api/public/health
+
+name: learning-observability
+
+services:
+  langfuse-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: lf-dev-pg-password
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: lf-dev-ch-password
+      CLICKHOUSE_DB: default
+    volumes:
+      - langfuse_ch:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 2G
+
+  langfuse-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "lf-dev-redis-password"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "lf-dev-redis-password", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
+  langfuse-minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: langfuse-minio
+      MINIO_ROOT_PASSWORD: lf-dev-minio-password
+    volumes:
+      - langfuse_minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512M
+
+  langfuse-minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      langfuse-minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set lf http://langfuse-minio:9000 langfuse-minio lf-dev-minio-password &&
+      mc mb -p lf/langfuse || true &&
+      mc anonymous set none lf/langfuse || true"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: 64M
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3001:3000"
+    environment:
+      PORT: "3000"
+      DATABASE_URL: postgresql://langfuse:lf-dev-pg-password@langfuse-postgres:5432/langfuse
+      NEXTAUTH_URL: http://127.0.0.1:3001
+      NEXTAUTH_SECRET: lf-dev-nextauth-secret-9f31c2ba71d84e5fa2c17b630c8e4d51
+      SALT: lf-dev-salt-5b7d2e9a4c6341f0b8a3d0c6e2f19473
+      ENCRYPTION_KEY: lf-dev-enc-key-d41f7b09c35842ee9a6d8025f1c7b3a8e5d20496b7ca4f1a93c8602d7be41f55
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: lf-dev-ch-password
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_URL: redis://langfuse-redis:6379
+      REDIS_AUTH: lf-dev-redis-password
+      S3_ENDPOINT: http://langfuse-minio:9000
+      S3_REGION: auto
+      S3_BUCKET: langfuse
+      S3_ACCESS_KEY: langfuse-minio
+      S3_SECRET_KEY: lf-dev-minio-password
+      S3_FORCE_PATH_STYLE: "true"
+      # 首启自动初始化 org/project/user 与固定 API Key（应用侧据此对接）
+      LANGFUSE_INIT_ORG_ID: dev-org
+      LANGFUSE_INIT_ORG_NAME: Learning Assistant Dev
+      LANGFUSE_INIT_PROJECT_ID: dev-project
+      LANGFUSE_INIT_PROJECT_NAME: learning-assistant
+      LANGFUSE_INIT_USER_EMAIL: dev-admin@learning.local
+      LANGFUSE_INIT_USER_NAME: Dev Admin
+      LANGFUSE_INIT_USER_PASSWORD: lf-dev-admin-password
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: lf-pk-dev-1234567890abcdef
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: lf-sk-dev-fedcba0987654321abcdefabcdef1234
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/public/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 1G
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://langfuse:lf-dev-pg-password@langfuse-postgres:5432/langfuse
+      NEXTAUTH_SECRET: lf-dev-nextauth-secret-9f31c2ba71d84e5fa2c17b630c8e4d51
+      SALT: lf-dev-salt-5b7d2e9a4c6341f0b8a3d0c6e2f19473
+      ENCRYPTION_KEY: lf-dev-enc-key-d41f7b09c35842ee9a6d8025f1c7b3a8e5d20496b7ca4f1a93c8602d7be41f55
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: lf-dev-ch-password
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_URL: redis://langfuse-redis:6379
+      REDIS_AUTH: lf-dev-redis-password
+      S3_ENDPOINT: http://langfuse-minio:9000
+      S3_REGION: auto
+      S3_BUCKET: langfuse
+      S3_ACCESS_KEY: langfuse-minio
+      S3_SECRET_KEY: lf-dev-minio-password
+      S3_FORCE_PATH_STYLE: "true"
+      S3_EVENT_UPLOAD_BUCKET: langfuse
+      S3_EVENT_UPLOAD_PREFIX: events/
+      S3_EVENT_UPLOAD_ACCESS_KEY: langfuse-minio
+      S3_EVENT_UPLOAD_SECRET_KEY: lf-dev-minio-password
+      S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 1G
+
+volumes:
+  langfuse_pg:
+  langfuse_ch:
+  langfuse_minio:

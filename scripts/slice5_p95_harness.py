@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import time
@@ -112,14 +113,104 @@ def measure_audio_playable(client: TestClient, headers: dict, course_id: str,
     return time.monotonic() - start_ts
 
 
+
+
+GOOD_DECLARATION_S4 = {
+    "kind": "board", "title": "核心概念速览",
+    "points": ["定义", "例子", "误用"],
+    "code": None, "formula": None,
+    "nodes": [{"id": "n1", "label": "事务 A"}, {"id": "n2", "label": "事务 B"}],
+    "edges": [{"from_id": "n1", "to_id": "n2", "label": "冲突"}],
+    "original_refs": [], "reveal_ms": [0, 4000, 8000],
+}
+TEACHING_STEP_PAYLOAD = {
+    "steps": [{
+        "title": "合成教学步骤",
+        "text": "本步骤讲解当前讲次的核心概念：先给出定义，再用一个具体例子说明它在真实系统里如何出现，"
+                "最后指出两个最常见的误用与判别方法，帮助你把概念落到可操作的判断上。整段朗读约四十秒。",
+        "board": GOOD_DECLARATION_S4,
+    }],
+}
+FOLLOWUP_PAYLOAD = {"answer": "这是追问的合成回答，按定义、例子、误用三段展开。", "board": None}
+
+
+class RealBridgedAdapter(SyntheticModelAdapter):
+    """把固定 payload 作为用户追问发往真实模型，验证真实供应商往返延迟。
+
+    结构化契约仍由切片冻结的输出模型约束；本适配器取回模型文本后
+    提取 JSON（容忍围栏），只保留往返耗时语义（与真实管线同型）。
+    """
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        import sys as _sys
+        from app.slice1.adapters.openai import OpenAIAdapter
+
+        self._real = OpenAIAdapter(
+            endpoint=os.environ["LEARNING_REAL_MODEL_ENDPOINT"],
+            model_name=os.environ.get("LEARNING_REAL_MODEL_NAME", ""),
+            credentials={"api_key": os.environ["LEARNING_REAL_MODEL_KEY"]},
+        )
+
+    def probe(self, capability: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(capability=capability, state="available")
+
+    def generate(self, messages, **options):
+        import json as _json
+
+        self.generate_calls.append(options)
+        last = ""
+        for m in messages:
+            if m.get("role") == "user":
+                last = str(m.get("content", ""))
+        payload = (FOLLOWUP_PAYLOAD if "follow-up question" in last
+                   else TEACHING_STEP_PAYLOAD if "ONE short teaching step" in last
+                   else OUTLINE_OK_PAYLOAD if ("outline" in last or "大纲" in last)
+                   else ROUTE_OK_PAYLOAD)
+        prompt = ("请严格原样输出以下 JSON，不要任何其他文字：\n"
+                  + _json.dumps(payload, ensure_ascii=False))
+        raw = self._real.generate(
+            [{"role": "user", "content": prompt}], max_tokens=4096)
+        content = raw.get("content", "") if isinstance(raw, dict) else str(raw or "")
+        # 容忍 Markdown 围栏 / 前后噪声：提取首个 JSON 对象
+        import re as _re
+
+        match = _re.search(r"\{.*\}", content, _re.DOTALL)
+        parsed = None
+        if match:
+            try:
+                parsed = _json.loads(match.group(0))
+            except ValueError:
+                parsed = None
+        return {"content": _json.dumps(parsed, ensure_ascii=False) if parsed else content}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=30)
     parser.add_argument("--out", default="slice5-p95.json")
+    parser.add_argument("--real", action="store_true",
+                        help="use real model/tts adapters from LEARNING_REAL_* env")
     args = parser.parse_args()
 
+    real_mode = "--real" in sys.argv
     container = {"model": None, "search": None, "tts": None, "ocr": None}
     container["search"] = SyntheticSearchAdapter()
+    if real_mode:
+        from app.slice1.adapters.minimax import MiniMaxTTSAdapter
+        from app.slice1.adapters.openai import OpenAIAdapter
+
+    if real_mode:
+        from app.slice1.adapters.minimax import MiniMaxTTSAdapter
+
+        container["tts"] = MiniMaxTTSAdapter(
+            endpoint=os.environ.get("LEARNING_REAL_TTS_ENDPOINT", "https://api.minimax.cn"),
+            model_name=os.environ.get("LEARNING_REAL_TTS_MODEL", "speech-2.8-hd"),
+            credentials={"api_key": os.environ["LEARNING_REAL_TTS_KEY"]},
+            voice_id=os.environ.get("LEARNING_REAL_TTS_VOICE", "male-qn-qingse"),
+        )
 
     class HarnessTTS:
         """合成 TTS：hex 音频 + 句级字幕（可播放）。"""
@@ -158,7 +249,8 @@ def main() -> int:
     # 准备阶段 1：两账户各生成并确认路线
     route_ids: dict[str, str] = {}
     for client, headers, uid, tag in ((client_a, HA, user_a, "a"), (client_b, HB, user_b, "b")):
-        container["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
+        container["model"] = (RealBridgedAdapter(payload=ROUTE_OK_PAYLOAD)
+                              if real_mode else SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD))
         route_id = client.post("/api/planning/routes", headers=headers,
                                json={"title": f"P95 路线 {tag}", "scenario": "self_study"}).json()["route_id"]
         t = client.post("/api/planning/tasks", headers=headers,
@@ -174,7 +266,8 @@ def main() -> int:
     # 准备阶段 2：由路线展开大纲并确认
     course_ids: dict[str, str] = {}
     for client, headers, uid in ((client_a, HA, user_a), (client_b, HB, user_b)):
-        container["model"] = SyntheticModelAdapter(payload=OUTLINE_OK_PAYLOAD)
+        container["model"] = (RealBridgedAdapter(payload=OUTLINE_OK_PAYLOAD)
+                              if real_mode else SyntheticModelAdapter(payload=OUTLINE_OK_PAYLOAD))
         route_id = route_ids[uid]
         overview = client.get(f"/api/routes/{route_id}/overview", headers=headers).json()
         course_id = overview["stages"][0]["courses"][0]["course_id"]
@@ -192,8 +285,9 @@ def main() -> int:
         assert cov["outline_confirmed"], "P95 课程需要已确认大纲"
         course_ids[uid] = course_id
 
-    # 教学测量阶段：切换到教学样例适配器（含 TTS）
-    container["model"] = TeachingModelAdapter(payload=OUTLINE_OK_PAYLOAD)
+    # 教学测量阶段：切换到教学样例适配器（含 TTS）；--real 用真实桥接
+    container["model"] = (RealBridgedAdapter(payload=OUTLINE_OK_PAYLOAD)
+                          if real_mode else TeachingModelAdapter(payload=OUTLINE_OK_PAYLOAD))
     # 讲次池：每账户重复使用同一课程的多个讲次（ready 化），避免讲次耗尽
     from backend.planning.models import LessonRow
 

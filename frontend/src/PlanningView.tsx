@@ -175,9 +175,11 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode }: 
     try { setTask(await api.getPlanningTask(id)); } catch { /* 保持当前状态 */ }
   }, []);
 
-  const loadScene = useCallback(async (rid: string) => {
+  const loadScene = useCallback(async (rid: string, kind?: string) => {
     if (!rid) return;
-    try { setScene(await api.routeScene(rid)); } catch { setScene(null); }
+    try {
+      setScene(kind === "course" ? await api.courseScene(rid) : await api.routeScene(rid));
+    } catch { setScene(null); }
   }, []);
 
   const runTask = useCallback(async (id: string) => {
@@ -218,11 +220,17 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode }: 
           setTask(t);
           if (t.target_id) {
             setRouteId(t.target_id);
-            if (t.draft_id) {
-              const d = await api.getDraft(t.draft_id);
-              setDraft(d);
-              try { setScene(await api.routeScene(t.target_id)); } catch { setScene(null); }
+            // 确认过的草稿不再当作“编辑中”复活；已确认版本的导图始终加载
+            const confirmed = t.draft_id && localStorage.getItem(`slice3.confirmedDraft.${t.draft_id}`) === "1";
+            if (t.draft_id && !confirmed) {
+              try {
+                const d = await api.getDraft(t.draft_id);
+                setDraft(d);
+              } catch { /* 草稿不可用则只展示已确认版本 */ }
             }
+            try {
+              setScene(t.target_kind === "course" ? await api.courseScene(t.target_id) : await api.routeScene(t.target_id));
+            } catch { setScene(null); }
           }
         } catch { /* 最近任务不可用则忽略 */ }
       })();
@@ -270,14 +278,16 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode }: 
   const confirmDraft = useCallback(async () => {
     if (!draft) return;
     try {
-      const r = await api.confirmDraft(draft.draft_id, {
+      await api.confirmDraft(draft.draft_id, {
         revision: draft.revision, idempotency_key: `web-confirm-${Date.now()}`,
       });
-      onOk(r.deduped ? "该草稿此前已确认。" : `已确认并创建不可变版本 v${r.version_no}。`);
+      // 确认成功不弹横幅（导图切到已确认态即反馈）；标记该草稿已确认，重进页面不复活编辑态
+      try { localStorage.setItem(`slice3.confirmedDraft.${draft.draft_id}`, "1"); } catch { /* 隐私模式忽略 */ }
+      onOk("");
       setDraft(null);
       setScene(null);
       setDraftScene(null);
-      await loadScene(draft.target_id);
+      await loadScene(draft.target_id, draft.draft_kind);
     } catch (e: any) {
       onErr(`确认失败：${e?.code || e?.message || "错误"}`);
     }
@@ -470,7 +480,16 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode }: 
                   </button>
                 </>
               ) : (
-                <p className="help">当前展示已确认版本；如需调整，请回到「新的学习任务」生成新草稿。</p>
+                <>
+                  <p className="help">已确认为不可变版本，导图与总览同版。</p>
+                  <button
+                    className="btn btn-pri"
+                    onClick={() => go(task?.target_kind === "course" ? `/course/${routeId}` : `/route/${routeId}`)}
+                  >
+                    {task?.target_kind === "course" ? "查看课程总览 →" : "查看路线总览 →"}
+                  </button>
+                  <p className="help">如需调整，请回到「新的学习任务」生成新草稿。</p>
+                </>
               )}
             </div>
           </aside>

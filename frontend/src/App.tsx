@@ -87,6 +87,12 @@ export default function App() {
     setSideAutoHidden(on);
   }, []);
 
+  // 换页清掉旧横幅，避免重进页面还挂着上一页的成功/失败提示
+  useEffect(() => {
+    setError("");
+    setNotice("");
+  }, [route]);
+
   const go = useCallback((path: string) => {
     setError("");
     setNotice("");
@@ -287,7 +293,7 @@ export default function App() {
         <main className="page">
           <PageErrorBoundary key={route}>
           {error && <div className="error" role="alert" style={{ marginBottom: "var(--s4)" }}>{error}</div>}
-          {notice && <div className="notice" role="status" style={{ marginBottom: "var(--s4)" }}>{notice}</div>}
+          {!mapMode && notice && <div className="notice" role="status" style={{ marginBottom: "var(--s4)" }}>{notice}</div>}
 
           {route === "/home" && (
             <TaskEntry me={me} onErr={setError} onOk={setNotice} go={go} />

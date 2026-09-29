@@ -424,7 +424,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
         </div>
       )}
 
-      {routeId && hasBoard && (
+      {routeId && hasBoard && !showIntake && (
         <>
           <div className="verbar">
             <div className="cell">

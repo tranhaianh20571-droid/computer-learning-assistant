@@ -6,15 +6,9 @@ import ReadonlyCanvas from "./excalidraw/ReadonlyCanvas";
  * 课程规划工作台（v2 三态：访谈 → 生成 → 草稿）：
  * - intake：生成前访谈（选项卡问答，范围并入第一轮，上限 4 轮），画布此阶段不渲染；
  * - generating：任务运行横幅（长任务，请勿刷新）；内部 ID（task_id/draft_id）不外显；
- * - draft：版本栏 + 只读画布（草稿生成后直接预览导图，不必先确认）；
+ * - draft：左栏提问与反馈 + 只读画布（草稿生成后直接预览导图，不必先确认）；
  * - 等待态（范围澄清[跳过范围题时的回落] / 搜索决策）以 note 呈现。
  */
-
-const SAVE_TEXT: Record<string, string> = {
-  saved: "草稿已保存 · 服务端已确认",
-  saving: "正在保存草稿…",
-  failed: "草稿未保存 · 服务端未确认",
-};
 
 type Draft = {
   draft_id: string;
@@ -27,19 +21,6 @@ type Draft = {
 
 /** 访谈问答记录条目（导图步骤左栏只读回看） */
 type QaEntry = { q: string; labels: string[]; free?: string; extra?: string };
-
-function SaveBadge({ state, onRetry }: { state: string; onRetry: () => void }) {
-  if (state === "failed") {
-    return (
-      <span className="save is-failed" role="alert">
-        <span className="dot" />草稿未保存 · 服务端未确认
-        <button className="retry" onClick={onRetry}>重试</button>
-      </span>
-    );
-  }
-  if (state === "saving") return <span className="save is-saving"><span className="dot" />{SAVE_TEXT.saving}</span>;
-  return <span className="save"><span className="dot" />{SAVE_TEXT.saved}</span>;
-}
 
 /** 访谈问卷：选项卡网格（单选/多选）+ 跳过 + 自由补充 */
 function IntakeForm({ intake, onDecide, busy }: {
@@ -157,15 +138,11 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
   const [taskId, setTaskId] = useState("");
   const [task, setTask] = useState<any>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [localContent, setLocalContent] = useState<any>(null);
-  const [saveState, setSaveState] = useState("saved");
   const [scene, setScene] = useState<any>(null);
   const [draftScene, setDraftScene] = useState<any>(null);
   const [runError, setRunError] = useState("");
   const [running, setRunning] = useState(false);
   const [qaLog, setQaLog] = useState<QaEntry[]>([]);
-  const saveTimer = useRef<number | null>(null);
-  const dirtyRef = useRef(false);
   const bootRef = useRef(false);
 
   // 访谈问答记录：按任务持久化（刷新后导图步骤左栏仍可回看）
@@ -199,8 +176,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
       if (body.draft?.draft_id) {
         const d = await api.getDraft(body.draft.draft_id);
         setDraft(d);
-        setLocalContent(d.content);
-        setSaveState(d.saved_state);
       }
       await refreshTask(id);
       if (body.wait_state === "awaiting_intake") onOk("先回答几个问题，帮我们把规划调得更准。");
@@ -234,8 +209,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
             if (t.draft_id) {
               const d = await api.getDraft(t.draft_id);
               setDraft(d);
-              setLocalContent(d.content);
-              setSaveState(d.saved_state);
               try { setScene(await api.routeScene(t.target_id)); } catch { setScene(null); }
             }
           }
@@ -282,39 +255,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
     }
   }, [needLogin, onErr, routeId, runTask, title]);
 
-  // 1 秒自动保存（停止编辑后）
-  const scheduleSave = useCallback((next: any) => {
-    setLocalContent(next);
-    dirtyRef.current = true;
-    setSaveState("saving");
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(async () => {
-      if (!draft || !dirtyRef.current) return;
-      try {
-        const saved = await api.saveDraft(draft.draft_id, {
-          revision: draft.revision, content: next, saved_state: "saved",
-        });
-        dirtyRef.current = false;
-        setDraft(saved);
-        setSaveState("saved");
-      } catch (e: any) {
-        setSaveState("failed");
-        if (e?.code === "DRAFT_REVISION_MISMATCH") {
-          try {
-            const latest = await api.getDraft(draft.draft_id);
-            setDraft(latest);
-            setLocalContent(latest.content);
-            setSaveState(latest.saved_state);
-            dirtyRef.current = false;
-            onErr("草稿已在其他窗口更新，已加载服务端最新版本。");
-          } catch { /* 保持失败可见 */ }
-        } else {
-          onErr(`自动保存失败（${e?.code || "错误"}），修改仍在本地，可重试。`);
-        }
-      }
-    }, 1000);
-  }, [draft, onErr]);
-
   const confirmDraft = useCallback(async () => {
     if (!draft) return;
     try {
@@ -323,7 +263,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
       });
       onOk(r.deduped ? "该草稿此前已确认。" : `已确认并创建不可变版本 v${r.version_no}。`);
       setDraft(null);
-      setLocalContent(null);
       setScene(null);
       setDraftScene(null);
       await loadScene(draft.target_id);
@@ -340,8 +279,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
       if (body.draft?.draft_id) {
         const d = await api.getDraft(body.draft.draft_id);
         setDraft(d);
-        setLocalContent(d.content);
-        setSaveState(d.saved_state);
       }
       await refreshTask(taskId);
       if (body.task_status === "failed") {
@@ -370,7 +307,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
     try {
       const r = await api.switchDraftScope(draft.draft_id, next);
       setDraft(r.draft);
-      setLocalContent(r.draft.content);
       onOk("已切换范围，输入已保留到新草稿。");
     } catch (e: any) {
       onErr(`范围切换失败：${e?.code || "错误"}`);
@@ -492,80 +428,54 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
       )}
 
       {routeId && hasBoard && !showIntake && (
-        <div className="plan-board">
-          <div className="verbar">
-            <div className="cell">
-              <span className="lab">基线版本</span>
-              <div className="line">
-                {scene
-                  ? <><span className="ver ver-conf">已确认 v1</span><span className="muted">路线导图与总览同版</span></>
-                  : <span className="muted">尚无已确认版本；确认草稿后此处展示导图。</span>}
-              </div>
+        <div className="plan-body">
+          <aside className="plan-qa" aria-label="提问与反馈">
+            <div className="plan-qa-log">
+              <span className="kicker">提问与反馈 · 只读</span>
+              {transcript.length > 0 ? transcript.map((e, i) => (
+                <div className="qa-item" key={i}>
+                  <p className="qa-q">{e.q}</p>
+                  {e.labels.length > 0 && <p className="qa-a">{e.labels.join(" · ")}</p>}
+                  {e.extra && <p className="qa-a">{e.extra}</p>}
+                  {e.free && <p className="qa-free">{e.free}</p>}
+                </div>
+              )) : (
+                <p className="help">生成前访谈的提问与回答会记录在这里，仅供回看。</p>
+              )}
             </div>
-            <div className={`cell ${draft ? "editing" : ""}`}>
-              <span className="lab">{draft ? "编辑中 · 草稿" : "草稿"}</span>
-              <div className="line">
-                {draft ? (
-                  <>
-                    <span className="ver ver-draft">草稿 rev {draft.revision}</span>
-                    <SaveBadge state={saveState} onRetry={() => scheduleSave(localContent)} />
-                  </>
-                ) : (
-                  <span className="muted">生成候选后，在这里编辑并确认。</span>
-                )}
-              </div>
+            <div className="plan-qa-foot">
+              <span className="kicker">反馈</span>
+              {draft ? (
+                <>
+                  <button className="btn btn-pri" onClick={confirmDraft} disabled={running}>没问题，确认草稿</button>
+                  <button
+                    className="btn btn-draft"
+                    onClick={() => setScopeAndNewDraft(draft.draft_kind === "route" ? "course" : "route")}
+                    disabled={running}
+                  >
+                    我想修改讲解结构
+                  </button>
+                  <p className="help">
+                    「修改讲解结构」会把草稿切换为{draft.draft_kind === "route" ? "课程大纲" : "学习路线"}，已填输入保留；确认后生成不可变版本。
+                  </p>
+                </>
+              ) : (
+                <p className="help">当前展示已确认版本；如需调整，请回到「新的学习任务」生成新草稿。</p>
+              )}
             </div>
-          </div>
+          </aside>
 
-          <div className="plan-body">
-            <aside className="plan-qa" aria-label="提问与反馈">
-              <div className="plan-qa-log">
-                <span className="kicker">提问与反馈 · 只读</span>
-                {transcript.length > 0 ? transcript.map((e, i) => (
-                  <div className="qa-item" key={i}>
-                    <p className="qa-q">{e.q}</p>
-                    {e.labels.length > 0 && <p className="qa-a">{e.labels.join(" · ")}</p>}
-                    {e.extra && <p className="qa-a">{e.extra}</p>}
-                    {e.free && <p className="qa-free">{e.free}</p>}
-                  </div>
-                )) : (
-                  <p className="help">生成前访谈的提问与回答会记录在这里，仅供回看。</p>
-                )}
-              </div>
-              <div className="plan-qa-foot">
-                <span className="kicker">反馈</span>
-                {draft ? (
-                  <>
-                    <button className="btn btn-pri" onClick={confirmDraft} disabled={running}>没问题，确认草稿</button>
-                    <button
-                      className="btn btn-draft"
-                      onClick={() => setScopeAndNewDraft(draft.draft_kind === "route" ? "course" : "route")}
-                      disabled={running}
-                    >
-                      我想修改讲解结构
-                    </button>
-                    <p className="help">
-                      「修改讲解结构」会把草稿切换为{draft.draft_kind === "route" ? "课程大纲" : "学习路线"}，已填输入保留；确认后生成不可变版本。
-                    </p>
-                  </>
-                ) : (
-                  <p className="help">当前展示已确认版本；如需调整，请回到「新的学习任务」生成新草稿。</p>
-                )}
-              </div>
-            </aside>
-
-            <div className="mm-main">
-              <div className="stage-wrap">
-                {activeScene ? (
-                  <div className="canvas-readonly-wrap">
-                    <ReadonlyCanvas elements={activeScene.elements} height="full" />
-                  </div>
-                ) : (
-                  <div className="canvas-readonly-wrap" style={{ display: "grid", placeItems: "center", color: "var(--ink3)" }}>
-                    确认草稿后，这里展示与总览同版的路线导图。
-                  </div>
-                )}
-              </div>
+          <div className="mm-main">
+            <div className="stage-wrap">
+              {activeScene ? (
+                <div className="canvas-readonly-wrap">
+                  <ReadonlyCanvas elements={activeScene.elements} height="full" />
+                </div>
+              ) : (
+                <div className="canvas-readonly-wrap" style={{ display: "grid", placeItems: "center", color: "var(--ink3)" }}>
+                  确认草稿后，这里展示与总览同版的路线导图。
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -38,8 +38,6 @@
 5. 提交前再次查看暂存区：`git diff --cached --stat` 和 `git diff --cached --check`。提交信息使用清楚的动词和范围，例如 `docs: add logging and audit handoff rules`。
 6. 用户已明确要求上传 GitHub 时，确认远程和分支后推送：`git remote -v`、`git branch --show-current`、`git push origin <branch>`。推送前不得改变远程历史或使用强制推送；推送后检查 `git status --short` 和远程提交是否可见。
 
-本仓库不调用 `code-reviewer`（或同类审查子代理）做自动代码审查；变更把关以本节的 diff 自查、`.gitignore` 检查、敏感信息扫描和测试为准，仅当用户在当次任务中明确要求评审时才进行评审。
-
 ## 交付说明
 
 最终报告应说明：改动文件、日志/测试检查、实际运行的命令和结果、`.gitignore` 检查结果、提交哈希与推送分支。任何未验证项、阻塞项或未纳入本次提交的工作都要明确列出。

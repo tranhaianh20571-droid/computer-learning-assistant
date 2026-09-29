@@ -25,6 +25,9 @@ type Draft = {
   saved_state: string;
 };
 
+/** 访谈问答记录条目（导图步骤左栏只读回看） */
+type QaEntry = { q: string; labels: string[]; free?: string; extra?: string };
+
 function SaveBadge({ state, onRetry }: { state: string; onRetry: () => void }) {
   if (state === "failed") {
     return (
@@ -40,7 +43,7 @@ function SaveBadge({ state, onRetry }: { state: string; onRetry: () => void }) {
 
 /** 访谈问卷：选项卡网格（单选/多选）+ 跳过 + 自由补充 */
 function IntakeForm({ intake, onDecide, busy }: {
-  intake: any; onDecide: (answers: any[]) => void; busy: boolean;
+  intake: any; onDecide: (answers: any[], log: QaEntry[]) => void; busy: boolean;
 }) {
   const [sel, setSel] = useState<Record<string, string[]>>({});
   const [freetext, setFreetext] = useState<Record<string, string>>({});
@@ -57,14 +60,20 @@ function IntakeForm({ intake, onDecide, busy }: {
   };
 
   const submit = () => {
-    const answers = questions
-      .map((q) => ({
-        question_id: q.question_id,
-        selections: sel[q.question_id] || [],
-        free_text: (freetext[q.question_id] || "").trim() || undefined,
-      }))
-      .filter((a) => a.selections.length > 0 || a.free_text);
-    onDecide(answers);
+    const answers: any[] = [];
+    const log: QaEntry[] = [];
+    questions.forEach((q) => {
+      const selections = sel[q.question_id] || [];
+      const free = (freetext[q.question_id] || "").trim() || undefined;
+      if (selections.length === 0 && !free) return;
+      answers.push({ question_id: q.question_id, selections, free_text: free });
+      log.push({
+        q: q.question,
+        labels: selections.map((k: string) => (q.options.find((o: any) => o.key === k)?.label) || k),
+        free,
+      });
+    });
+    onDecide(answers, log);
   };
 
   const answered = questions.filter((q) => (sel[q.question_id] || []).length > 0 || freetext[q.question_id]).length;
@@ -138,8 +147,10 @@ function IntakeForm({ intake, onDecide, busy }: {
   );
 }
 
-export default function PlanningView({ onErr, onOk, needLogin, go }: {
+export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSide }: {
   onErr: (s: string) => void; onOk: (s: string) => void; needLogin: boolean; go: (p: string) => void;
+  /** 进入导图步骤时请求隐藏侧栏（离开该步骤自动恢复） */
+  onAutoHideSide?: (hidden: boolean) => void;
 }) {
   const [title, setTitle] = useState("");
   const [routeId, setRouteId] = useState("");
@@ -152,9 +163,24 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
   const [draftScene, setDraftScene] = useState<any>(null);
   const [runError, setRunError] = useState("");
   const [running, setRunning] = useState(false);
+  const [qaLog, setQaLog] = useState<QaEntry[]>([]);
   const saveTimer = useRef<number | null>(null);
   const dirtyRef = useRef(false);
   const bootRef = useRef(false);
+
+  // 访谈问答记录：按任务持久化（刷新后导图步骤左栏仍可回看）
+  useEffect(() => {
+    if (!taskId) { setQaLog([]); return; }
+    try {
+      const raw = localStorage.getItem(`slice3.intakeLog.${taskId}`);
+      setQaLog(raw ? JSON.parse(raw) : []);
+    } catch { setQaLog([]); }
+  }, [taskId]);
+
+  useEffect(() => {
+    if (!taskId || qaLog.length === 0) return;
+    try { localStorage.setItem(`slice3.intakeLog.${taskId}`, JSON.stringify(qaLog)); } catch { /* 隐私模式忽略 */ }
+  }, [qaLog, taskId]);
 
   const refreshTask = useCallback(async (id: string) => {
     try { setTask(await api.getPlanningTask(id)); } catch { /* 保持当前状态 */ }
@@ -333,10 +359,11 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
     }
   }, [onErr, onOk, refreshTask, taskId]);
 
-  const submitIntake = useCallback((answers: any[]) => {
+  const submitIntake = useCallback((answers: any[], log: QaEntry[]) => {
     onOk("");
+    setQaLog((prev) => [...prev, ...log].slice(-40));
     decision({ kind: "intake", answers });
-  }, [decision]);
+  }, [decision, onOk]);
 
   const setScopeAndNewDraft = useCallback(async (next: string) => {
     if (!draft) return;
@@ -355,6 +382,29 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
   const showIntake = waitState === "awaiting_intake" && intake?.questions?.length > 0;
   const hasBoard = Boolean(draft || scene);
   const activeScene = scene || draftScene;
+  // 导图步骤 = 蓝图/草稿已就绪且不在访谈中
+  const mapStep = Boolean(routeId && hasBoard && !showIntake);
+
+  // 导图步骤请求隐藏侧栏，蓝图占满宽度；离开该步骤（含路由离开）自动恢复
+  useEffect(() => {
+    if (!mapStep || !onAutoHideSide) return;
+    onAutoHideSide(true);
+    return () => onAutoHideSide(false);
+  }, [mapStep, onAutoHideSide]);
+
+  // 提问与反馈（只读）：优先用本地问答记录；跨浏览器恢复时按服务端 intake 尽力回显
+  const transcript: QaEntry[] = qaLog.length > 0 ? qaLog : (intake?.answers || []).map((a: any) => {
+    const q = (intake?.questions || []).find((x: any) => x.question_id === a.question_id);
+    const labels = (a.selections || [])
+      .map((k: string) => (q?.options || []).find((o: any) => o.key === k)?.label)
+      .filter(Boolean);
+    return {
+      q: q?.question || "访谈反馈",
+      labels,
+      extra: !q && (a.selections || []).length ? `已选择 ${a.selections.length} 项` : undefined,
+      free: a.free_text || undefined,
+    } as QaEntry;
+  }).filter((e: QaEntry) => e.labels.length > 0 || e.free || e.extra);
 
   return (
     <div className="mm-clean">
@@ -439,7 +489,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
       )}
 
       {routeId && hasBoard && !showIntake && (
-        <>
+        <div className="plan-board">
           <div className="verbar">
             <div className="cell">
               <span className="lab">基线版本</span>
@@ -462,24 +512,50 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
                 )}
               </div>
             </div>
-            <div className="acts">
-              {draft && (
-                <>
-                  <button className="btn btn-pri" onClick={confirmDraft}>确认草稿</button>
-                  <button className="btn btn-draft" onClick={() => setScopeAndNewDraft(draft.draft_kind === "route" ? "course" : "route")}>
-                    切换为{draft.draft_kind === "route" ? "课程大纲" : "路线"}
-                  </button>
-                </>
-              )}
-            </div>
           </div>
 
-          <div className="mm-body">
+          <div className="plan-body">
+            <aside className="plan-qa" aria-label="提问与反馈">
+              <div className="plan-qa-log">
+                <span className="kicker">提问与反馈 · 只读</span>
+                {transcript.length > 0 ? transcript.map((e, i) => (
+                  <div className="qa-item" key={i}>
+                    <p className="qa-q">{e.q}</p>
+                    {e.labels.length > 0 && <p className="qa-a">{e.labels.join(" · ")}</p>}
+                    {e.extra && <p className="qa-a">{e.extra}</p>}
+                    {e.free && <p className="qa-free">{e.free}</p>}
+                  </div>
+                )) : (
+                  <p className="help">生成前访谈的提问与回答会记录在这里，仅供回看。</p>
+                )}
+              </div>
+              <div className="plan-qa-foot">
+                <span className="kicker">反馈</span>
+                {draft ? (
+                  <>
+                    <button className="btn btn-pri" onClick={confirmDraft} disabled={running}>没问题，确认草稿</button>
+                    <button
+                      className="btn btn-draft"
+                      onClick={() => setScopeAndNewDraft(draft.draft_kind === "route" ? "course" : "route")}
+                      disabled={running}
+                    >
+                      我想修改讲解结构
+                    </button>
+                    <p className="help">
+                      「修改讲解结构」会把草稿切换为{draft.draft_kind === "route" ? "课程大纲" : "学习路线"}，已填输入保留；确认后生成不可变版本。
+                    </p>
+                  </>
+                ) : (
+                  <p className="help">当前展示已确认版本；如需调整，请回到「新的学习任务」生成新草稿。</p>
+                )}
+              </div>
+            </aside>
+
             <div className="mm-main">
               <div className="stage-wrap">
                 {activeScene ? (
                   <div className="canvas-readonly-wrap">
-                    <ReadonlyCanvas elements={activeScene.elements} height={520} />
+                    <ReadonlyCanvas elements={activeScene.elements} height="full" />
                   </div>
                 ) : (
                   <div className="canvas-readonly-wrap" style={{ display: "grid", placeItems: "center", color: "var(--ink3)" }}>
@@ -489,7 +565,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
               </div>
             </div>
           </div>
-        </>
+        </div>
       )}
 
       {routeId && !hasBoard && !running && !showIntake && waitState !== "awaiting_scope_clarification" && waitState !== "awaiting_search_decision" && !runError && (

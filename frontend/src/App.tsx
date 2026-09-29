@@ -21,15 +21,40 @@ import "./App.css";
  * 应用骨架（对齐设计规范 ds-1「工程制图 / 技术手册」，v2 布局收敛）：
  * - 侧栏三组：开始（新的学习任务）/ 学习（课程、课程规划、我的资料）/ 管理（注册审批+徽标）；
  *   任务状态与即时对话撤出主导航（路由保留：/tasks 由规划流程进入，/chat 由首页切换进入）；
+ * - 侧栏可完全收起（桌面）：侧栏内「«」收起、顶栏「»」展开，偏好记入 localStorage；
+ *   规划导图步骤可请求临时自动隐藏（离开该步骤自动恢复，不覆盖手动偏好）；
  * - 认证页与讲次教学工作区为独立整页（无侧栏）：讲次是全屏播放模式；
  * - 路由/会话状态在 hooks，视图在 views/，共享原语在 lib/ 与 ui/。
  */
+
+/** 侧栏收起/展开按钮图形（双人字箭头，仅图形 + aria-label） */
+function ChevronIcon({ dir }: { dir: "left" | "right" }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+      strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {dir === "left" ? (
+        <><path d="M7 3.5 3 8l4 4.5" /><path d="M12.5 3.5 8.5 8l4 4.5" /></>
+      ) : (
+        <><path d="M9 3.5 13 8l-4 4.5" /><path d="M3.5 3.5 7.5 8l-4 4.5" /></>
+      )}
+    </svg>
+  );
+}
+
+const SIDE_PREF_KEY = "ui.sideCollapsed";
+
 export default function App() {
   const { me, setMe, booted } = useSession();
   const { route, navigate } = useHashRoute();
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pendingCount, setPendingCount] = useState(0);
+  // 侧栏收起：手动偏好（持久化）+ 页面请求的临时隐藏（如规划导图步骤）
+  const [sideCollapsed, setSideCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem(SIDE_PREF_KEY) === "1"; } catch { return false; }
+  });
+  const [sideAutoHidden, setSideAutoHidden] = useState(false);
+  const sideHidden = sideCollapsed || sideAutoHidden;
 
   const go = useCallback((path: string) => {
     setError("");
@@ -143,11 +168,30 @@ export default function App() {
   };
   const crumbHere = CRUMBS[route] || (route.startsWith("/route/") ? ["学习路线"] : route.startsWith("/course/") ? ["课程"] : []);
   const sideOpen = () => document.getElementById("side")?.classList.toggle("open");
+  // 切换侧栏收起：手动操作覆盖自动隐藏（导图步骤的临时隐藏由此解除）
+  const toggleSide = () => {
+    const next = !sideHidden;
+    setSideAutoHidden(false);
+    setSideCollapsed(next);
+    try { localStorage.setItem(SIDE_PREF_KEY, next ? "1" : "0"); } catch { /* 隐私模式忽略 */ }
+  };
 
   return (
-    <div className="app">
+    <div className={"app" + (sideHidden ? " side-collapsed" : "")}>
       <nav className="side" id="side" aria-label="主导航">
-        <div className="brand"><span className="wm">学伴</span><span className="sub">CS · STUDY</span></div>
+        <div className="brand">
+          <span className="wm">学伴</span><span className="sub">CS · STUDY</span>
+          <button
+            className="iconbtn side-collapse-btn"
+            onClick={toggleSide}
+            aria-label="收起侧边栏"
+            aria-expanded={!sideHidden}
+            aria-controls="side"
+            title="收起侧边栏"
+          >
+            <ChevronIcon dir="left" />
+          </button>
+        </div>
         <div className="nav-g">
           <span className="gl">开始</span>
           {navItem("/home", "新的学习任务")}
@@ -191,6 +235,18 @@ export default function App() {
       <div className="main">
         <header className="top">
           <button className="iconbtn menu-btn" data-nav-toggle aria-label="打开导航" aria-controls="side" onClick={sideOpen}>☰</button>
+          {sideHidden && (
+            <button
+              className="iconbtn side-expand-btn"
+              onClick={toggleSide}
+              aria-label="展开侧边栏"
+              aria-expanded={false}
+              aria-controls="side"
+              title="展开侧边栏"
+            >
+              <ChevronIcon dir="right" />
+            </button>
+          )}
           <nav className="crumb" aria-label="当前位置">
             <span className="here">{crumbHere[0] || "学伴"}</span>
           </nav>
@@ -221,7 +277,7 @@ export default function App() {
             <CapabilityConfig isAdmin={me.is_admin} onErr={setError} onOk={setNotice} />
           )}
           {route === "/planning" && (
-            <PlanningView onErr={setError} onOk={setNotice} needLogin={!me} go={go} />
+            <PlanningView onErr={setError} onOk={setNotice} needLogin={!me} go={go} onAutoHideSide={setSideAutoHidden} />
           )}
           {route === "/chat" && (
             <ChatView onErr={setError} onOk={setNotice} needLogin={!me} />

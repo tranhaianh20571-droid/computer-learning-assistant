@@ -16,7 +16,8 @@ export default function ReadonlyCanvas({
   ariaLabel = "导图画布，可缩放、平移与复制文本",
 }: {
   elements: SceneElement[];
-  height?: number;
+  /** 数值为固定高度；"full" 填满父容器（父容器需有确定高度） */
+  height?: number | "full";
   ariaLabel?: string;
 }) {
   const [err, setErr] = useState("");
@@ -84,11 +85,14 @@ export default function ReadonlyCanvas({
     );
   }
 
+  const full = height === "full";
+
   return (
-    <div className="excalidraw-wrap" aria-label={ariaLabel}>
+    <div className={"excalidraw-wrap" + (full ? " is-full" : "")} aria-label={ariaLabel}>
       <div
         ref={containerRef}
-        style={{ height }}
+        className="excalidraw-area"
+        style={typeof height === "number" ? { height } : undefined}
         tabIndex={0}
         onKeyDown={(e) => {
           // 只读画布：拦截编辑类按键，避免误改（业务编辑走层级列表）

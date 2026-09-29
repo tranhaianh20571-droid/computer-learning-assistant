@@ -202,6 +202,16 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
   cursor: pointer; font-size: var(--t-s); color: var(--ink2); white-space: nowrap; }
 .mode-switch button[aria-pressed="true"] { background: var(--ink); color: #fff; }
 .menu-btn { display: none; }
+/* 侧栏收起（桌面）：收起后完全隐藏，顶栏出现展开按钮 */
+.side-collapse-btn, .side-expand-btn { display: none; }
+.side-collapse-btn { width: 32px; height: 32px; margin-left: auto; align-self: center; color: var(--nav-dim); }
+@media (hover:hover){ .side-collapse-btn:hover { background: var(--nav2); color: #fff; } }
+@media (min-width:1024px){
+  .side-collapse-btn { display: inline-grid; }
+  .side-expand-btn { display: inline-grid; }
+  .app.side-collapsed { grid-template-columns: minmax(0,1fr); }
+  .app.side-collapsed > .side { display: none; }
+}
 .page { padding: var(--s6) var(--s6) var(--s8); min-width: 0; min-height: 0; flex: 1; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .page-w { max-width: 1280px; margin: 0 auto; }
 .phead { display: grid; gap: var(--s2); margin-bottom: var(--s6); }
@@ -301,7 +311,7 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
 .track li.stop { color: var(--err); }
 
 /* ---------- 规划工作台（导图 + 版本栏） ---------- */
-.mm-clean { height: calc(100vh - var(--top)); margin: calc(-1 * var(--s6)) calc(-1 * var(--s6)) calc(-1 * var(--s8)); display: grid; grid-template-rows: auto auto minmax(0,1fr); background: var(--surface); }
+.mm-clean { height: calc(100vh - var(--top)); margin: calc(-1 * var(--s6)) calc(-1 * var(--s6)) calc(-1 * var(--s8)); display: flex; flex-direction: column; background: var(--surface); }
 .mm-clean-head { padding: 24px 32px 16px; border-bottom: 1px solid var(--rule); display: grid; gap: 8px; }
 .mm-clean-head h1 { font: 600 26px/1.3 var(--serif); }
 .mm-clean-head .goal { color: var(--ink2); font-size: 14px; overflow-wrap: anywhere; }
@@ -319,6 +329,12 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
 .mm-body { display: grid; grid-template-columns: minmax(0,1fr); min-height: 0; }
 .mm-main { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr); }
 .stage-wrap { min-height: 0; padding: 16px 24px 24px; display: grid; }
+/* 导图步骤：版本栏 + 左「提问与反馈」/ 右全高蓝图 */
+.plan-board { flex: 1; min-height: 0; display: grid; grid-template-rows: auto minmax(0,1fr); }
+.plan-body { display: grid; grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,42vh) minmax(320px,1fr); min-height: 0; }
+@media (min-width:1024px){
+  .plan-body { grid-template-columns: 380px minmax(0,1fr); grid-template-rows: minmax(0,1fr); }
+}
 .mm-side { border-left: 1px solid var(--ink); background: var(--surface); display: grid; grid-template-rows: auto minmax(0,1fr); min-height: 0; }
 .tabs { display: flex; border-bottom: 1px solid var(--rule); }
 .tabs button { flex: 1; min-height: 44px; border: 0; background: transparent; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink2); border-bottom: 2px solid transparent; }
@@ -339,7 +355,7 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
 .ti .mv { display: flex; gap: 2px; }
 .ti .mv button { border: 0; background: none; cursor: pointer; color: var(--ink3); min-width: 24px; min-height: 24px; }
 @media (hover:hover){ .ti .mv button:hover { color: var(--ink); } }
-.canvas-readonly-wrap { min-height: 420px; border: 2px solid var(--ink); border-radius: var(--r2); background: #fffdf8; overflow: hidden;
+.canvas-readonly-wrap { min-height: 420px; border: 2px solid var(--ink); border-radius: var(--r2); background: #fffdf8; overflow: hidden; display: grid;
   background-image: radial-gradient(#D8DCE6 1px, transparent 1px), radial-gradient(#D8DCE6 1px, transparent 1px);
   background-position: 0 0, 12px 12px; background-size: 24px 24px; }
 
@@ -396,6 +412,9 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
 
 /* ---------- 画布容器（Excalidraw 隔离） ---------- */
 .excalidraw-wrap { min-height: 320px; background: #fffdf8; overflow: hidden; }
+/* 全高模式：填满父容器，画布区自适应，操作行贴底 */
+.excalidraw-wrap.is-full { min-height: 0; height: 100%; display: flex; flex-direction: column; }
+.excalidraw-wrap.is-full .excalidraw-area { flex: 1; min-height: 0; }
 
 /* ---------- 窄屏 ---------- */
 @media (max-width:1279px){

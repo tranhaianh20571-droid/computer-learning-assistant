@@ -413,6 +413,8 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
 
 /* ---------- 画布容器（Excalidraw 隔离） ---------- */
 .excalidraw-wrap { min-height: 320px; background: #fffdf8; overflow: hidden; }
+/* 只读画布：隐藏 Excalidraw 主菜单（导出图片/帮助/外链/深色模式对只读画布无意义） */
+.excalidraw .main-menu-trigger { display: none !important; }
 /* 全高模式：填满父容器，画布区自适应，操作行贴底 */
 .excalidraw-wrap.is-full { min-height: 0; height: 100%; display: flex; flex-direction: column; }
 .excalidraw-wrap.is-full .excalidraw-area { flex: 1; min-height: 0; }

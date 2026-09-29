@@ -316,7 +316,7 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
 .mm-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 24px; border-bottom: 1px solid var(--rule); background: var(--ground); }
 .mm-tools .sp { flex: 1; }
 .mm-tools .hint { font-size: 13px; color: var(--ink2); }
-.mm-body { display: grid; grid-template-columns: minmax(0,1fr) 380px; min-height: 0; }
+.mm-body { display: grid; grid-template-columns: minmax(0,1fr); min-height: 0; }
 .mm-main { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr); }
 .stage-wrap { min-height: 0; padding: 16px 24px 24px; display: grid; }
 .mm-side { border-left: 1px solid var(--ink); background: var(--surface); display: grid; grid-template-rows: auto minmax(0,1fr); min-height: 0; }

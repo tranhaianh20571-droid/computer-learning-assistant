@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field, field_validator
 
 from .errors import error
@@ -106,10 +108,45 @@ def flat_lesson_titles(candidate: OutlineCandidate) -> list[str]:
     return [l.title for unit in candidate.units for l in unit.lessons]
 
 
+# 模型偶尔把提示词里的内部 id（目标对象）织进标题；生成与确认两条路径统一兜底剥除
+_INTERNAL_ID_RE = re.compile(r"\b(?:route|outline|course|lesson|unit|stage|task|draft|cfg)_[0-9a-zA-Z]{6,}\b")
+
+
+def _clean_title_text(title: str) -> str:
+    cleaned = _INTERNAL_ID_RE.sub("", str(title))
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"[：:]\s*[：:]", "：", cleaned)
+    cleaned = cleaned.strip(" ：:，, ")
+    return cleaned or "未命名"
+
+
+def strip_internal_ids_in_place(content: dict) -> None:
+    """就地剥掉 content_json 标题里的内部 id（route/outline 两种形状）。"""
+    for stage in content.get("stages") or []:
+        if not isinstance(stage, dict):
+            continue
+        if isinstance(stage.get("title"), str):
+            stage["title"] = _clean_title_text(stage["title"])
+        for course in stage.get("courses") or []:
+            if isinstance(course, dict) and isinstance(course.get("title"), str):
+                course["title"] = _clean_title_text(course["title"])
+    for unit in content.get("units") or []:
+        if not isinstance(unit, dict):
+            continue
+        if isinstance(unit.get("title"), str):
+            unit["title"] = _clean_title_text(unit["title"])
+        for lesson in unit.get("lessons") or []:
+            if isinstance(lesson, dict) and isinstance(lesson.get("title"), str):
+                lesson["title"] = _clean_title_text(lesson["title"])
+
+
 def validate_route_candidate(candidate: RouteCandidate) -> dict:
     """长度/数量/结构/DAG 校验。返回规范化摘要；失败抛受控错误码。"""
     total = 0
     for stage in candidate.stages:
+        stage.title = _clean_title_text(stage.title)
+        for course in stage.courses:
+            course.title = _clean_title_text(course.title)
         if not stage.courses:
             raise error("ROUTE_STRUCTURE_INVALID", "stage has no course")
         total += len(stage.courses)
@@ -128,6 +165,9 @@ def validate_route_candidate(candidate: RouteCandidate) -> dict:
 def validate_outline_candidate(candidate: OutlineCandidate) -> dict:
     total = 0
     for unit in candidate.units:
+        unit.title = _clean_title_text(unit.title)
+        for lesson in unit.lessons:
+            lesson.title = _clean_title_text(lesson.title)
         if not unit.lessons:
             raise error("INVALID_OUTLINE_STRUCTURE", "unit has no lesson")
         total += len(unit.lessons)
@@ -208,12 +248,14 @@ def validate_content_json(kind: str, content: dict) -> dict:
     from pydantic import ValidationError
 
     if kind in ("route", "route_generate"):
+        strip_internal_ids_in_place(content)
         try:
             candidate = RouteCandidate.model_validate(content)
         except ValidationError:
             raise error("ROUTE_STRUCTURE_INVALID", "route structure invalid")
         return validate_route_candidate(candidate)
     if kind in ("course_outline", "outline_generate"):
+        strip_internal_ids_in_place(content)
         try:
             candidate = OutlineCandidate.model_validate(content)
         except ValidationError:
@@ -231,5 +273,6 @@ __all__ = [
     "BOARD_ELEMENT_WHITELIST", "ROUTE_LIMITS", "OUTLINE_LIMITS", "CHAT_LIMITS",
     "PROMPTED_PARSE_RETRIES",
     "validate_route_candidate", "validate_outline_candidate", "validate_content_json",
+    "strip_internal_ids_in_place",
     "flat_course_titles", "flat_lesson_titles",
 ]

@@ -386,3 +386,88 @@ class TestDegradation:
         assert binding_after["binding_id"] == binding_before["binding_id"]
         assert binding_after["template_sha256"] == binding_before["template_sha256"]
         assert binding_after["source"] == "local_fallback"
+
+
+class TestDraftScenePreview:
+    """草稿预览场景：生成后即可渲染导图，不必先确认草稿；标题 id 污染兜底剥除。"""
+
+    def _run_route_task(self, env, token: str, route_id: str, payload: dict) -> dict:
+        env["container"]["model"] = SyntheticModelAdapter(payload=payload)
+        env["container"]["search"] = SyntheticSearchAdapter()
+        task_id = env["client"].post(
+            "/api/planning/tasks", headers=auth_headers(token),
+            json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
+                  "planning_scope": "route", "target_route_id": route_id},
+        ).json()["task_id"]
+        return _run_with_intake(env["client"], token, task_id)
+
+    def test_draft_scene_renderable_before_confirm(self, env) -> None:
+        _, token, route_id = _setup_route(env)
+        body = self._run_route_task(env, token, route_id, ROUTE_OK_PAYLOAD)
+        assert body["task_status"] == "succeeded", body
+        draft_id = body["draft"]["draft_id"]
+
+        r = env["client"].get(f"/api/planning/drafts/{draft_id}/scene", headers=auth_headers(token))
+        assert r.status_code == 200, r.text
+        scene = r.json()
+        assert scene["elements"], "draft scene should contain elements"
+        texts = [el.get("text", "") for el in scene["elements"] if el.get("type") == "text"]
+        assert any("阶段一：基础" in t for t in texts)
+
+    def test_draft_scene_owner_only(self, env) -> None:
+        _, token, route_id = _setup_route(env)
+        body = self._run_route_task(env, token, route_id, ROUTE_OK_PAYLOAD)
+        draft_id = body["draft"]["draft_id"]
+        _, other_token, _ = _setup_route(env)
+
+        r = env["client"].get(f"/api/planning/drafts/{draft_id}/scene", headers=auth_headers(other_token))
+        assert r.status_code == 404
+
+    def test_candidate_titles_stripped_of_internal_ids(self, env) -> None:
+        from backend.planning.outputs import RouteCandidate, validate_route_candidate
+
+        candidate = RouteCandidate.model_validate({
+            "stages": [{"title": "基础构建：route_8a471d50aada 系统架构", "courses": [
+                {"title": "route_8a471d50aada 导论与核心概念", "goal": ""},
+            ]}],
+            "prerequisites": [],
+        })
+        validate_route_candidate(candidate)
+        assert "route_8a471d50aada" not in candidate.stages[0].title
+        assert "route_8a471d50aada" not in candidate.stages[0].courses[0].title
+        assert candidate.stages[0].title.startswith("基础构建")
+
+    def test_content_json_stripped_in_place_for_confirm(self, env) -> None:
+        from backend.planning.outputs import validate_content_json
+
+        content = {
+            "stages": [{"title": "机制进阶：route_8a471d50aada 系统架构与运行流程",
+                        "courses": [{"title": "系统架构分解与模块协作", "goal": ""}]}],
+            "prerequisites": [],
+        }
+        validate_content_json("route", content)
+        assert "route_8a471d50aada" not in content["stages"][0]["title"]
+
+    def test_contaminated_payload_produces_clean_scene(self, env) -> None:
+        _, token, route_id = _setup_route(env)
+        polluted = {
+            "stages": [
+                {"title": "基础构建：route_8a471d50aada 系统架构与运行流程", "courses": [
+                    {"title": "系统导论与核心概念", "goal": ""},
+                ]},
+                {"title": "原理深挖：底层实现原理与优化", "courses": [
+                    {"title": "存储与索引原理", "goal": ""},
+                ]},
+            ],
+            "prerequisites": [{"from_index": 0, "to_index": 1}],
+        }
+        body = self._run_route_task(env, token, route_id, polluted)
+        assert body["task_status"] == "succeeded", body
+        draft_id = body["draft"]["draft_id"]
+
+        r = env["client"].get(f"/api/planning/drafts/{draft_id}/scene", headers=auth_headers(token))
+        assert r.status_code == 200
+        texts = [el.get("text", "") for el in r.json()["elements"] if el.get("type") == "text"]
+        joined = "\n".join(texts)
+        assert "route_8a471d50aada" not in joined
+        assert "基础构建" in joined

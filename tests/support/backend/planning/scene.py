@@ -170,6 +170,49 @@ def outline_scene(outline_version: dict) -> dict:
     return _finalize(elements, positions)
 
 
+def draft_scene(kind: str, content: dict) -> dict:
+    """草稿候选（RouteCandidate/OutlineCandidate 形状，扁平索引先修、无业务 id）→ 场景。
+
+    合成稳定键 stage_{i} / stage_{i}course_{j}（大纲同理）；
+    先修索引越界静默忽略（与确认路径的受控校验不同，预览不阻塞）。
+    """
+    if kind in ("route", "route_generate"):
+        stages: list[dict] = []
+        course_key_by_index: list[str] = []
+        for i, stage in enumerate(content.get("stages", [])):
+            courses = []
+            for j, course in enumerate(stage.get("courses", [])):
+                key = f"stage_{i}course_{j}"
+                course_key_by_index.append(key)
+                courses.append({"id": key, "title": course.get("title", "")})
+            stages.append({"id": f"stage_{i}", "title": stage.get("title", ""), "courses": courses})
+        prerequisites = [
+            {"from": course_key_by_index[e["from_index"]], "to": course_key_by_index[e["to_index"]]}
+            for e in content.get("prerequisites", [])
+            if isinstance(e, dict) and isinstance(e.get("from_index"), int) and isinstance(e.get("to_index"), int)
+            and 0 <= e["from_index"] < len(course_key_by_index) and 0 <= e["to_index"] < len(course_key_by_index)
+        ]
+        return route_scene({"stages": stages, "prerequisites": prerequisites})
+    if kind in ("course_outline", "outline_generate"):
+        units: list[dict] = []
+        lesson_key_by_index: list[str] = []
+        for i, unit in enumerate(content.get("units", [])):
+            lessons = []
+            for j, lesson in enumerate(unit.get("lessons", [])):
+                key = f"unit_{i}lesson_{j}"
+                lesson_key_by_index.append(key)
+                lessons.append({"id": key, "title": lesson.get("title", "")})
+            units.append({"id": f"unit_{i}", "title": unit.get("title", ""), "lessons": lessons})
+        prerequisites = [
+            {"from": lesson_key_by_index[e["from_index"]], "to": lesson_key_by_index[e["to_index"]]}
+            for e in content.get("prerequisites", [])
+            if isinstance(e, dict) and isinstance(e.get("from_index"), int) and isinstance(e.get("to_index"), int)
+            and 0 <= e["from_index"] < len(lesson_key_by_index) and 0 <= e["to_index"] < len(lesson_key_by_index)
+        ]
+        return outline_scene({"units": units, "prerequisites": prerequisites})
+    raise error("invalid_field", f"unknown draft kind {kind}")
+
+
 def _finalize(elements: list[dict], positions: dict) -> dict:
     for el in elements:
         if el["type"] not in SCENE_ELEMENT_WHITELIST:
@@ -196,6 +239,6 @@ def business_sort_key(item: dict) -> tuple:
 
 
 __all__ = [
-    "LAYOUT", "SCENE_ELEMENT_WHITELIST", "route_scene", "outline_scene",
+    "LAYOUT", "SCENE_ELEMENT_WHITELIST", "route_scene", "outline_scene", "draft_scene",
     "validate_scene", "wrap_label", "measure_text_width", "business_sort_key",
 ]

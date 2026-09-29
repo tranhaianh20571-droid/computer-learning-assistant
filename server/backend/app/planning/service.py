@@ -417,13 +417,27 @@ class PlanningService:
             raise error("MODEL_CAPABILITY_UNAVAILABLE", "no active model config")
         return adapter
 
+    def _target_label(self, state: PlanningTaskStateRow) -> str:
+        """给模型的人类可读学习主题；绝不把内部 id 写进提示词（防模型把 id 织进标题）。"""
+        label = ""
+        if state.target_id:
+            with self.db.session() as sess:
+                row = (sess.get(CourseRow, state.target_id)
+                       if state.planning_scope == "course"
+                       else sess.get(LearningRouteRow, state.target_id))
+            label = (row.title_ref or "").strip() if row is not None else ""
+        return label or "（尚未指定主题，请依据访谈画像自行拟定合适的主题）"
+
     def _compose_messages(self, kind: str, state: PlanningTaskStateRow, prompt: dict, search_outcome: Optional[SearchOutcome]) -> list[dict]:
         """提示词组装：模板快照 + 受控上下文（不含原始材料正文，只含受限摘录）。"""
         template = prompt.get("template_snapshot", "")
         external_note = ""
         if search_outcome and search_outcome.ok:
             external_note = f"（联网参考：{len(search_outcome.results)} 条外部来源）"
-        user_content = f"{template}\n目标对象：{state.target_id or 'route'} {external_note}"
+        user_content = (
+            f"{template}\n学习主题：{self._target_label(state)} {external_note}\n"
+            "注意：所有 title 字段只写人类可读的标题，不得出现 route_、outline_、cfg_ 等内部标识符。"
+        )
         intake = load_json_field(state.intake_json, None)
         if intake and intake.get("answers"):
             profile = self._profile_text(intake["answers"])

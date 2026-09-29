@@ -6,7 +6,7 @@ import ReadonlyCanvas from "./excalidraw/ReadonlyCanvas";
  * 课程规划工作台（v2 三态：访谈 → 生成 → 草稿）：
  * - intake：生成前访谈（选项卡问答，范围并入第一轮，上限 4 轮），画布此阶段不渲染；
  * - generating：任务运行横幅（长任务，请勿刷新）；内部 ID（task_id/draft_id）不外显；
- * - draft：版本栏 + 只读画布 + 层级列表（1 秒自动保存，服务端确认后才更新 revision）；
+ * - draft：版本栏 + 只读画布（草稿生成后直接预览导图，不必先确认）；
  * - 等待态（范围澄清[跳过范围题时的回落] / 搜索决策）以 note 呈现。
  */
 
@@ -149,6 +149,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
   const [localContent, setLocalContent] = useState<any>(null);
   const [saveState, setSaveState] = useState("saved");
   const [scene, setScene] = useState<any>(null);
+  const [draftScene, setDraftScene] = useState<any>(null);
   const [runError, setRunError] = useState("");
   const [running, setRunning] = useState(false);
   const saveTimer = useRef<number | null>(null);
@@ -222,6 +223,17 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
     }
   }, [runTask, refreshTask]);
 
+  // 草稿预览：无已确认版本时直接用草稿内容渲染导图（生成即看图，不必先确认）
+  useEffect(() => {
+    if (!draft || scene) { setDraftScene(null); return; }
+    let cancelled = false;
+    api.draftScene(draft.draft_id).then(
+      (s: any) => { if (!cancelled) setDraftScene(s); },
+      () => { if (!cancelled) setDraftScene(null); },
+    );
+    return () => { cancelled = true; };
+  }, [draft, scene]);
+
   const createAndRun = useCallback(async () => {
     if (needLogin) return onErr("请先登录。");
     try {
@@ -287,6 +299,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
       setDraft(null);
       setLocalContent(null);
       setScene(null);
+      setDraftScene(null);
       await loadScene(draft.target_id);
     } catch (e: any) {
       onErr(`确认失败：${e?.code || e?.message || "错误"}`);
@@ -341,6 +354,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
   const intake = task?.intake;
   const showIntake = waitState === "awaiting_intake" && intake?.questions?.length > 0;
   const hasBoard = Boolean(draft || scene);
+  const activeScene = scene || draftScene;
 
   return (
     <div className="mm-clean">
@@ -460,16 +474,12 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
             </div>
           </div>
 
-          <div className="mm-tools">
-            <span className="hint">画布位置只影响视角；业务排序与重命名在右侧层级列表进行（写草稿，不直接改已确认版本）。</span>
-          </div>
-
           <div className="mm-body">
             <div className="mm-main">
               <div className="stage-wrap">
-                {scene ? (
+                {activeScene ? (
                   <div className="canvas-readonly-wrap">
-                    <ReadonlyCanvas elements={scene.elements} height={520} />
+                    <ReadonlyCanvas elements={activeScene.elements} height={520} />
                   </div>
                 ) : (
                   <div className="canvas-readonly-wrap" style={{ display: "grid", placeItems: "center", color: "var(--ink3)" }}>
@@ -478,18 +488,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
                 )}
               </div>
             </div>
-            <aside className="mm-side" aria-label="草稿层级列表">
-              <div className="tabs" role="tablist">
-                <button role="tab" aria-selected={true}>层级列表</button>
-              </div>
-              <div className="side-scroll">
-                {draft && localContent ? (
-                  <DraftTree draft={draft} content={localContent} onChange={scheduleSave} />
-                ) : (
-                  <p className="muted">尚无草稿。生成候选后，这里会显示阶段、课程（或单元、讲次）的层级列表，可重命名与调整顺序。</p>
-                )}
-              </div>
-            </aside>
           </div>
         </>
       )}
@@ -503,103 +501,5 @@ export default function PlanningView({ onErr, onOk, needLogin, go }: {
         </div>
       )}
     </div>
-  );
-}
-
-function DraftTree({ draft, content, onChange }: {
-  draft: Draft; content: any; onChange: (next: any) => void;
-}) {
-  const [open, setOpen] = useState<Record<string, boolean>>({});
-  const isRoute = draft.draft_kind === "route";
-  const groups: { id: string; title: string; items: { id: string; title: string }[] }[] = isRoute
-    ? (content.stages || []).map((s: any, i: number) => ({
-        id: `s${i}`, title: s.title,
-        items: (s.courses || []).map((c: any, j: number) => ({ id: `s${i}c${j}`, title: c.title })),
-      }))
-    : (content.units || []).map((u: any, i: number) => ({
-        id: `u${i}`, title: u.title,
-        items: (u.lessons || []).map((l: any, j: number) => ({ id: `u${i}l${j}`, title: l.title })),
-      }));
-
-  const move = (list: any[], from: number, to: number) => {
-    if (to < 0 || to >= list.length) return list;
-    const next = [...list];
-    const [item] = next.splice(from, 1);
-    next.splice(to, 0, item);
-    return next;
-  };
-  const editGroupTitle = (gi: number, title: string) => {
-    const next = structuredClone(content);
-    if (isRoute) next.stages[gi].title = title; else next.units[gi].title = title;
-    onChange(next);
-  };
-  const editItemTitle = (gi: number, ii: number, title: string) => {
-    const next = structuredClone(content);
-    if (isRoute) next.stages[gi].courses[ii].title = title; else next.units[gi].lessons[ii].title = title;
-    onChange(next);
-  };
-  const moveItem = (gi: number, ii: number, dir: -1 | 1) => {
-    const next = structuredClone(content);
-    if (isRoute) next.stages[gi].courses = move(next.stages[gi].courses, ii, ii + dir);
-    else next.units[gi].lessons = move(next.units[gi].lessons, ii, ii + dir);
-    onChange(next);
-  };
-  const moveGroup = (gi: number, dir: -1 | 1) => {
-    const next = structuredClone(content);
-    if (isRoute) next.stages = move(next.stages, gi, gi + dir);
-    else next.units = move(next.units, gi, gi + dir);
-    onChange(next);
-  };
-
-  return (
-    <ol className="tree" aria-label="草稿层级列表">
-      {groups.map((g, gi) => (
-        <li key={g.id}>
-          <div className="ti" style={{ ["--lvl" as any]: 0 }}>
-            <button
-              className="tw"
-              aria-expanded={!!open[g.id]}
-              aria-label={`${open[g.id] ? "收起" : "展开"} ${g.title}`}
-              onClick={() => setOpen((o) => ({ ...o, [g.id]: !o[g.id] }))}
-            >
-              {open[g.id] ? "▾" : "▸"}
-            </button>
-            <input
-              className="ren"
-              value={g.title}
-              aria-label={`${isRoute ? "阶段" : "单元"}标题`}
-              onChange={(e) => editGroupTitle(gi, e.target.value)}
-              style={{ width: "100%" }}
-            />
-            <span className="mv">
-              <button onClick={() => moveGroup(gi, -1)} aria-label="上移">↑</button>
-              <button onClick={() => moveGroup(gi, 1)} aria-label="下移">↓</button>
-            </span>
-          </div>
-          {open[g.id] && (
-            <ul>
-              {g.items.map((item, ii) => (
-                <li key={item.id}>
-                  <div className="ti lv1" style={{ ["--lvl" as any]: 1 }}>
-                    <span className="ord">{ii + 1}</span>
-                    <input
-                      className="ren"
-                      value={item.title}
-                      aria-label={`${isRoute ? "课程" : "讲次"}标题`}
-                      onChange={(e) => editItemTitle(gi, ii, e.target.value)}
-                      style={{ width: "100%" }}
-                    />
-                    <span className="mv">
-                      <button onClick={() => moveItem(gi, ii, -1)} aria-label="上移条目">↑</button>
-                      <button onClick={() => moveItem(gi, ii, 1)} aria-label="下移条目">↓</button>
-                    </span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </li>
-      ))}
-    </ol>
   );
 }

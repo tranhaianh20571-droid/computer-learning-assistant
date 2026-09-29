@@ -36,7 +36,7 @@ from .models import (
 )
 from .overview import OverviewService
 from .retrieval import PlanningRetrievalService
-from .scene import outline_scene, route_scene
+from .scene import draft_scene, outline_scene, route_scene
 from .service import PlanningService
 
 
@@ -334,6 +334,17 @@ def create_planning_router(
                 raise error("course_not_found", "no confirmed outline version", status=404)
             data = _outline_version_payload(sess, course.current_outline_version_id)
         return outline_scene(data)
+
+    @router.get("/api/planning/drafts/{draft_id}/scene")
+    def draft_scene_api(draft_id: str, request: Request) -> dict:
+        """草稿预览场景：生成后即可看导图，不必先确认草稿。"""
+        user = _user(request)
+        with db.session() as sess:
+            draft = sess.get(PlanningDraftRow, draft_id)
+            if draft is None or draft.owner_user_id != user.user_id:
+                raise error("draft_not_found", status=404)
+            content = load_json_field(draft.content_json, {})
+        return draft_scene(draft.draft_kind, content)
 
     @router.get("/api/planning/viewstates/{target_kind}/{target_id}")
     def get_viewstate(target_kind: str, target_id: str, request: Request) -> dict:

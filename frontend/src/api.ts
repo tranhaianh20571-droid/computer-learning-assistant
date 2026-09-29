@@ -148,6 +148,7 @@ export const api = {
   courseOverview: (courseId: string) => req(`/api/courses/${courseId}/overview`),
   routeScene: (routeId: string) => req(`/api/routes/${routeId}/scene`),
   courseScene: (courseId: string) => req(`/api/courses/${courseId}/scene`),
+  draftScene: (draftId: string) => req(`/api/planning/drafts/${draftId}/scene`),
   getViewState: (targetKind: string, targetId: string) =>
     req(`/api/planning/viewstates/${targetKind}/${targetId}`),
   putViewState: (targetKind: string, targetId: string, canvas: Record<string, unknown>) =>

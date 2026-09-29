@@ -408,39 +408,42 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
 
   return (
     <div className="mm-clean">
-      <div className="mm-clean-head">
-        <span className="kicker">课程规划 · {routeId ? "路线" : "新任务"}</span>
-        <h1>{title || "课程规划"}</h1>
-        <div className="row" style={{ flexWrap: "wrap", gap: "var(--s3)", alignItems: "center" }}>
-          <input
-            className="inp"
-            style={{ maxWidth: 320 }}
-            placeholder="路线标题（可留空自动创建）"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            aria-label="路线标题"
-          />
-          <button className="btn btn-pri" onClick={createAndRun} disabled={needLogin || running}>生成路线候选</button>
-          {routeId && <button className="btn btn-sm" onClick={() => go(`/route/${routeId}`)}>查看路线总览 →</button>}
-        </div>
-        {runError && (
-          <div className="note note-err" role="alert">
-            <span className="tag">失败</span>
-            <div className="tt">生成失败 · {runError}</div>
-            <div>不无限重试；访谈回答已保留，可直接重试生成（大 JSON 生成通常需要 1–2 分钟）。</div>
-            <div className="acts">
-              <button
-                className="btn btn-pri btn-sm"
-                disabled={running || !taskId}
-                onClick={() => { setRunError(""); runTask(taskId); }}
-              >
-                重试生成
-              </button>
-              <button className="btn btn-sm" onClick={() => go("/home")}>调整目标</button>
-            </div>
+      {!mapStep && (
+        <div className="mm-clean-head">
+          <span className="kicker">课程规划 · {routeId ? "路线" : "新任务"}</span>
+          <h1>{title || "课程规划"}</h1>
+          <div className="row" style={{ flexWrap: "wrap", gap: "var(--s3)", alignItems: "center" }}>
+            <input
+              className="inp"
+              style={{ maxWidth: 320 }}
+              placeholder="路线标题（可留空自动创建）"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              aria-label="路线标题"
+            />
+            <button className="btn btn-pri" onClick={createAndRun} disabled={needLogin || running}>生成路线候选</button>
+            {routeId && <button className="btn btn-sm" onClick={() => go(`/route/${routeId}`)}>查看路线总览 →</button>}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {runError && (
+        <div className="note note-err" role="alert" style={{ margin: "12px 32px" }}>
+          <span className="tag">失败</span>
+          <div className="tt">生成失败 · {runError}</div>
+          <div>不无限重试；访谈回答已保留，可直接重试生成（大 JSON 生成通常需要 1–2 分钟）。</div>
+          <div className="acts">
+            <button
+              className="btn btn-pri btn-sm"
+              disabled={running || !taskId}
+              onClick={() => { setRunError(""); runTask(taskId); }}
+            >
+              重试生成
+            </button>
+            <button className="btn btn-sm" onClick={() => go("/home")}>调整目标</button>
+          </div>
+        </div>
+      )}
 
       {running && (
         <div className="note note-accent" role="status" style={{ margin: "0 32px 12px" }}>

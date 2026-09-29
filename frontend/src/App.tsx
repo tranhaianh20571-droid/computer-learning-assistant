@@ -93,6 +93,19 @@ export default function App() {
     setNotice("");
   }, [route]);
 
+  // 导图步骤提示自动消失：浮层不占文档流，短暂停留后清除（失败提示保留更久）
+  useEffect(() => {
+    if (!mapMode || !notice) return;
+    const t = window.setTimeout(() => setNotice(""), 4000);
+    return () => window.clearTimeout(t);
+  }, [mapMode, notice]);
+
+  useEffect(() => {
+    if (!mapMode || !error) return;
+    const t = window.setTimeout(() => setError(""), 12000);
+    return () => window.clearTimeout(t);
+  }, [mapMode, error]);
+
   const go = useCallback((path: string) => {
     setError("");
     setNotice("");
@@ -292,8 +305,16 @@ export default function App() {
         </header>
         <main className="page">
           <PageErrorBoundary key={route}>
-          {error && <div className="error" role="alert" style={{ marginBottom: "var(--s4)" }}>{error}</div>}
-          {!mapMode && notice && <div className="notice" role="status" style={{ marginBottom: "var(--s4)" }}>{notice}</div>}
+          {error && (mapMode ? (
+            <div className="error toast" role="alert" onClick={() => setError("")} title="点击关闭">{error}</div>
+          ) : (
+            <div className="error" role="alert" style={{ marginBottom: "var(--s4)" }}>{error}</div>
+          ))}
+          {notice && (mapMode ? (
+            <div className="notice toast" role="status" onClick={() => setNotice("")} title="点击关闭">{notice}</div>
+          ) : (
+            <div className="notice" role="status" style={{ marginBottom: "var(--s4)" }}>{notice}</div>
+          ))}
 
           {route === "/home" && (
             <TaskEntry me={me} onErr={setError} onOk={setNotice} go={go} />

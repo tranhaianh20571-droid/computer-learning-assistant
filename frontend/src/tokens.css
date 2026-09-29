@@ -204,6 +204,9 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
 .menu-btn { display: none; }
 /* 导图步骤极简顶栏：去掉底色/边框/面包屑，只留悬浮菜单按钮 */
 .top-min { background: transparent; border-bottom: 0; }
+/* 导图步骤提示浮层：脱离文档流，任何提示都不撑出页面滚动；自动消失，点击可关 */
+.toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 60;
+  max-width: min(560px, calc(100vw - 48px)); box-shadow: 0 8px 24px rgba(21, 23, 26, .16); cursor: pointer; }
 /* 侧栏收起（桌面）：收起后完全隐藏，顶栏出现展开按钮 */
 .side-collapse-btn, .side-expand-btn { display: none; }
 .side-collapse-btn { width: 32px; height: 32px; margin-left: auto; align-self: center; color: var(--nav-dim); }

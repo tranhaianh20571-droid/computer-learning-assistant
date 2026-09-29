@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Component, useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { useHashRoute } from "./hooks/useHashRoute";
 import { useSession } from "./hooks/useSession";
@@ -42,6 +42,29 @@ function ChevronIcon({ dir }: { dir: "left" | "right" }) {
 }
 
 const SIDE_PREF_KEY = "ui.sideCollapsed";
+
+/** 页面渲染错误兜底：任何页面崩溃只显示错误框，导航与顶栏仍可用（不整页白屏） */
+class PageErrorBoundary extends Component<{ children: ReactNode }, { error: string }> {
+  state = { error: "" };
+  static getDerivedStateFromError(err: unknown) {
+    return { error: String((err as any)?.message || err) };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="note note-err" role="alert" style={{ margin: "24px" }}>
+          <span className="tag">出错</span>
+          <div className="tt">页面渲染失败：{this.state.error}</div>
+          <div>导航仍然可用；重新加载通常可恢复。</div>
+          <div className="acts">
+            <button className="btn btn-pri btn-sm" onClick={() => location.reload()}>重新加载</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function App() {
   const { me, setMe, booted } = useSession();
@@ -262,6 +285,7 @@ export default function App() {
           )}
         </header>
         <main className="page">
+          <PageErrorBoundary key={route}>
           {error && <div className="error" role="alert" style={{ marginBottom: "var(--s4)" }}>{error}</div>}
           {notice && <div className="notice" role="status" style={{ marginBottom: "var(--s4)" }}>{notice}</div>}
 
@@ -298,6 +322,7 @@ export default function App() {
           {route.startsWith("/course/") && (
             <CourseOverview courseId={route.slice("/course/".length)} onErr={setError} onOk={setNotice} go={go} />
           )}
+          </PageErrorBoundary>
         </main>
       </div>
     </div>

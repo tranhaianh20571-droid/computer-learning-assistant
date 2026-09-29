@@ -22,6 +22,17 @@ type Draft = {
 /** 访谈问答记录条目（导图步骤左栏只读回看） */
 type QaEntry = { q: string; labels: string[]; free?: string; extra?: string };
 
+/** 清洗记录条目（localStorage/服务端数据可能缺字段，缺 labels 会让渲染崩溃） */
+function normalizeQaEntry(e: any): QaEntry | null {
+  if (!e || typeof e !== "object") return null;
+  const labels = Array.isArray(e.labels) ? e.labels.filter((x: any) => typeof x === "string" && x) : [];
+  const free = typeof e.free === "string" && e.free ? e.free : undefined;
+  const extra = typeof e.extra === "string" && e.extra ? e.extra : undefined;
+  const q = typeof e.q === "string" && e.q ? e.q : "";
+  if (!q && !labels.length && !free && !extra) return null;
+  return { q: q || "访谈反馈", labels, free, extra };
+}
+
 /** 访谈问卷：选项卡网格（单选/多选）+ 跳过 + 自由补充 */
 function IntakeForm({ intake, onDecide, busy }: {
   intake: any; onDecide: (answers: any[], log: QaEntry[]) => void; busy: boolean;
@@ -145,12 +156,13 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode }: 
   const [qaLog, setQaLog] = useState<QaEntry[]>([]);
   const bootRef = useRef(false);
 
-  // 访谈问答记录：按任务持久化（刷新后导图步骤左栏仍可回看）
+  // 访谈问答记录：按任务持久化（刷新后导图步骤左栏仍可回看）；读取时清洗，坏数据不再导致白屏
   useEffect(() => {
     if (!taskId) { setQaLog([]); return; }
     try {
       const raw = localStorage.getItem(`slice3.intakeLog.${taskId}`);
-      setQaLog(raw ? JSON.parse(raw) : []);
+      const parsed: any[] = raw ? JSON.parse(raw) : [];
+      setQaLog((Array.isArray(parsed) ? parsed : []).map(normalizeQaEntry).filter(Boolean) as QaEntry[]);
     } catch { setQaLog([]); }
   }, [taskId]);
 
@@ -328,19 +340,20 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode }: 
     return () => onMapMode(false);
   }, [mapStep, onMapMode]);
 
-  // 提问与反馈（只读）：优先用本地问答记录；跨浏览器恢复时按服务端 intake 尽力回显
-  const transcript: QaEntry[] = qaLog.length > 0 ? qaLog : (intake?.answers || []).map((a: any) => {
+  // 提问与反馈（只读）：优先用本地问答记录；跨浏览器恢复时按服务端 intake 尽力回显；统一清洗防渲染崩溃
+  const rawTranscript: any[] = qaLog.length > 0 ? qaLog : (intake?.answers || []).map((a: any) => {
     const q = (intake?.questions || []).find((x: any) => x.question_id === a.question_id);
-    const labels = (a.selections || [])
+    const labels = (Array.isArray(a.selections) ? a.selections : [])
       .map((k: string) => (q?.options || []).find((o: any) => o.key === k)?.label)
       .filter(Boolean);
     return {
       q: q?.question || "访谈反馈",
       labels,
-      extra: !q && (a.selections || []).length ? `已选择 ${a.selections.length} 项` : undefined,
+      extra: !q && Array.isArray(a.selections) && a.selections.length ? `已选择 ${a.selections.length} 项` : undefined,
       free: a.free_text || undefined,
-    } as QaEntry;
-  }).filter((e: QaEntry) => e.labels.length > 0 || e.free || e.extra);
+    };
+  });
+  const transcript: QaEntry[] = rawTranscript.map(normalizeQaEntry).filter(Boolean) as QaEntry[];
 
   return (
     <div className="mm-clean">

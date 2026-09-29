@@ -22,8 +22,10 @@ export default function ReadonlyCanvas({
 }) {
   const [err, setErr] = useState("");
   const [ready, setReady] = useState(false);
+  const [apiOk, setApiOk] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const excalidrawRef = useRef<any>(null);
+  // 0.18 的正确接法是 excalidrawAPI 回调属性，ref 不会拿到实例
+  const apiRef = useRef<any>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,14 +70,14 @@ export default function ReadonlyCanvas({
 
   // 首次可用后保存 API 引用（回到初始视角）
   useEffect(() => {
-    if (!ready || !excalidrawRef.current) return;
+    if (!ready || !apiOk || !apiRef.current) return;
     const mod = (window as any).__excalidrawMod;
-    const api = excalidrawRef.current;
+    const api = apiRef.current;
     if (api && mod?.restore) {
       api.updateScene(initialData());
       api.scrollToContent(undefined, { fitToViewport: true });
     }
-  }, [ready, initialData]);
+  }, [ready, apiOk, initialData]);
 
   if (err) {
     return (
@@ -89,6 +91,19 @@ export default function ReadonlyCanvas({
 
   return (
     <div className={"excalidraw-wrap" + (full ? " is-full" : "")} aria-label={ariaLabel}>
+      <button
+        type="button"
+        className="canvas-reset-btn"
+        aria-label="回到初始视角"
+        title="回到初始视角：让全部导图内容回到视野（只读画布，拖动仅调整视角）"
+        onClick={() => apiRef.current?.scrollToContent?.(undefined, { fitToViewport: true })}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+          strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M2 5.5v-3h3" /><path d="M11 2.5h3v3" /><path d="M14 10.5v3h-3" /><path d="M5 13.5H2v-3" />
+          <rect x="5.5" y="5.5" width="5" height="5" rx="1" />
+        </svg>
+      </button>
       <div
         ref={containerRef}
         className="excalidraw-area"
@@ -101,7 +116,7 @@ export default function ReadonlyCanvas({
       >
         {ready && CanvasComp ? (
           <CanvasComp
-            ref={excalidrawRef}
+            excalidrawAPI={(api: any) => { apiRef.current = api; setApiOk(true); }}
             initialData={initialData()}
             viewModeEnabled={true}
             zenModeEnabled={false}
@@ -111,20 +126,6 @@ export default function ReadonlyCanvas({
         ) : (
           <div style={{ padding: "1rem", color: "#666" }}>加载画布组件…</div>
         )}
-      </div>
-      <div className="row" style={{ marginTop: "0.5rem" }}>
-        <button
-          className="secondary"
-          type="button"
-          onClick={() => {
-            const api = excalidrawRef.current;
-            if (api?.scrollToContent) api.scrollToContent(undefined, { fitToViewport: true });
-            else if (api?.updateScene) api.updateScene(initialData());
-          }}
-        >
-          回到初始视角
-        </button>
-        <span className="help">只读画布：拖动仅调整视角，不改变业务顺序。</span>
       </div>
     </div>
   );

@@ -412,9 +412,18 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
 .pill-last { font: 700 10px/1 var(--mono); letter-spacing: .08em; color: #fff; background: var(--accent); padding: 4px 6px; border-radius: var(--r1); margin-left: 8px; vertical-align: 3px; }
 
 /* ---------- 画布容器（Excalidraw 隔离） ---------- */
-.excalidraw-wrap { min-height: 320px; background: #fffdf8; overflow: hidden; }
-/* 只读画布：隐藏 Excalidraw 主菜单（导出图片/帮助/外链/深色模式对只读画布无意义） */
+.excalidraw-wrap { min-height: 320px; background: #fffdf8; overflow: hidden; position: relative; }
+/* 只读画布：隐藏 Excalidraw 主菜单（导出图片/帮助/外链/深色模式对只读画布无意义），
+   及移动版布局里只剩菜单按钮的空底部工具条 */
 .excalidraw .main-menu-trigger { display: none !important; }
+.excalidraw--view-mode .App-toolbar { display: none !important; }
+/* 回到初始视角：悬浮图标按钮（悬停显示文字说明） */
+.canvas-reset-btn { position: absolute; top: 12px; right: 12px; z-index: 5;
+  width: 36px; height: 36px; display: inline-grid; place-items: center; padding: 0; cursor: pointer;
+  background: rgba(255, 255, 255, .92); border: 1px solid var(--rule2); border-radius: 10px;
+  color: var(--ink2); box-shadow: 0 1px 4px rgba(21, 23, 26, .08); }
+@media (hover:hover){ .canvas-reset-btn:hover { color: var(--ink); border-color: var(--ink2); } }
+.canvas-reset-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* 全高模式：填满父容器，画布区自适应，操作行贴底 */
 .excalidraw-wrap.is-full { min-height: 0; height: 100%; display: flex; flex-direction: column; }
 .excalidraw-wrap.is-full .excalidraw-area { flex: 1; min-height: 0; }

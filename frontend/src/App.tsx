@@ -54,7 +54,15 @@ export default function App() {
     try { return localStorage.getItem(SIDE_PREF_KEY) === "1"; } catch { return false; }
   });
   const [sideAutoHidden, setSideAutoHidden] = useState(false);
+  // 规划导图步骤：侧栏自动隐藏 + 顶栏转极简（只留菜单/展开按钮）
+  const [mapMode, setMapMode] = useState(false);
   const sideHidden = sideCollapsed || sideAutoHidden;
+
+  // 导图步骤进出：隐藏/恢复侧栏，顶栏同步转极简/还原
+  const onMapMode = useCallback((on: boolean) => {
+    setMapMode(on);
+    setSideAutoHidden(on);
+  }, []);
 
   const go = useCallback((path: string) => {
     setError("");
@@ -233,7 +241,7 @@ export default function App() {
         </div>
       </nav>
       <div className="main">
-        <header className="top">
+        <header className={"top" + (mapMode ? " top-min" : "")}>
           <button className="iconbtn menu-btn" data-nav-toggle aria-label="打开导航" aria-controls="side" onClick={sideOpen}>☰</button>
           {sideHidden && (
             <button
@@ -247,9 +255,11 @@ export default function App() {
               <ChevronIcon dir="right" />
             </button>
           )}
-          <nav className="crumb" aria-label="当前位置">
-            <span className="here">{crumbHere[0] || "学伴"}</span>
-          </nav>
+          {!mapMode && (
+            <nav className="crumb" aria-label="当前位置">
+              <span className="here">{crumbHere[0] || "学伴"}</span>
+            </nav>
+          )}
         </header>
         <main className="page">
           {error && <div className="error" role="alert" style={{ marginBottom: "var(--s4)" }}>{error}</div>}
@@ -277,7 +287,7 @@ export default function App() {
             <CapabilityConfig isAdmin={me.is_admin} onErr={setError} onOk={setNotice} />
           )}
           {route === "/planning" && (
-            <PlanningView onErr={setError} onOk={setNotice} needLogin={!me} go={go} onAutoHideSide={setSideAutoHidden} />
+            <PlanningView onErr={setError} onOk={setNotice} needLogin={!me} go={go} onMapMode={onMapMode} />
           )}
           {route === "/chat" && (
             <ChatView onErr={setError} onOk={setNotice} needLogin={!me} />

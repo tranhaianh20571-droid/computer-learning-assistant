@@ -202,6 +202,8 @@ hr.rule { border: 0; border-top: 1px solid var(--rule); }
   cursor: pointer; font-size: var(--t-s); color: var(--ink2); white-space: nowrap; }
 .mode-switch button[aria-pressed="true"] { background: var(--ink); color: #fff; }
 .menu-btn { display: none; }
+/* 导图步骤极简顶栏：去掉底色/边框/面包屑，只留悬浮菜单按钮 */
+.top-min { background: transparent; border-bottom: 0; }
 /* 侧栏收起（桌面）：收起后完全隐藏，顶栏出现展开按钮 */
 .side-collapse-btn, .side-expand-btn { display: none; }
 .side-collapse-btn { width: 32px; height: 32px; margin-left: auto; align-self: center; color: var(--nav-dim); }

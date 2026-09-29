@@ -128,10 +128,10 @@ function IntakeForm({ intake, onDecide, busy }: {
   );
 }
 
-export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSide }: {
+export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode }: {
   onErr: (s: string) => void; onOk: (s: string) => void; needLogin: boolean; go: (p: string) => void;
-  /** 进入导图步骤时请求隐藏侧栏（离开该步骤自动恢复） */
-  onAutoHideSide?: (hidden: boolean) => void;
+  /** 进入导图步骤时通知外壳：自动隐藏侧栏 + 顶栏转极简（离开该步骤自动恢复） */
+  onMapMode?: (on: boolean) => void;
 }) {
   const [title, setTitle] = useState("");
   const [routeId, setRouteId] = useState("");
@@ -321,12 +321,12 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
   // 导图步骤 = 蓝图/草稿已就绪且不在访谈中
   const mapStep = Boolean(routeId && hasBoard && !showIntake);
 
-  // 导图步骤请求隐藏侧栏，蓝图占满宽度；离开该步骤（含路由离开）自动恢复
+  // 导图步骤请求极简外壳（隐藏侧栏、顶栏只留菜单按钮）；离开该步骤（含路由离开）自动恢复
   useEffect(() => {
-    if (!mapStep || !onAutoHideSide) return;
-    onAutoHideSide(true);
-    return () => onAutoHideSide(false);
-  }, [mapStep, onAutoHideSide]);
+    if (!mapStep || !onMapMode) return;
+    onMapMode(true);
+    return () => onMapMode(false);
+  }, [mapStep, onMapMode]);
 
   // 提问与反馈（只读）：优先用本地问答记录；跨浏览器恢复时按服务端 intake 尽力回显
   const transcript: QaEntry[] = qaLog.length > 0 ? qaLog : (intake?.answers || []).map((a: any) => {
@@ -455,9 +455,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onAutoHideSid
                   >
                     我想修改讲解结构
                   </button>
-                  <p className="help">
-                    「修改讲解结构」会把草稿切换为{draft.draft_kind === "route" ? "课程大纲" : "学习路线"}，已填输入保留；确认后生成不可变版本。
-                  </p>
                 </>
               ) : (
                 <p className="help">当前展示已确认版本；如需调整，请回到「新的学习任务」生成新草稿。</p>

@@ -104,7 +104,46 @@ class TestOutputModels:
     def test_route_candidate_ok(self) -> None:
         candidate = RouteCandidate.model_validate(ROUTE_OK_PAYLOAD)
         summary = validate_route_candidate(candidate)
-        assert summary == {"stage_count": 2, "course_count": 4}
+        assert summary == {"stage_count": 2, "course_count": 4, "lesson_count": 0}
+
+    def test_route_candidate_with_nested_units(self) -> None:
+        payload = {
+            "title": "后端学习路线",
+            "stages": [{"title": "阶段一", "courses": [
+                {"title": "数据库基础", "goal": "掌握关系模型", "units": OUTLINE_OK_PAYLOAD["units"]},
+            ]}],
+            "prerequisites": [],
+        }
+        candidate = RouteCandidate.model_validate(payload)
+        summary = validate_route_candidate(candidate)
+        assert summary == {"stage_count": 1, "course_count": 1, "lesson_count": 4}
+        content = candidate.model_dump()
+        assert content["title"] == "后端学习路线"
+        assert content["stages"][0]["courses"][0]["units"][0]["title"] == "单元一：入门"
+
+    def test_route_total_lesson_cap_across_courses(self) -> None:
+        units = [{"title": f"单元 {i}", "lessons": [
+            {"title": f"讲次 {j}"} for j in range(10)
+        ]} for i in range(12)]
+        payload = {"stages": [{"title": "s", "courses": [
+            {"title": "c1", "units": units}, {"title": "c2", "units": units},
+        ]}]}
+        with pytest.raises(Exception) as exc:
+            validate_content_json("route", payload)
+        assert exc.value.code == "ROUTE_STRUCTURE_INVALID"
+
+    def test_route_nested_unit_lesson_cap(self) -> None:
+        units = [{"title": "单元", "lessons": [{"title": f"讲次 {j}"} for j in range(21)]}]
+        payload = {"stages": [{"title": "s", "courses": [{"title": "c", "units": units}]}]}
+        with pytest.raises(Exception) as exc:
+            validate_content_json("route", payload)
+        assert exc.value.code == "INVALID_OUTLINE_STRUCTURE"
+
+    def test_outline_candidate_title_roundtrip(self) -> None:
+        payload = {"title": "数据库基础：从建模到查询", **OUTLINE_OK_PAYLOAD}
+        candidate = OutlineCandidate.model_validate(payload)
+        validate_outline_candidate(candidate)
+        assert candidate.model_dump()["title"] == "数据库基础：从建模到查询"
 
     def test_route_empty_stage_rejected(self) -> None:
         payload = {"stages": [{"title": "s", "courses": []}]}

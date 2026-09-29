@@ -9,6 +9,7 @@ import pytest
 from common_fixtures import (
     OUTLINE_OK_PAYLOAD,
     ROUTE_OK_PAYLOAD,
+    SkeletonThenOutlineAdapter,
     SyntheticModelAdapter,
     SyntheticSearchAdapter,
     auth_headers,
@@ -284,3 +285,51 @@ class TestScopeSwitch:
         # 输入保留：新草稿承接旧内容
         assert body["draft"]["content"] == draft["content"]
         assert body["new_kind"] == "course_outline"
+
+
+class TestRouteConfirmMaterializesOutlines:
+    def test_confirm_route_with_units_materializes_course_outlines(self, env) -> None:
+        """四层草稿确认：逐课落不可变大纲版本，路线场景保持到讲次粒度。"""
+        client = env["client"]
+        user_id, token = make_user(client, env["database"])
+        route_id = client.post(
+            "/api/planning/routes", headers=auth_headers(token),
+            json={"title": "四层路线", "scenario": "self_study"},
+        ).json()["route_id"]
+        env["container"]["model"] = SkeletonThenOutlineAdapter(
+            payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD,
+        )
+        env["container"]["search"] = SyntheticSearchAdapter()
+        task_id = client.post(
+            "/api/planning/tasks", headers=auth_headers(token),
+            json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
+                  "planning_scope": "route", "target_route_id": route_id},
+        ).json()["task_id"]
+        body = run_route_generate(client, token, task_id)
+        assert body["task_status"] == "succeeded", body
+        draft_id = body["draft"]["draft_id"]
+        draft = env["state"].drafts.get_draft(draft_id, actor_id=user_id)
+        confirmed = client.post(
+            f"/api/planning/drafts/{draft_id}/confirm", headers=auth_headers(token),
+            json={"revision": draft["revision"], "idempotency_key": f"c{uuid.uuid4().hex[:8]}"},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+
+        # 路线场景四层：根卡 + 4 课程 + 单元 + 讲次（les_ 前缀来自确认落库的讲次行）
+        scene = client.get(f"/api/routes/{route_id}/scene", headers=auth_headers(token)).json()
+        keys = set(scene["node_positions"].keys())
+        assert "route_root" in keys
+        assert any(k.startswith("unit_") for k in keys)
+        assert any(k.startswith("les_") for k in keys)
+
+        # 每门课都拿到当前大纲版本，且课程场景到讲次粒度
+        overview = client.get(f"/api/routes/{route_id}/overview", headers=auth_headers(token)).json()
+        course_ids = [c["course_id"] for s in overview["stages"] for c in s["courses"]]
+        assert len(course_ids) == 4
+        for course_id in course_ids:
+            course_scene = client.get(
+                f"/api/courses/{course_id}/scene", headers=auth_headers(token),
+            ).json()
+            pos = course_scene["node_positions"]
+            assert "course_root" in pos
+            assert any(k.startswith("unit_") for k in pos)

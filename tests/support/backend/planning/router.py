@@ -341,7 +341,7 @@ def create_planning_router(
         """草稿预览场景：生成后即可看导图，不必先确认草稿。
 
         读路径统一兜底剥除标题里的内部 id：存量草稿（剥除逻辑上线前生成）
-        也能正常展示，不阻塞预览。
+        也能正常展示，不阻塞预览。目标标题作根卡回退（大标题/课程卡）。
         """
         user = _user(request)
         with db.session() as sess:
@@ -349,8 +349,10 @@ def create_planning_router(
             if draft is None or draft.owner_user_id != user.user_id:
                 raise error("draft_not_found", status=404)
             content = load_json_field(draft.content_json, {})
+            target = sess.get(LearningRouteRow, draft.target_id) if draft.draft_kind in ("route", "route_generate") else sess.get(CourseRow, draft.target_id)
+            title = (target.title_ref or "") if target else ""
         strip_internal_ids_in_place(content)
-        return draft_scene(draft.draft_kind, content)
+        return draft_scene(draft.draft_kind, content, title=title)
 
     @router.get("/api/planning/viewstates/{target_kind}/{target_id}")
     def get_viewstate(target_kind: str, target_id: str, request: Request) -> dict:
@@ -493,9 +495,13 @@ def create_planning_router(
 
 
 def _route_version_payload(sess, route_version_id: str) -> dict:
-    from .models import CourseRow, RouteCourseNodeRow, RoutePrerequisiteEdgeRow, RouteStageRow, RouteVersionRow
+    from .models import (
+        CourseRow, CourseUnitRow, LearningRouteRow, LessonRow,
+        RouteCourseNodeRow, RoutePrerequisiteEdgeRow, RouteStageRow, RouteVersionRow,
+    )
 
     version = sess.get(RouteVersionRow, route_version_id)
+    route = sess.get(LearningRouteRow, version.route_id) if version else None
     stage_rows = (
         sess.execute(
             select(RouteStageRow)
@@ -518,19 +524,45 @@ def _route_version_payload(sess, route_version_id: str) -> dict:
         courses = []
         for node in sorted([n for n in node_rows if n.stage_id == stage.stage_id], key=lambda n: n.order_index):
             # 场景节点以 route_course_nodes.node_id 为业务对象 ID（先修边引用同一 ID）；
-            # 展示文本优先课程标题，缺省退回目标快照
+            # 展示文本优先课程标题，缺省退回目标快照。
+            # 课程当前大纲版本存在时附带单元/讲次（四层图：大标题→课程→单元→讲次）。
             course = sess.get(CourseRow, node.course_id)
             display = (course.title_ref if course else "") or node.goal_snapshot_ref or node.course_id
-            courses.append({"id": node.node_id, "course_id": node.course_id, "title": display})
+            units = []
+            if course is not None and course.current_outline_version_id:
+                unit_rows = sess.execute(
+                    select(CourseUnitRow)
+                    .where(CourseUnitRow.outline_version_id == course.current_outline_version_id)
+                    .order_by(CourseUnitRow.order_index)
+                ).scalars().all()
+                lesson_rows = sess.execute(
+                    select(LessonRow).where(LessonRow.outline_version_id == course.current_outline_version_id)
+                ).scalars().all()
+                for u in unit_rows:
+                    units.append({
+                        "id": u.unit_id,
+                        "title": u.title_ref,
+                        "lessons": [
+                            {"id": l.lesson_id, "title": l.goal_ref or l.lesson_id, "goal": l.goal_ref}
+                            for l in sorted(
+                                [l for l in lesson_rows if l.unit_id == u.unit_id],
+                                key=lambda l: l.order_index,
+                            )
+                        ],
+                    })
+            courses.append({"id": node.node_id, "course_id": node.course_id, "title": display, "units": units})
         stages.append({"id": stage.stage_id, "title": stage.title_ref, "courses": courses})
     prerequisites = [
         {"from": e.from_node_id, "to": e.to_node_id} for e in edges
     ]
-    return {"version": version, "stages": stages, "prerequisites": prerequisites}
+    return {
+        "title": (route.title_ref if route else "") or "",
+        "version": version, "stages": stages, "prerequisites": prerequisites,
+    }
 
 
 def _outline_version_payload(sess, outline_version_id: str) -> dict:
-    from .models import CourseUnitRow, LessonPrerequisiteEdgeRow, LessonRow, OutlineVersionRow
+    from .models import CourseRow, CourseUnitRow, LessonPrerequisiteEdgeRow, LessonRow, OutlineVersionRow
 
     version = sess.get(OutlineVersionRow, outline_version_id)
     unit_rows = (
@@ -559,7 +591,11 @@ def _outline_version_payload(sess, outline_version_id: str) -> dict:
             lessons.append({"id": lesson.lesson_id, "title": lesson.goal_ref or lesson.lesson_id})
         units.append({"id": unit.unit_id, "title": unit.title_ref, "lessons": lessons})
     prerequisites = [{"from": e.from_lesson_id, "to": e.to_lesson_id} for e in edges]
-    return {"version": version, "units": units, "prerequisites": prerequisites}
+    course = sess.get(CourseRow, version.course_id) if version else None
+    return {
+        "title": (course.title_ref if course else "") or "",
+        "version": version, "units": units, "prerequisites": prerequisites,
+    }
 
 
 __all__ = ["create_planning_router"]

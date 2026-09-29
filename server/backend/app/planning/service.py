@@ -40,6 +40,7 @@ from .model_runner import ModelCapabilityGate, run_structured
 from .outputs import (
     OutlineCandidate,
     RouteCandidate,
+    validate_content_json,
     validate_outline_candidate,
     validate_route_candidate,
 )
@@ -49,8 +50,8 @@ from .scope import ScopeSignals, resolve_scope
 from .search import SearchGate, SearchOutcome
 
 PLAN_PROMPTS = {
-    "route_generate": "route_generate_v1",
-    "outline_generate": "outline_generate_v1",
+    "route_generate": "route_generate_v2",
+    "outline_generate": "outline_refine_v1",
     "planning_revise": "planning_revise_v1",
 }
 
@@ -342,6 +343,30 @@ class PlanningService:
         candidate = run.payload
         summary = validate_route_candidate(candidate)
         content = candidate.model_dump()
+        # 逐课细化（v2）：骨架课程 → 每课并行补齐单元/讲次；单课失败降级为课程粒度。
+        # 模板走本地后备快照（同 intake_followup_v1 口径，不入任务绑定）。
+        try:
+            refine_prompt = self.prompts.load_local_template("outline_refine_v1")
+        except Exception:  # noqa: BLE001 — 模板缺失时整图退化为课程粒度
+            refine_prompt = None
+        if refine_prompt is not None:
+            model_courses = [c for s in candidate.stages for c in s.courses]
+            content_courses = [c for s in content["stages"] for c in s["courses"]]
+            jobs = [(m, d) for m, d in zip(model_courses, content_courses) if not d.get("units")]
+            if jobs:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+                    futures = {
+                        pool.submit(self._refine_course_units, adapter, state, m, refine_prompt): d
+                        for m, d in jobs
+                    }
+                    for fut, d_course in futures.items():
+                        try:
+                            d_course["units"] = fut.result()
+                        except Exception:  # noqa: BLE001 — 该课降级为课程粒度，不阻塞整图
+                            pass
+            summary = validate_content_json("route", content)
         draft_result = self.drafts.apply_candidate(
             owner_user_id=state.owner_user_id,
             target_id=target_id,
@@ -360,6 +385,34 @@ class PlanningService:
             row.draft_id = draft_result.get("draft_id")
             sess.commit()
         return {"mode": run.mode, "degraded_from": run.degraded_from, "summary": summary, "draft": draft_result}
+
+    def _refine_course_units(self, adapter, state, course, prompt) -> list[dict]:
+        """逐课细化：按课程名/目标产出单元/讲次（OutlineCandidate）；失败抛受控错误。"""
+        template = prompt.get("template_snapshot", "")
+        user_content = (
+            f"{template}\n课程名称：{course.title}\n课程学习目标：{course.goal or course.title}\n"
+            "注意：所有 title/goal 字段只写自然语言，不得出现 course_、unit_ 等内部标识符，"
+            "也不要加「第 N 单元」「步骤 N」等编号前缀。"
+        )
+        intake = load_json_field(state.intake_json, None)
+        if intake and intake.get("answers"):
+            profile = self._profile_text(intake["answers"])
+            if profile:
+                user_content += f"\n学习者画像（来自生成前访谈）：{profile}"
+        messages = [
+            {"role": "system", "content": "你是学习规划助手。只输出符合要求的 JSON。"},
+            {"role": "user", "content": user_content},
+        ]
+        from ..agents.runner import run_structured_agent
+        from ..agents.tools import planning_title_output_validator
+
+        run = run_structured_agent(
+            adapter, OutlineCandidate, messages,
+            tool_name="submit_outline_candidate", stage="refine",
+            output_validator=planning_title_output_validator(),
+        )
+        validate_outline_candidate(run.payload)
+        return [u.model_dump() for u in run.payload.units]
 
     # ------------------------------------------------------------------
     # 生成：大纲（含由路线节点展开）

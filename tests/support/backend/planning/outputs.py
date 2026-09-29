@@ -41,9 +41,26 @@ CHAT_LIMITS = {"max_answer_len": 4000}
 PROMPTED_PARSE_RETRIES = 2
 
 
+class OutlineLessonOut(BaseModel):
+    title: str = Field(min_length=1, max_length=OUTLINE_LIMITS["max_text_len"])
+    goal: str = Field(default="", max_length=OUTLINE_LIMITS["max_text_len"])
+
+    @field_validator("title", "goal")
+    @classmethod
+    def _no_control(cls, v: str) -> str:
+        return "".join(ch for ch in v if ch >= " " or ch == "\t")
+
+
+class OutlineUnitOut(BaseModel):
+    title: str = Field(min_length=1, max_length=OUTLINE_LIMITS["max_text_len"])
+    lessons: list[OutlineLessonOut] = Field(min_length=1)
+
+
 class RouteCourseOut(BaseModel):
     title: str = Field(min_length=1, max_length=ROUTE_LIMITS["max_text_len"])
     goal: str = Field(default="", max_length=ROUTE_LIMITS["max_text_len"])
+    # 逐课细化（outline_refine）结果：课程内嵌单元/讲次；空列表表示该课仅到课程粒度
+    units: list[OutlineUnitOut] = Field(default_factory=list)
 
     @field_validator("title", "goal")
     @classmethod
@@ -62,23 +79,10 @@ class RoutePrereqOut(BaseModel):
 
 
 class RouteCandidate(BaseModel):
+    # 大标题（可选）：为空时沿用路线标题
+    title: str = Field(default="", max_length=ROUTE_LIMITS["max_text_len"])
     stages: list[RouteStageOut] = Field(min_length=1, max_length=ROUTE_LIMITS["max_stages"])
     prerequisites: list[RoutePrereqOut] = Field(default_factory=list)
-
-
-class OutlineLessonOut(BaseModel):
-    title: str = Field(min_length=1, max_length=OUTLINE_LIMITS["max_text_len"])
-    goal: str = Field(default="", max_length=OUTLINE_LIMITS["max_text_len"])
-
-    @field_validator("title", "goal")
-    @classmethod
-    def _no_control(cls, v: str) -> str:
-        return "".join(ch for ch in v if ch >= " " or ch == "\t")
-
-
-class OutlineUnitOut(BaseModel):
-    title: str = Field(min_length=1, max_length=OUTLINE_LIMITS["max_text_len"])
-    lessons: list[OutlineLessonOut] = Field(min_length=1)
 
 
 class OutlinePrereqOut(BaseModel):
@@ -87,6 +91,8 @@ class OutlinePrereqOut(BaseModel):
 
 
 class OutlineCandidate(BaseModel):
+    # 课程名（可选）：为空时沿用课程标题
+    title: str = Field(default="", max_length=OUTLINE_LIMITS["max_text_len"])
     units: list[OutlineUnitOut] = Field(min_length=1, max_length=OUTLINE_LIMITS["max_units"])
     prerequisites: list[OutlinePrereqOut] = Field(default_factory=list)
 
@@ -126,7 +132,10 @@ def internal_id_residue(text: str) -> bool:
 
 
 def strip_internal_ids_in_place(content: dict) -> None:
-    """就地剥掉 content_json 标题/目标里的内部 id（route/outline 两种形状）。"""
+    """就地剥掉 content_json 标题/目标里的内部 id（route/outline 两种形状，含课程内嵌单元/讲次）。"""
+    # 空/缺省标题不清洗（_clean_title_text 会把空值回填为「未命名」）
+    if isinstance(content.get("title"), str) and content["title"]:
+        content["title"] = _clean_title_text(content["title"])
     for stage in content.get("stages") or []:
         if not isinstance(stage, dict):
             continue
@@ -139,7 +148,12 @@ def strip_internal_ids_in_place(content: dict) -> None:
                 course["title"] = _clean_title_text(course["title"])
             if isinstance(course.get("goal"), str) and course["goal"]:
                 course["goal"] = _clean_title_text(course["goal"])
-    for unit in content.get("units") or []:
+            _strip_units_in_place(course.get("units"))
+    _strip_units_in_place(content.get("units"))
+
+
+def _strip_units_in_place(units) -> None:
+    for unit in units or []:
         if not isinstance(unit, dict):
             continue
         if isinstance(unit.get("title"), str):
@@ -153,33 +167,12 @@ def strip_internal_ids_in_place(content: dict) -> None:
                 lesson["goal"] = _clean_title_text(lesson["goal"])
 
 
-def validate_route_candidate(candidate: RouteCandidate) -> dict:
-    """长度/数量/结构/DAG 校验。返回规范化摘要；失败抛受控错误码。"""
+def _validate_units(units: list[OutlineUnitOut]) -> int:
+    """单元/讲次层级校验（单课程粒度）：清洗文本 + 数量上限；返回讲次总数。"""
+    if len(units) > OUTLINE_LIMITS["max_units"]:
+        raise error("INVALID_OUTLINE_STRUCTURE", "too many units")
     total = 0
-    for stage in candidate.stages:
-        stage.title = _clean_title_text(stage.title)
-        for course in stage.courses:
-            course.title = _clean_title_text(course.title)
-            if course.goal:
-                course.goal = _clean_title_text(course.goal)
-        if not stage.courses:
-            raise error("ROUTE_STRUCTURE_INVALID", "stage has no course")
-        total += len(stage.courses)
-    if total < 1:
-        raise error("ROUTE_STRUCTURE_INVALID", "route needs at least one course")
-    if total > ROUTE_LIMITS["max_courses"]:
-        raise error("ROUTE_STRUCTURE_INVALID", "too many courses")
-    _validate_prereq_indices(
-        candidate.prerequisites,
-        total,
-        lambda e: (e.from_index, e.to_index),
-    )
-    return {"stage_count": len(candidate.stages), "course_count": total}
-
-
-def validate_outline_candidate(candidate: OutlineCandidate) -> dict:
-    total = 0
-    for unit in candidate.units:
+    for unit in units:
         unit.title = _clean_title_text(unit.title)
         for lesson in unit.lessons:
             lesson.title = _clean_title_text(lesson.title)
@@ -187,9 +180,52 @@ def validate_outline_candidate(candidate: OutlineCandidate) -> dict:
                 lesson.goal = _clean_title_text(lesson.goal)
         if not unit.lessons:
             raise error("INVALID_OUTLINE_STRUCTURE", "unit has no lesson")
+        if len(unit.lessons) > OUTLINE_LIMITS["max_lessons_per_unit"]:
+            raise error("INVALID_OUTLINE_STRUCTURE", "too many lessons in unit")
         total += len(unit.lessons)
     if total > OUTLINE_LIMITS["max_lessons"]:
         raise error("INVALID_OUTLINE_STRUCTURE", "too many lessons")
+    return total
+
+
+def validate_route_candidate(candidate: RouteCandidate) -> dict:
+    """长度/数量/结构/DAG 校验。返回规范化摘要；失败抛受控错误码。"""
+    candidate.title = _clean_title_text(candidate.title) if candidate.title else ""
+    total = 0
+    lesson_total = 0
+    for stage in candidate.stages:
+        stage.title = _clean_title_text(stage.title)
+        for course in stage.courses:
+            course.title = _clean_title_text(course.title)
+            if course.goal:
+                course.goal = _clean_title_text(course.goal)
+            if course.units:
+                lesson_total += _validate_units(course.units)
+        if not stage.courses:
+            raise error("ROUTE_STRUCTURE_INVALID", "stage has no course")
+        total += len(stage.courses)
+    if total < 1:
+        raise error("ROUTE_STRUCTURE_INVALID", "route needs at least one course")
+    if total > ROUTE_LIMITS["max_courses"]:
+        raise error("ROUTE_STRUCTURE_INVALID", "too many courses")
+    # 全路线讲次总量上限（防导图节点爆炸）：与单课程讲次上限同值
+    if lesson_total > OUTLINE_LIMITS["max_lessons"]:
+        raise error("ROUTE_STRUCTURE_INVALID", "too many lessons across courses")
+    _validate_prereq_indices(
+        candidate.prerequisites,
+        total,
+        lambda e: (e.from_index, e.to_index),
+    )
+    return {
+        "stage_count": len(candidate.stages),
+        "course_count": total,
+        "lesson_count": lesson_total,
+    }
+
+
+def validate_outline_candidate(candidate: OutlineCandidate) -> dict:
+    candidate.title = _clean_title_text(candidate.title) if candidate.title else ""
+    total = _validate_units(candidate.units)
     _validate_prereq_indices(
         candidate.prerequisites, total, lambda e: (e.from_index, e.to_index)
     )

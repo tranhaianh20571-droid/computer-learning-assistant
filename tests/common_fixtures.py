@@ -107,6 +107,31 @@ class BrokenJsonThenGoodAdapter(SyntheticModelAdapter):
         return {"content": f"```json\n{json.dumps(self.payload, ensure_ascii=False)}\n```"}
 
 
+class SkeletonThenOutlineAdapter(SyntheticModelAdapter):
+    """v2 生成链路：按调用内容区分——骨架/访谈追问返回路线候选，
+    带「课程名称：」的逐课细化调用返回大纲候选（fan-out）。"""
+
+    def __init__(self, *, outline_payload: dict, fail_refine: bool = False, **kw) -> None:
+        super().__init__(**kw)
+        self.outline_payload = outline_payload
+        self.fail_refine = fail_refine
+
+    def generate(self, messages, **options):
+        self.generate_calls.append(options)
+        import json
+
+        prompt_text = "\n".join(str(m.get("content", "")) for m in messages)
+        is_refine = "课程名称：" in prompt_text
+        if is_refine and self.fail_refine:
+            raise RuntimeError("refine unavailable")
+        payload = self.outline_payload if is_refine else self.payload
+        if "tools" in options:
+            return {"content": "", "tool_arguments": json.dumps(payload, ensure_ascii=False)}
+        if "response_format" in options:
+            return {"content": json.dumps(payload, ensure_ascii=False)}
+        return {"content": f"```json\n{json.dumps(payload, ensure_ascii=False)}\n```"}
+
+
 class AllUnavailableAdapter(SyntheticModelAdapter):
     def __init__(self) -> None:
         super().__init__(status=capability_status(text="unavailable", json_schema="unavailable",

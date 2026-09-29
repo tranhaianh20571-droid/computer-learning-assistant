@@ -111,3 +111,11 @@ cd frontend && npm run lint       # 0 error, 6 warning（1 条为切片 0 原有
 - 全局元素样式置于 `@layer base` 并以 `:not(.excalidraw *)` 隔离画布；旧类名（card/badge/table 等）保留别名对齐 ds-1 视觉，CapabilityConfig 与任务状态演示页无需改结构。
 
 走查（Browser Use，截图存本机临时目录）：登录页、首页 composer、规划工作台（澄清→草稿→确认→导图）、路线/课程总览（含状态字形与门槛）、即时对话（turns）、360px 窄屏；`console.error` 与 `window.onerror` 全空。`npm run build` 通过（0 error / 7 warning，均为既有类）。
+
+## 8. 规划生成 v2（2026-09-29 追加）：骨架+逐课细化、四层场景（ADR-024）
+
+- 契约：`RouteCourseOut` 内嵌可选 `units[]→lessons[]`（复用 `OutlineUnitOut`）；`RouteCandidate`/`OutlineCandidate` 增可选 `title`（导图大标题/课程根卡）；全路线讲次总量上限沿用 `OUTLINE_LIMITS["max_lessons"]`。
+- 生成链路：route_generate 骨架后逐课细化 fan-out（`_refine_course_units`，单课失败降级为课程粒度）；模板 `route_generate_v2` / `outline_refine_v1` 入 `fallback_templates/`（含 sha256，refine 按本地后备快照加载、不入任务绑定，同 intake_followup_v1 口径）。
+- 场景：`_hier_scene` 通用 N 层缩进树；路线=大标题→课程→单元→讲次（阶段仅承载数据不单独成卡），单课程=课程→单元→讲次；确认路线时逐课落不可变大纲版本（`_materialize_course_outline`）。
+- 前端：无需改动（导图为数据驱动渲染）。
+- 测试：`uv run python -m pytest ../tests -q`（server/ 目录，Windows 11 / Python 3.14 / uv）→ **537 passed / 2 skipped**（2026-09-29，含 test_mirror_sync）。新增/更新：contracts 嵌套 schema 与逐课/总量上限、planning fan-out 合并与降级（SkeletonThenOutlineAdapter）、scene 四层与根卡、draft_confirm 逐课落版本、overview 同版断言改为根卡口径。

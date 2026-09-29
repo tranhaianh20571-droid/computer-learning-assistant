@@ -102,12 +102,12 @@ class TestRouteOverview:
                 assert "outline_confirmed" in course
 
     def test_overview_same_version_as_scene(self, env) -> None:
-        """总览与导图同版：版本 ID 一致，课程节点集合一致（经 node_id）。"""
+        """总览与导图同版：课程节点集合一致（经 node_id）；阶段不再单独成卡。"""
         user_id, token, route_id, _ = _confirm_route_and_outline(env)
         client = env["client"]
         overview = client.get(f"/api/routes/{route_id}/overview", headers=auth_headers(token)).json()
         scene = client.get(f"/api/routes/{route_id}/scene", headers=auth_headers(token)).json()
-        assert scene["node_positions"].keys() >= {s["stage_id"] for s in overview["stages"]}
+        assert "route_root" in scene["node_positions"]
         for stage in overview["stages"]:
             for course in stage["courses"]:
                 assert course["node_id"] in scene["node_positions"]

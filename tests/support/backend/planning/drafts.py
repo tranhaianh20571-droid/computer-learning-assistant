@@ -331,6 +331,13 @@ class DraftService:
                 )
                 sess.add(node_row)
                 candidate_node_by_index[course_order] = node_row.node_id
+                if course.units:
+                    # 四层草稿：确认时逐课落不可变大纲版本（导图与讲次同版）
+                    self._materialize_course_outline(
+                        sess, course_id=course_id, units=course.units,
+                        source_route_version_id=version.route_version_id,
+                        source_task_id=f"confirm:{idem}",
+                    )
                 course_order += 1
             stage_index += 1
 
@@ -354,6 +361,62 @@ class DraftService:
             result="route_confirmed",
         )
         return {"version_id": version.route_version_id, "version_no": version.version_no, "deduped": False}
+
+    def _materialize_course_outline(
+        self, sess, *, course_id: str, units,
+        source_route_version_id: str, source_task_id: str,
+    ) -> str:
+        """课程内嵌单元/讲次 → 该课程的不可变大纲版本（四层图确认后保持到讲次粒度）。
+
+        与 _confirm_outline 同一套行结构；来源固定为本次路线确认。
+        """
+        course = sess.get(CourseRow, course_id)
+        if course is None:
+            raise error("course_not_found", status=404)
+        max_no = (
+            sess.execute(
+                select(OutlineVersionRow.version_no)
+                .where(OutlineVersionRow.course_id == course_id)
+                .order_by(OutlineVersionRow.version_no.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            or 0
+        )
+        version = OutlineVersionRow(
+            outline_version_id=f"ov_{uuid.uuid4().hex[:12]}",
+            course_id=course_id,
+            version_no=max_no + 1,
+            source_task_id=source_task_id,
+            prompt_binding_id=None,
+            source_route_version_id=source_route_version_id,
+            source_route_node_id=None,
+            goal_snapshot_ref="",
+            scope_snapshot_ref="",
+        )
+        sess.add(version)
+        sess.flush()
+        for u_index, unit in enumerate(units):
+            unit_row = CourseUnitRow(
+                unit_id=f"unit_{uuid.uuid4().hex[:12]}",
+                outline_version_id=version.outline_version_id,
+                order_index=u_index,
+                title_ref=unit.title,
+            )
+            sess.add(unit_row)
+            sess.flush()
+            for l_index, lesson in enumerate(unit.lessons):
+                sess.add(
+                    LessonRow(
+                        lesson_id=f"les_{uuid.uuid4().hex[:12]}",
+                        outline_version_id=version.outline_version_id,
+                        unit_id=unit_row.unit_id,
+                        order_index=l_index,
+                        goal_ref=lesson.goal or lesson.title,
+                        status_preparation="not_generated",
+                    )
+                )
+        course.current_outline_version_id = version.outline_version_id
+        return version.outline_version_id
 
     def _confirm_outline(self, sess, draft: PlanningDraftRow, actor_id: str, idem: str, content: dict) -> dict:
         course = sess.get(CourseRow, draft.target_id)

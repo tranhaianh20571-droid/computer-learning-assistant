@@ -264,47 +264,70 @@ def _topological_rank(children: list[dict], edges: list[tuple]) -> dict[str, int
     return {nid: i for i, nid in enumerate(order)}
 
 
-def _tree_scene(
-    kind_parent: str, kind_child: str, parent_w: int, child_w: int,
-    parents: list[dict], prereq_pairs: list[tuple],
+def _hier_scene(
+    roots: list[dict], kinds: list[str], widths: list[int],
+    prereq_pairs: list[tuple], prereq_depth: int,
 ) -> dict:
-    """横向缩进树：根在左、子级右缩、父按子树垂直居中。
+    """N 层横向缩进树（v3）：roots=[{id,title,goal?,children:[...]}] 递归排布。
 
-    parents=[{id,title,children:[{id,title,goal}]}]；prereq_pairs 为子节点间
-    (from_id, to_id) 边，越界端点静默忽略（与草稿预览的容错口径一致）。
+    depth d 使用 kinds[d]/widths[d]；父节点按子树垂直居中；归属肘线逐级连接；
+    prereq_pairs 为 prereq_depth 层节点间 (from_id, to_id) 边，越界端点静默忽略
+    （与草稿预览的容错口径一致），先修层子节点按边做稳定拓扑排序。
     """
     elements: list[dict] = []
     positions: dict[str, dict] = {}
-    all_children = [c for p in parents for c in p["children"]]
-    rank = _topological_rank(all_children, prereq_pairs)
-    child_x = LAYOUT["margin_x"] + parent_w + LAYOUT["level_gap"]
-    y = LAYOUT["margin_y"]
-    for p in parents:
-        ordered = sorted(p["children"], key=lambda c: rank.get(c["id"], 0))
-        child_layout: list[tuple[dict, int, int]] = []
+    x_by_depth: list[float] = []
+    x = LAYOUT["margin_x"]
+    for w in widths:
+        x_by_depth.append(x)
+        x += w + LAYOUT["level_gap"]
+    max_right = x_by_depth[-1] + widths[-1]
+
+    def collect(node: dict, depth: int, out: list[dict]) -> None:
+        if depth == prereq_depth:
+            out.append(node)
+            return
+        for c in node.get("children") or []:
+            collect(c, depth + 1, out)
+
+    prereq_nodes: list[dict] = []
+    for r in roots:
+        collect(r, 0, prereq_nodes)
+    rank = _topological_rank(prereq_nodes, prereq_pairs)
+
+    def ordered_children(node: dict, depth: int) -> list[dict]:
+        children = node.get("children") or []
+        if depth + 1 == prereq_depth and len(children) > 1:
+            return sorted(children, key=lambda c: rank.get(c["id"], 0))
+        return children
+
+    def place(node: dict, depth: int, y: float) -> dict:
+        kind, w = kinds[depth], widths[depth]
+        x = x_by_depth[depth]
+        boxes: list[dict] = []
         cursor = y
-        for c in ordered:
-            _, h = _node(c["id"], kind_child, child_x, cursor, child_w, c.get("title", ""), c.get("goal", ""))
-            child_layout.append((c, cursor, h))
-            cursor += h + LAYOUT["row_gap"]
-        _, ph = _node(p["id"], kind_parent, LAYOUT["margin_x"], 0, parent_w, p.get("title", ""))
-        if child_layout:
-            span_top = child_layout[0][1]
-            span_bottom = child_layout[-1][1] + child_layout[-1][2]
+        for c in ordered_children(node, depth):
+            boxes.append(place(c, depth + 1, cursor))
+            cursor = boxes[-1]["y"] + boxes[-1]["h"] + LAYOUT["row_gap"]
+        _, ph = _node(node["id"], kind, x, 0, w, node.get("title", ""), node.get("goal", ""))
+        if boxes:
+            span_top = boxes[0]["y"]
+            span_bottom = boxes[-1]["y"] + boxes[-1]["h"]
             py = round((span_top + span_bottom) / 2 - ph / 2)
         else:
             py = y
             span_bottom = y + ph
-        parent_els, _ = _node(p["id"], kind_parent, LAYOUT["margin_x"], py, parent_w, p.get("title", ""))
-        elements += parent_els
-        positions[p["id"]] = {"x": LAYOUT["margin_x"], "y": py, "w": parent_w, "h": ph}
-        for c, cyy, ch in child_layout:
-            cels, _ = _node(c["id"], kind_child, child_x, cyy, child_w, c.get("title", ""), c.get("goal", ""))
-            elements += cels
-            positions[c["id"]] = {"x": child_x, "y": cyy, "w": child_w, "h": ch}
-            elements.append(_belonging_link(c["id"], positions[p["id"]], positions[c["id"]]))
-        y = span_bottom + LAYOUT["row_gap"]
-    max_right = child_x + child_w
+        els, _ = _node(node["id"], kind, x, py, w, node.get("title", ""), node.get("goal", ""))
+        elements.extend(els)
+        positions[node["id"]] = {"x": x, "y": py, "w": w, "h": ph}
+        for b in boxes:
+            elements.append(_belonging_link(b["id"], positions[node["id"]], positions[b["id"]]))
+        return {"id": node["id"], "y": py, "h": ph, "bottom": max(span_bottom, py + ph)}
+
+    y = LAYOUT["margin_y"]
+    for root in roots:
+        placed = place(root, 0, y)
+        y = placed["bottom"] + LAYOUT["row_gap"]
     for k, (f, t) in enumerate(prereq_pairs):
         a, b = positions.get(f), positions.get(t)
         if a is None or b is None:
@@ -315,28 +338,46 @@ def _tree_scene(
 
 
 def route_scene(route_version: dict) -> dict:
-    """路线版本 → 场景（到课程粒度）。
+    """路线版本 → 场景（大标题→课程→单元→讲次；课程无单元时该支只到课程）。
 
-    route_version 为 {stages:[{id,title,courses:[{id,title,goal?}]}],
-    prerequisites:[{from,to}]}；goal 缺省时卡片只渲染标题。
+    route_version 为 {title, stages:[{id,title,courses:[{id,title,goal?,
+    units:[{id,title,lessons:[{id,title,goal?}]}]}]}], prerequisites:[{from,to}]}。
+    阶段仅承载分组数据不单独渲染；课程跨阶段按原顺序拍平。
     """
-    parents = [
-        {
-            "id": s["id"], "title": s.get("title", ""),
-            "children": [
-                {"id": c["id"], "title": c.get("title", ""), "goal": c.get("goal", "")}
-                for c in s.get("courses", [])
-            ],
-        }
-        for s in route_version.get("stages", [])
-    ]
+    root_children = []
+    for s in route_version.get("stages", []):
+        for c in s.get("courses", []):
+            units = []
+            for k, u in enumerate(c.get("units") or []):
+                units.append({
+                    "id": u.get("id") or f"{c['id']}u{k}",
+                    "title": u.get("title", ""),
+                    "children": [
+                        {
+                            "id": l.get("id") or f"{c['id']}u{k}l{j}",
+                            "title": l.get("title", ""),
+                            "goal": l.get("goal", ""),
+                        }
+                        for j, l in enumerate(u.get("lessons") or [])
+                    ],
+                })
+            root_children.append({
+                "id": c["id"], "title": c.get("title", ""), "goal": c.get("goal", ""),
+                "children": units,
+            })
+    root = {"id": "route_root", "title": route_version.get("title", "") or "学习路线", "children": root_children}
     pairs = [(e.get("from"), e.get("to")) for e in route_version.get("prerequisites", [])]
-    return _tree_scene("stage", "course", LAYOUT["stage_w"], LAYOUT["course_w"], parents, pairs)
+    return _hier_scene(
+        [root], ["stage", "course", "unit", "lesson"],
+        [LAYOUT["stage_w"], LAYOUT["course_w"], LAYOUT["unit_w"], LAYOUT["lesson_w"]],
+        pairs, prereq_depth=1,
+    )
 
 
 def outline_scene(outline_version: dict) -> dict:
-    """大纲版本 → 场景（到讲次粒度）。outline_version 形状同路线，units/lessons。"""
-    parents = [
+    """大纲版本 → 场景（课程→单元→讲次）。outline_version 为
+    {title,units:[{id,title,lessons:[{id,title,goal?}]}],prerequisites:[{from,to}]}。"""
+    units = [
         {
             "id": u["id"], "title": u.get("title", ""),
             "children": [
@@ -346,33 +387,55 @@ def outline_scene(outline_version: dict) -> dict:
         }
         for u in outline_version.get("units", [])
     ]
+    root = {"id": "course_root", "title": outline_version.get("title", "") or "课程", "children": units}
     pairs = [(e.get("from"), e.get("to")) for e in outline_version.get("prerequisites", [])]
-    return _tree_scene("unit", "lesson", LAYOUT["unit_w"], LAYOUT["lesson_w"], parents, pairs)
+    return _hier_scene(
+        [root], ["course", "unit", "lesson"],
+        [LAYOUT["course_w"], LAYOUT["unit_w"], LAYOUT["lesson_w"]],
+        pairs, prereq_depth=2,
+    )
 
 
-def draft_scene(kind: str, content: dict) -> dict:
+def draft_scene(kind: str, content: dict, title: str = "") -> dict:
     """草稿候选（RouteCandidate/OutlineCandidate 形状，扁平索引先修、无业务 id）→ 场景。
 
-    合成稳定键 stage_{i} / stage_{i}course_{j}（大纲同理），goal 随卡片透传；
-    先修索引越界静默忽略（与确认路径的受控校验不同，预览不阻塞）。
+    合成稳定键 stage_{i} / stage_{i}course_{j} / …course_{j}unit_{k} / …lesson_{l}
+    （大纲同理）；goal 随卡片透传；先修索引越界静默忽略（与确认路径的受控
+    校验不同，预览不阻塞）。title 为目标对象标题（大标题/课程根卡回退用）。
     """
     if kind in ("route", "route_generate"):
-        stages: list[dict] = []
+        root_children: list[dict] = []
         course_key_by_index: list[str] = []
         for i, stage in enumerate(content.get("stages", [])):
-            courses = []
             for j, course in enumerate(stage.get("courses", [])):
                 key = f"stage_{i}course_{j}"
                 course_key_by_index.append(key)
-                courses.append({"id": key, "title": course.get("title", ""), "goal": course.get("goal", "")})
-            stages.append({"id": f"stage_{i}", "title": stage.get("title", ""), "courses": courses})
+                units = []
+                for k, unit in enumerate(course.get("units") or []):
+                    ukey = f"{key}unit_{k}"
+                    lessons = [
+                        {
+                            "id": f"{ukey}lesson_{l}",
+                            "title": lesson.get("title", ""),
+                            "goal": lesson.get("goal", ""),
+                        }
+                        for l, lesson in enumerate(unit.get("lessons") or [])
+                    ]
+                    units.append({"id": ukey, "title": unit.get("title", ""), "lessons": lessons})
+                root_children.append({
+                    "id": key, "title": course.get("title", ""), "goal": course.get("goal", ""),
+                    "units": units,
+                })
+        root_title = content.get("title") or title or "学习路线"
         prerequisites = [
             {"from": course_key_by_index[e["from_index"]], "to": course_key_by_index[e["to_index"]]}
             for e in content.get("prerequisites", [])
             if isinstance(e, dict) and isinstance(e.get("from_index"), int) and isinstance(e.get("to_index"), int)
             and 0 <= e["from_index"] < len(course_key_by_index) and 0 <= e["to_index"] < len(course_key_by_index)
         ]
-        return route_scene({"stages": stages, "prerequisites": prerequisites})
+        return route_scene({"title": root_title, "stages": [
+            {"id": "stage_all", "title": "", "courses": root_children}
+        ], "prerequisites": prerequisites})
     if kind in ("course_outline", "outline_generate"):
         units: list[dict] = []
         lesson_key_by_index: list[str] = []
@@ -389,7 +452,10 @@ def draft_scene(kind: str, content: dict) -> dict:
             if isinstance(e, dict) and isinstance(e.get("from_index"), int) and isinstance(e.get("to_index"), int)
             and 0 <= e["from_index"] < len(lesson_key_by_index) and 0 <= e["to_index"] < len(lesson_key_by_index)
         ]
-        return outline_scene({"units": units, "prerequisites": prerequisites})
+        return outline_scene({
+            "title": content.get("title") or title or "课程",
+            "units": units, "prerequisites": prerequisites,
+        })
     raise error("invalid_field", f"unknown draft kind {kind}")
 
 

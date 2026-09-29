@@ -84,8 +84,8 @@ class TestSceneAPI:
         scene = r.json()
         types = {el["type"] for el in scene["elements"]}
         assert types <= {"rectangle", "ellipse", "text", "arrow", "line"}
-        # 业务节点全覆盖：2 阶段 + 4 课程
-        assert len(scene["node_positions"]) == 6
+        # 业务节点全覆盖：1 大标题根卡 + 4 课程（阶段不再单独成卡）
+        assert len(scene["node_positions"]) == 5
         # 先修边为虚线箭头且与树形框分层
         arrows = [el for el in scene["elements"] if el["type"] == "arrow"]
         assert arrows and all(a.get("strokeStyle") == "dashed" for a in arrows)
@@ -192,13 +192,13 @@ class TestLayoutConstants:
         }
         scene = route_scene(payload)
         pos = scene["node_positions"]
-        # 子级在父级右侧：x = margin_x + stage_w + level_gap
-        assert pos["s1"]["x"] == LAYOUT["margin_x"]
+        # 大标题根卡在最左列；子级在父级右侧：x = margin_x + stage_w + level_gap
+        assert pos["route_root"]["x"] == LAYOUT["margin_x"]
         assert pos["c1"]["x"] == LAYOUT["margin_x"] + LAYOUT["stage_w"] + LAYOUT["level_gap"]
         # 子级纵向堆叠（row_gap 间隔），父按子树垂直居中
         assert pos["c2"]["y"] >= pos["c1"]["y"] + pos["c1"]["h"] + LAYOUT["row_gap"] - 1e-6
         span_mid = (pos["c1"]["y"] + pos["c2"]["y"] + pos["c2"]["h"]) / 2
-        assert abs((pos["s1"]["y"] + pos["s1"]["h"] / 2) - span_mid) <= 1
+        assert abs((pos["route_root"]["y"] + pos["route_root"]["h"] / 2) - span_mid) <= 1
 
     def test_cards_rounded_with_accent_bar_and_goal_desc(self) -> None:
         payload = {
@@ -279,3 +279,42 @@ class TestLayoutConstants:
         # wrap_label 截断省略号
         lines = wrap_label(payload["units"][0]["lessons"][0]["title"], inner)
         assert lines[-1].endswith("…")
+
+    def test_route_scene_four_levels_with_units(self) -> None:
+        payload = {
+            "title": "调度学习路线",
+            "stages": [{"id": "s1", "title": "阶段一", "courses": [
+                {"id": "c1", "title": "操作系统调度", "goal": "能实现调度器", "units": [
+                    {"id": "u1", "title": "调度基础", "lessons": [
+                        {"id": "l1", "title": "进程与线程", "goal": "能区分进程线程"},
+                    ]},
+                ]},
+            ]}],
+            "prerequisites": [],
+        }
+        scene = route_scene(payload)
+        pos = scene["node_positions"]
+        # 四层节点齐备：大标题根卡 + 课程 + 单元 + 讲次
+        assert set(pos) == {"route_root", "c1", "u1", "l1"}
+        # 列序：大标题最左 → 课程 → 单元 → 讲次
+        xs = [pos["route_root"]["x"], pos["c1"]["x"], pos["u1"]["x"], pos["l1"]["x"]]
+        assert xs == sorted(xs)
+        assert pos["route_root"]["x"] == LAYOUT["margin_x"]
+        # 根卡回退：无 title 时使用默认名
+        fallback = route_scene({"stages": payload["stages"], "prerequisites": []})
+        root_texts = [el["text"] for el in fallback["elements"]
+                      if el["type"] == "text" and el["text"] == "学习路线"]
+        assert root_texts
+
+    def test_outline_scene_has_course_root(self) -> None:
+        payload = {
+            "title": "数据库基础",
+            "units": [{"id": "u1", "title": "单元", "lessons": [{"id": "l1", "title": "第 1 讲"}]}],
+            "prerequisites": [],
+        }
+        scene = outline_scene(payload)
+        assert set(scene["node_positions"]) == {"course_root", "u1", "l1"}
+        # 无 title 时根卡回退为「课程」
+        fallback = outline_scene({"units": payload["units"], "prerequisites": []})
+        texts = [el["text"] for el in fallback["elements"] if el["type"] == "text"]
+        assert "课程" in texts

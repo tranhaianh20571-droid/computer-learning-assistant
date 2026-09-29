@@ -10,7 +10,7 @@
 - `schemas/`：代码注册表（`server/backend/app/logging_audit/contracts.py`）的**版本化快照**——`registry-v1.json`（2026-09-26）、`registry-v2.json`（2026-09-28，ADR-022 内容通道）；权威以代码为准，本目录不自动同步。
 - `reports/`：AC 汇总报告；未执行项标"待执行"，失败项保留原因。
 
-## 证据索引（阶段 ↔ 记录 ↔ 测试；基线截至 2026-09-28：全量 495 passed / 2 skipped）
+## 证据索引（阶段 ↔ 记录 ↔ 测试；基线截至 2026-09-29：全量 537 passed / 2 skipped）
 
 | 阶段/切片 | 执行记录 | AC 汇总 | 主要测试（仓库根 `tests/`） |
 | --- | --- | --- | --- |

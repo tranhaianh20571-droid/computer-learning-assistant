@@ -11,10 +11,12 @@ from common_fixtures import (
     ROUTE_OK_PAYLOAD,
     AllUnavailableAdapter,
     BrokenJsonThenGoodAdapter,
+    SkeletonThenOutlineAdapter,
     SyntheticModelAdapter,
     SyntheticSearchAdapter,
     auth_headers,
     make_user,
+    run_route_generate,
 )
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -412,7 +414,9 @@ class TestDraftScenePreview:
         scene = r.json()
         assert scene["elements"], "draft scene should contain elements"
         texts = [el.get("text", "") for el in scene["elements"] if el.get("type") == "text"]
-        assert any("阶段一：基础" in t for t in texts)
+        # 新契约：阶段不再单独成卡；大标题根卡 + 课程卡
+        assert any("数据库基础" in t for t in texts)
+        assert any("自学数据库路线" in t for t in texts)
 
     def test_draft_scene_owner_only(self, env) -> None:
         _, token, route_id = _setup_route(env)
@@ -470,4 +474,70 @@ class TestDraftScenePreview:
         texts = [el.get("text", "") for el in r.json()["elements"] if el.get("type") == "text"]
         joined = "\n".join(texts)
         assert "route_8a471d50aada" not in joined
-        assert "基础构建" in joined
+        # 阶段标题不再渲染；课程卡 + 大标题根卡（路由标题）保留
+        assert "系统导论与核心概念" in joined
+        assert "存储与索引原理" in joined
+        assert "自学数据库路线" in joined
+
+
+class TestRouteRefineFanOut:
+    """v2 生成链路：骨架后逐课细化补齐单元/讲次；单课失败降级为课程粒度。"""
+
+    def _create_task(self, env, token: str, route_id: str) -> str:
+        r = env["client"].post(
+            "/api/planning/tasks", headers=auth_headers(token),
+            json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
+                  "planning_scope": "route", "target_route_id": route_id},
+        )
+        assert r.status_code == 201, r.text
+        return r.json()["task_id"]
+
+    def test_refine_merges_units_into_route_draft(self, env) -> None:
+        user_id, token, route_id = _setup_route(env)
+        env["container"]["model"] = SkeletonThenOutlineAdapter(
+            payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD,
+        )
+        env["container"]["search"] = SyntheticSearchAdapter()
+        task_id = self._create_task(env, token, route_id)
+        body = run_route_generate(env["client"], token, task_id)
+        assert body["task_status"] == "succeeded", body
+        assert body["summary"]["lesson_count"] == 16  # 4 课 × 2 单元 × 2 讲
+
+        state = env["client"].app.state.slice3
+        draft = state.drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
+        flat = [c for s in draft["content"]["stages"] for c in s["courses"]]
+        assert all(len(c["units"]) == 2 for c in flat)
+        assert flat[0]["units"][0]["lessons"][0]["title"] == "第 1 讲：环境准备"
+
+        # 草稿场景为四层图：大标题根卡 + 课程 + 单元 + 讲次
+        scene = env["client"].get(
+            f"/api/planning/drafts/{body['draft']['draft_id']}/scene",
+            headers=auth_headers(token),
+        ).json()
+        keys = set(scene["node_positions"].keys())
+        assert "route_root" in keys
+        assert any("unit_" in k for k in keys)
+        assert any("lesson_" in k for k in keys)
+
+    def test_refine_failure_degrades_to_course_level(self, env) -> None:
+        user_id, token, route_id = _setup_route(env)
+        env["container"]["model"] = SkeletonThenOutlineAdapter(
+            payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD, fail_refine=True,
+        )
+        env["container"]["search"] = SyntheticSearchAdapter()
+        task_id = self._create_task(env, token, route_id)
+        body = run_route_generate(env["client"], token, task_id)
+        assert body["task_status"] == "succeeded", body
+
+        state = env["client"].app.state.slice3
+        draft = state.drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
+        flat = [c for s in draft["content"]["stages"] for c in s["courses"]]
+        assert all(c["units"] == [] for c in flat)
+
+        scene = env["client"].get(
+            f"/api/planning/drafts/{body['draft']['draft_id']}/scene",
+            headers=auth_headers(token),
+        ).json()
+        keys = set(scene["node_positions"].keys())
+        assert "route_root" in keys
+        assert not any("unit_" in k for k in keys)

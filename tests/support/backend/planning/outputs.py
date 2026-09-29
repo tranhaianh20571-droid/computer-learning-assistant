@@ -120,24 +120,37 @@ def _clean_title_text(title: str) -> str:
     return cleaned or "未命名"
 
 
+def internal_id_residue(text: str) -> bool:
+    """标题/目标文本是否残留内部标识符（供生成侧 output_validator 回喂）。"""
+    return bool(_INTERNAL_ID_RE.search(str(text)))
+
+
 def strip_internal_ids_in_place(content: dict) -> None:
-    """就地剥掉 content_json 标题里的内部 id（route/outline 两种形状）。"""
+    """就地剥掉 content_json 标题/目标里的内部 id（route/outline 两种形状）。"""
     for stage in content.get("stages") or []:
         if not isinstance(stage, dict):
             continue
         if isinstance(stage.get("title"), str):
             stage["title"] = _clean_title_text(stage["title"])
         for course in stage.get("courses") or []:
-            if isinstance(course, dict) and isinstance(course.get("title"), str):
+            if not isinstance(course, dict):
+                continue
+            if isinstance(course.get("title"), str):
                 course["title"] = _clean_title_text(course["title"])
+            if isinstance(course.get("goal"), str) and course["goal"]:
+                course["goal"] = _clean_title_text(course["goal"])
     for unit in content.get("units") or []:
         if not isinstance(unit, dict):
             continue
         if isinstance(unit.get("title"), str):
             unit["title"] = _clean_title_text(unit["title"])
         for lesson in unit.get("lessons") or []:
-            if isinstance(lesson, dict) and isinstance(lesson.get("title"), str):
+            if not isinstance(lesson, dict):
+                continue
+            if isinstance(lesson.get("title"), str):
                 lesson["title"] = _clean_title_text(lesson["title"])
+            if isinstance(lesson.get("goal"), str) and lesson["goal"]:
+                lesson["goal"] = _clean_title_text(lesson["goal"])
 
 
 def validate_route_candidate(candidate: RouteCandidate) -> dict:
@@ -147,6 +160,8 @@ def validate_route_candidate(candidate: RouteCandidate) -> dict:
         stage.title = _clean_title_text(stage.title)
         for course in stage.courses:
             course.title = _clean_title_text(course.title)
+            if course.goal:
+                course.goal = _clean_title_text(course.goal)
         if not stage.courses:
             raise error("ROUTE_STRUCTURE_INVALID", "stage has no course")
         total += len(stage.courses)
@@ -168,6 +183,8 @@ def validate_outline_candidate(candidate: OutlineCandidate) -> dict:
         unit.title = _clean_title_text(unit.title)
         for lesson in unit.lessons:
             lesson.title = _clean_title_text(lesson.title)
+            if lesson.goal:
+                lesson.goal = _clean_title_text(lesson.goal)
         if not unit.lessons:
             raise error("INVALID_OUTLINE_STRUCTURE", "unit has no lesson")
         total += len(unit.lessons)
@@ -273,6 +290,6 @@ __all__ = [
     "BOARD_ELEMENT_WHITELIST", "ROUTE_LIMITS", "OUTLINE_LIMITS", "CHAT_LIMITS",
     "PROMPTED_PARSE_RETRIES",
     "validate_route_candidate", "validate_outline_candidate", "validate_content_json",
-    "strip_internal_ids_in_place",
+    "strip_internal_ids_in_place", "internal_id_residue",
     "flat_course_titles", "flat_lesson_titles",
 ]

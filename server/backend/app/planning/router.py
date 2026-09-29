@@ -35,6 +35,7 @@ from .models import (
     utcnow,
 )
 from .overview import OverviewService
+from .outputs import strip_internal_ids_in_place
 from .retrieval import PlanningRetrievalService
 from .scene import draft_scene, outline_scene, route_scene
 from .service import PlanningService
@@ -337,13 +338,18 @@ def create_planning_router(
 
     @router.get("/api/planning/drafts/{draft_id}/scene")
     def draft_scene_api(draft_id: str, request: Request) -> dict:
-        """草稿预览场景：生成后即可看导图，不必先确认草稿。"""
+        """草稿预览场景：生成后即可看导图，不必先确认草稿。
+
+        读路径统一兜底剥除标题里的内部 id：存量草稿（剥除逻辑上线前生成）
+        也能正常展示，不阻塞预览。
+        """
         user = _user(request)
         with db.session() as sess:
             draft = sess.get(PlanningDraftRow, draft_id)
             if draft is None or draft.owner_user_id != user.user_id:
                 raise error("draft_not_found", status=404)
             content = load_json_field(draft.content_json, {})
+        strip_internal_ids_in_place(content)
         return draft_scene(draft.draft_kind, content)
 
     @router.get("/api/planning/viewstates/{target_kind}/{target_id}")

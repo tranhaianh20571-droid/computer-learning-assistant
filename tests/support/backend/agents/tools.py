@@ -49,7 +49,56 @@ def lesson_step_output_validator(ctx, output: LessonPlanCandidate) -> LessonPlan
     return output
 
 
-__all__ = ["lesson_step_issues", "lesson_step_output_validator", "make_search_materials_tool"]
+def planning_title_issues(candidate) -> List[str]:
+    """路线/大纲候选标题是否残留内部标识符（route_xxx 等），供生成侧回喂。
+
+    只检测不修改：剥除仍由 validate_*_candidate / strip_internal_ids_in_place
+    统一兜底，这里负责把问题以字段级清单还给模型自纠。
+    """
+    from ..planning.outputs import internal_id_residue
+
+    issues: List[str] = []
+    stages = getattr(candidate, "stages", None) or getattr(candidate, "units", None) or []
+    child_label = "courses" if hasattr(candidate, "stages") else "lessons"
+    for si, stage in enumerate(stages):
+        if internal_id_residue(stage.title):
+            issues.append(f"{type(candidate).__name__}.stages[{si}].title 含内部标识符，请改为纯自然语言标题")
+        children = getattr(stage, "courses", None) or getattr(stage, "lessons", None) or []
+        for ci, child in enumerate(children):
+            if internal_id_residue(child.title):
+                issues.append(f"{child_label}[{ci}].title 含内部标识符，请改为纯自然语言标题")
+            goal = getattr(child, "goal", "")
+            if goal and internal_id_residue(goal):
+                issues.append(f"{child_label}[{ci}].goal 含内部标识符，请改为自然语言描述")
+    return issues
+
+
+def planning_title_output_validator():
+    """挂到路线/大纲 Agent.output_validator：标题残留 ID → 有界 ModelRetry。
+
+    首次检出回喂字段级清单让模型自纠；再犯直接放行——剥除兜底
+    （validate_*_candidate / strip_internal_ids_in_place）保证落库干净，
+    静态/劣质适配器不会在重试上限内死循环拖垮整个生成。
+    """
+    fed_back = {"done": False}
+
+    def validator(ctx, output):
+        if fed_back["done"]:
+            return output
+        issues = planning_title_issues(output)
+        if issues:
+            fed_back["done"] = True
+            raise ModelRetry("；".join(issues))
+        return output
+
+    return validator
+
+
+__all__ = [
+    "lesson_step_issues", "lesson_step_output_validator",
+    "planning_title_issues", "planning_title_output_validator",
+    "make_search_materials_tool",
+]
 
 
 def make_search_materials_tool(retrieval_service, *, owner_user_id: str, material_ids):

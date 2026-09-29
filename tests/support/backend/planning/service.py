@@ -329,7 +329,7 @@ class PlanningService:
         adapter = self._require_model_adapter(state.owner_user_id, task_id)
         messages = self._compose_messages("route_generate", state, prompt, search_outcome)
         from ..agents.runner import run_structured_agent
-        from ..agents.tools import make_search_materials_tool
+        from ..agents.tools import make_search_materials_tool, planning_title_output_validator
 
         material_ids = load_json_field(state.material_ids_json, [])
         tools = [make_search_materials_tool(self.retrieval, owner_user_id=state.owner_user_id,
@@ -337,6 +337,7 @@ class PlanningService:
         run = run_structured_agent(
             adapter, RouteCandidate, messages,
             tool_name="submit_route_candidate", tools=tools,
+            output_validator=planning_title_output_validator(),
         )
         candidate = run.payload
         summary = validate_route_candidate(candidate)
@@ -377,7 +378,7 @@ class PlanningService:
         adapter = self._require_model_adapter(state.owner_user_id, task_id)
         messages = self._compose_messages("outline_generate", state, prompt, search_outcome)
         from ..agents.runner import run_structured_agent
-        from ..agents.tools import make_search_materials_tool
+        from ..agents.tools import make_search_materials_tool, planning_title_output_validator
 
         material_ids = load_json_field(state.material_ids_json, [])
         tools = [make_search_materials_tool(self.retrieval, owner_user_id=state.owner_user_id,
@@ -385,6 +386,7 @@ class PlanningService:
         run = run_structured_agent(
             adapter, OutlineCandidate, messages,
             tool_name="submit_outline_candidate", tools=tools,
+            output_validator=planning_title_output_validator(),
         )
         candidate = run.payload
         summary = validate_outline_candidate(candidate)
@@ -436,7 +438,8 @@ class PlanningService:
             external_note = f"（联网参考：{len(search_outcome.results)} 条外部来源）"
         user_content = (
             f"{template}\n学习主题：{self._target_label(state)} {external_note}\n"
-            "注意：所有 title 字段只写人类可读的标题，不得出现 route_、outline_、cfg_ 等内部标识符。"
+            "注意：所有 title/goal 字段只写自然语言，不得出现 route_、outline_、cfg_ 等内部标识符，"
+            "也不要加「第 N 阶段」「步骤 N」等编号前缀（阶段与先修结构本身已表达顺序）。"
         )
         intake = load_json_field(state.intake_json, None)
         if intake and intake.get("answers"):

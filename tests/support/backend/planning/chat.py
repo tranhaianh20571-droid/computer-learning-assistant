@@ -12,28 +12,97 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
+from collections import deque
+from dataclasses import replace
 from typing import Any, Optional
 
+from pydantic_ai import ModelRetry
 from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..agents.contracts import ChatInput
+from ..agents.roles import chat_agent
+from ..agents.runner import deps_for_source
 
 from ..logging_audit.db import Database
 from ..logging_audit.repositories import PgTaskEventStore
 from ..prompts.service import PromptService, PromptUnavailable
-from ..tasks.service import TaskService
+from ..tasks.service import Lease, LeaseError, TaskService
 from .errors import PlanningError, WaitStateSignal, error
 from .models import (
     ConversationRow,
     MessageRow,
     load_json_field,
 )
-from .model_runner import run_chat
 from .outputs import CONTEXT_BUDGET_DEFAULTS
 from .retrieval import PlanningRetrievalService, build_history_range, validate_material_ownership
 from .search import SearchGate, SearchOutcome
 
 CHAT_PROMPT_NAME = "chat_answer_v1"
 MAX_MESSAGE_LEN = 4000
+
+
+def _validate_chat_output(ctx, text: str) -> str:
+    text = text.strip()
+    if not text or len(text) > MAX_MESSAGE_LEN:
+        raise ModelRetry(f"Chat answer must contain 1 to {MAX_MESSAGE_LEN} characters.")
+    return text
+
+
+class _StreamBuffer:
+    """Bound producer memory and wake both sides immediately on cancellation."""
+
+    def __init__(self, limit: int = 16) -> None:
+        self.items = deque()
+        self.limit = limit
+        self.cancelled = threading.Event()
+        self.condition = threading.Condition()
+
+    def put(self, item) -> None:
+        with self.condition:
+            self.condition.wait_for(lambda: self.cancelled.is_set() or len(self.items) < self.limit)
+            if self.cancelled.is_set():
+                raise LeaseError("TASK_CANCELLED", "chat stream closed")
+            self.items.append(item)
+            self.condition.notify_all()
+
+    def get(self):
+        with self.condition:
+            self.condition.wait_for(lambda: self.cancelled.is_set() or bool(self.items))
+            if self.cancelled.is_set():
+                raise LeaseError("TASK_CANCELLED", "chat stream closed")
+            item = self.items.popleft()
+            self.condition.notify_all()
+            return item
+
+    def close(self) -> None:
+        with self.condition:
+            self.cancelled.set()
+            self.condition.notify_all()
+
+
+class _ChatStream:
+    def __init__(self, iterator, buffer):
+        self.iterator = iterator
+        self.buffer = buffer
+        self.lock = threading.RLock()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        with self.lock:
+            return next(self.iterator)
+
+    def cancel(self):
+        self.buffer.close()
+
+    def close(self):
+        self.cancel()
+        with self.lock:
+            self.iterator.close()
 
 
 class ChatService:
@@ -160,7 +229,11 @@ class ChatService:
             return {"task_id": task_id, "generation": generation, "deduped": True}
 
         with self.db.session() as sess:
-            conv = sess.get(ConversationRow, conversation_id)
+            conv = sess.execute(select(ConversationRow).where(
+                ConversationRow.conversation_id == conversation_id).with_for_update()
+                .execution_options(populate_existing=True)).scalar_one_or_none()
+            if conv is None or conv.owner_user_id != actor_id or conv.deleted_at is not None:
+                raise error("conversation_not_found", status=404)
             conv.generation += 1
             generation = conv.generation
             sess.add(
@@ -175,15 +248,10 @@ class ChatService:
             )
             sess.flush()
 
-        try:
-            binding = self.prompts.bind_for_task(task_id, CHAT_PROMPT_NAME, allow_fallback=True)
-        except PromptUnavailable as exc:
-            raise error("PROMPT_UNAVAILABLE", exc.reason, status=409)
-
         return self._answer(
             conversation_id, generation, task_id, actor_id,
             content=content, material_ids=material_ids,
-            use_search=use_search, search_decision=None, binding_id=binding["binding_id"],
+            use_search=use_search, search_decision=None, binding_id=None,
         )
 
     # ------------------------------------------------------------------
@@ -215,7 +283,11 @@ class ChatService:
             return {"conversation_id": conversation_id, "generation": generation,
                     "task_id": task_id, "material_ids": material_ids, "deduped": True}
         with self.db.session() as sess:
-            conv = sess.get(ConversationRow, conversation_id)
+            conv = sess.execute(select(ConversationRow).where(
+                ConversationRow.conversation_id == conversation_id).with_for_update()
+                .execution_options(populate_existing=True)).scalar_one_or_none()
+            if conv is None or conv.owner_user_id != actor_id or conv.deleted_at is not None:
+                raise error("conversation_not_found", status=404)
             conv.generation += 1
             generation = conv.generation
             sess.add(
@@ -245,83 +317,95 @@ class ChatService:
         meta = {"task_id": turn["task_id"], "generation": turn["generation"],
                 "conversation_id": conversation_id, "deduped": turn["deduped"]}
 
+        buffer = _StreamBuffer()
+
         def gen():
             accumulated = ""
+            lease = None
+            producer = None
+            finished = False
             try:
                 if turn["deduped"]:
                     yield {"type": "error", "error_code": "DUPLICATE_REQUEST"}
                     return
-                try:
-                    binding = self.prompts.bind_for_task(turn["task_id"], CHAT_PROMPT_NAME,
-                                                         allow_fallback=True)
-                except PromptUnavailable as exc:
-                    yield {"type": "error", "error_code": "PROMPT_UNAVAILABLE"}
-                    self.events.record(turn["task_id"], stage="generate", status="failed",
-                                       error_code="PROMPT_UNAVAILABLE")
-                    return
-                retrieval = self.retrieval.assemble(
-                    owner_user_id=actor_id, material_ids=turn["material_ids"], query=content)
-                history_rows = self._history(conversation_id, actor_id, turn["generation"])
-                kept, history_range = build_history_range(
-                    history_rows, CONTEXT_BUDGET_DEFAULTS["max_history_messages"])
-                external_refs: list[dict] = []
-                if use_search:
+                lease = self._claim(turn["task_id"])
+                self.prompts.bind_for_task(turn["task_id"], CHAT_PROMPT_NAME, allow_fallback=True)
+                messages, _, external_refs = self._context(
+                    conversation_id, turn["generation"], turn["task_id"], actor_id,
+                    content=content.strip(), material_ids=turn["material_ids"],
+                    use_search=use_search, search_decision=None)
+                source, deps = self._source(actor_id, conversation_id, turn["generation"], lease)
+                check_state = deps.check_state
+
+                def check_stream():
+                    if buffer.cancelled.is_set():
+                        raise LeaseError("TASK_CANCELLED", "chat stream closed")
+                    if check_state:
+                        check_state()
+
+                deps = replace(deps, check_state=check_stream)
+
+                def on_delta(text, reset=False):
+                    buffer.put(("reset" if reset else "delta", text))
+
+                def produce():
                     try:
-                        outcome = self._search(actor_id, turn["task_id"], content, None)
-                        if outcome is not None:
-                            external_refs = outcome.external_refs
-                    except WaitStateSignal:
-                        yield {"type": "wait", "wait_state": "awaiting_search_decision"}
+                        result = chat_agent.answer(source, ChatInput.from_messages(messages), deps,
+                            output_validator=_validate_chat_output, on_delta=on_delta)
+                        buffer.put(("result", result))
+                    except Exception as exc:
+                        try:
+                            buffer.put(("error", exc))
+                        except LeaseError:
+                            pass
+
+                producer = threading.Thread(target=produce, daemon=True,
+                    name=f"chat-{turn['task_id']}")
+                producer.start()
+                while True:
+                    kind, value = buffer.get()
+                    if kind == "reset":
+                        if accumulated:
+                            accumulated = ""
+                            yield {"type": "delta", "text": "", "reset": True}
+                    elif kind == "delta":
+                        accumulated = (accumulated + value)[:MAX_MESSAGE_LEN + 1]
+                        yield {"type": "delta", "text": value}
+                    elif kind == "error":
+                        raise value
+                    else:
+                        # Only a complete AgentRunResult, never delta text, is publishable.
+                        answer = value.payload
+                        msg = self._publish_answer(conversation_id, turn["generation"],
+                            actor_id, lease, answer)
+                        finished = True
+                        yield {"type": "done", "message_id": msg["message_id"],
+                            "content": answer, "external_result_count": len(external_refs)}
                         return
-                manifest = self.retrieval.save_manifest(
-                    task_id=turn["task_id"], retrieval=retrieval,
-                    history_range=history_range, extra_refs=external_refs)
-                _ = (kept, manifest, binding)
-
-                adapter = (self.model_adapter_factory(actor_id, turn["task_id"])
-                           if self.model_adapter_factory else None)
-                if adapter is None:
-                    self.events.record(turn["task_id"], stage="generate", status="failed",
-                                       error_code="MODEL_CAPABILITY_UNAVAILABLE")
-                    yield {"type": "error", "error_code": "MODEL_CAPABILITY_UNAVAILABLE"}
-                    return
-                messages = [
-                    {"role": "system", "content": "你是学习助手，用中文简洁回答。"},
-                    {"role": "user", "content": content},
-                ]
-                if hasattr(adapter, "stream"):
-                    for delta in adapter.stream(messages, plain_text=True):
-                        accumulated += str(delta)
-                        yield {"type": "delta", "text": str(delta)}
-                else:
-                    answer = run_chat(adapter, messages, max_len=MAX_MESSAGE_LEN)
-                    accumulated = answer
-                    yield {"type": "delta", "text": answer}
-                if not accumulated.strip():
-                    self.events.record(turn["task_id"], stage="generate", status="failed",
-                                       error_code="MODEL_CAPABILITY_UNAVAILABLE")
-                    yield {"type": "error", "error_code": "MODEL_CAPABILITY_UNAVAILABLE"}
-                    return
-                msg = self._record_answer(conversation_id, turn["generation"],
-                                          status="completed", content=accumulated)
-                self.events.record(turn["task_id"], stage="generate", status="succeeded")
-                yield {"type": "done", "message_id": msg["message_id"],
-                       "content": accumulated,
-                       "external_result_count": len(external_refs)}
             except WaitStateSignal:
+                self.tasks.submit_result(lease, stage="generate", status="partial",
+                    error_code="AWAITING_SEARCH_DECISION", preserve_partial=True)
                 yield {"type": "wait", "wait_state": "awaiting_search_decision"}
-            except PlanningError as exc:
-                self.events.record(turn["task_id"], stage="generate", status="failed",
-                                   error_code=exc.code)
-                yield {"type": "error", "error_code": exc.code}
             except GeneratorExit:
-                # 客户端断开：已产出文本以 interrupted 状态保留（留历史、不覆盖）
-                if accumulated.strip():
-                    self._record_answer(conversation_id, turn["generation"],
-                                        status="interrupted", content=accumulated)
+                buffer.close()
+                if lease is not None and not finished:
+                    self._interrupt(conversation_id, turn["generation"], actor_id,
+                        lease, accumulated)
                 raise
+            except Exception as exc:
+                if buffer.cancelled.is_set():
+                    if lease is not None and not finished:
+                        self._interrupt(conversation_id, turn["generation"], actor_id,
+                            lease, accumulated)
+                    return
+                controlled = self._fail(lease, exc)
+                yield {"type": "error", "error_code": controlled.code}
+            finally:
+                buffer.close()
+                if producer is not None:
+                    producer.join(timeout=1)
 
-        return meta, gen()
+        return meta, _ChatStream(gen(), buffer)
 
     def resume_message(
         self,
@@ -335,7 +419,7 @@ class ChatService:
             raise error("invalid_field", "decision must be retry | offline_continue")
         with self.db.session() as sess:
             conv = sess.get(ConversationRow, conversation_id)
-            if conv is None or conv.owner_user_id != actor_id:
+            if conv is None or conv.owner_user_id != actor_id or conv.deleted_at is not None:
                 raise error("conversation_not_found", status=404)
             generation = conv.generation
             row = (
@@ -363,15 +447,12 @@ class ChatService:
             stage="generate",
         )
         task_id = created["task_id"]
-        try:
-            binding = self.prompts.bind_for_task(task_id, CHAT_PROMPT_NAME, allow_fallback=True)
-            binding_id: Optional[str] = binding["binding_id"]
-        except PromptUnavailable:
-            binding_id = None
+        if created.get("deduped"):
+            return {"task_id": task_id, "generation": generation, "deduped": True}
         return self._answer(
             conversation_id, generation, task_id, actor_id,
             content=content, material_ids=material_ids,
-            use_search=True, search_decision=decision, binding_id=binding_id,
+            use_search=True, search_decision=decision, binding_id=None,
         )
 
     # ------------------------------------------------------------------
@@ -388,53 +469,129 @@ class ChatService:
         search_decision: Optional[str],
         binding_id: Optional[str],
     ) -> dict:
-        # 上下文组装：manifest（不含正文）+ 历史范围
-        retrieval = self.retrieval.assemble(
-            owner_user_id=actor_id, material_ids=material_ids, query=content
-        )
-        history_rows = self._history(conversation_id, actor_id, generation)
-        kept, history_range = build_history_range(
-            history_rows, CONTEXT_BUDGET_DEFAULTS["max_history_messages"]
-        )
-        external_refs: list[dict] = []
-        if use_search:
-            outcome = self._search(actor_id, task_id, content, search_decision)
-            if outcome is not None:
-                external_refs = outcome.external_refs
-        manifest = self.retrieval.save_manifest(
-            task_id=task_id,
-            retrieval=retrieval,
-            history_range=history_range,
-            extra_refs=external_refs,
-        )
-
-        adapter = self.model_adapter_factory(actor_id, task_id) if self.model_adapter_factory else None
-        if adapter is None:
-            self.events.record(task_id, stage="generate", status="failed",
-                               error_code="MODEL_CAPABILITY_UNAVAILABLE")
-            return {"task_id": task_id, "generation": generation, "message": None,
-                    "error_code": "MODEL_CAPABILITY_UNAVAILABLE",
-                    "manifest_id": manifest["manifest_id"]}
-        messages = [
-            {"role": "system", "content": "你是学习助手，用中文简洁回答。"},
-            {"role": "user", "content": content},
-        ]
-        # S1b：经 AgentRunner（同步形态冻结，见 agents/runner.py docstring / R3）。
-        # 流式路径（stream_answer 的 adapter.stream）保留直连：delta 等价零风险
-        # 优先于"全走 Agent"，偏差记入方案 §9。
-        from ..agents.runner import run_chat_agent
-
-        answer = run_chat_agent(adapter, messages, max_len=MAX_MESSAGE_LEN)
-        answer_message = self._record_answer(conversation_id, generation, status="completed", content=answer)
-        self.events.record(task_id, stage="generate", status="succeeded")
+        lease = self._claim(task_id)
+        manifest = None
+        try:
+            if binding_id is None:
+                binding_id = self.prompts.bind_for_task(task_id, CHAT_PROMPT_NAME,
+                    allow_fallback=True)["binding_id"]
+            messages, manifest, external_refs = self._context(
+                conversation_id, generation, task_id, actor_id, content=content,
+                material_ids=material_ids, use_search=use_search, search_decision=search_decision)
+            source, deps = self._source(actor_id, conversation_id, generation, lease)
+            result = chat_agent.answer(source, ChatInput.from_messages(messages), deps,
+                output_validator=_validate_chat_output)
+            answer_message = self._publish_answer(conversation_id, generation, actor_id,
+                lease, result.payload)
+        except WaitStateSignal:
+            self.tasks.submit_result(lease, stage="generate", status="partial",
+                error_code="AWAITING_SEARCH_DECISION", preserve_partial=True)
+            raise
+        except Exception as exc:
+            controlled = self._fail(lease, exc)
+            if controlled.code == "MODEL_CAPABILITY_UNAVAILABLE":
+                return {"task_id": task_id, "generation": generation, "message": None,
+                    "error_code": controlled.code,
+                    "manifest_id": manifest["manifest_id"] if manifest else None}
+            raise controlled from exc
         return {
-            "task_id": task_id,
-            "generation": generation,
-            "message": answer_message,
-            "manifest_id": manifest["manifest_id"],
-            "prompt_binding_id": binding_id,
+            "task_id": task_id, "generation": generation, "message": answer_message,
+            "manifest_id": manifest["manifest_id"], "prompt_binding_id": binding_id,
             "external_result_count": len(external_refs),
         }
+
+    def _claim(self, task_id: str) -> Lease:
+        return self.tasks.claim(task_id, lease_owner=f"chat_{uuid.uuid4().hex}",
+            lease_seconds=3600, allow_reclaim_active=False)
+
+    def _context(self, conversation_id, generation, task_id, actor_id, *, content,
+                 material_ids, use_search, search_decision):
+        binding = self.prompts.resolve_for_task(task_id, CHAT_PROMPT_NAME)
+        retrieval = self.retrieval.assemble(owner_user_id=actor_id,
+            material_ids=material_ids, query=content)
+        kept, history_range = build_history_range(self._history(conversation_id, actor_id, generation),
+            CONTEXT_BUDGET_DEFAULTS["max_history_messages"])
+        outcome = self._search(actor_id, task_id, content, search_decision) if use_search else None
+        external_refs = outcome.external_refs if outcome is not None else []
+        manifest = self.retrieval.save_manifest(task_id=task_id, retrieval=retrieval,
+            history_range=history_range, extra_refs=external_refs)
+        context = {"material_excerpts": retrieval.excerpts,
+            "retrieval_status": list(retrieval.truncation_reasons),
+            "external_results": outcome.results if outcome is not None else []}
+        messages = [{"role": "system", "content": binding["template_snapshot"]},
+            *kept, {"role": "user", "content": "Context data:\n" +
+                json.dumps(context, ensure_ascii=False) + "\n\nQuestion:\n" + content}]
+        return messages, manifest, external_refs
+
+    def _check_conversation(self, session, conversation_id, generation, actor_id):
+        conv = session.execute(select(ConversationRow).where(
+            ConversationRow.conversation_id == conversation_id).with_for_update()
+            .execution_options(populate_existing=True)).scalar_one_or_none()
+        if conv is None or conv.owner_user_id != actor_id or conv.deleted_at is not None:
+            raise error("STALE_RESULT_DISCARDED", status=409)
+        if conv.generation != generation:
+            raise error("STALE_RESULT_DISCARDED", status=409)
+
+    def _source(self, actor_id, conversation_id, generation, lease):
+        with self.db.session() as sess:
+            self.tasks.validate_lease(lease, actor_id=actor_id, session=sess)
+            self._check_conversation(sess, conversation_id, generation, actor_id)
+        source = self.model_adapter_factory(actor_id, lease.task_id) if self.model_adapter_factory else None
+        if source is None:
+            raise error("MODEL_CAPABILITY_UNAVAILABLE")
+        from ..agents.task_binding import bind_task_deps
+        deps = deps_for_source(source)
+        if getattr(source, "agent_deps", None) is None:
+            deps = bind_task_deps(self.db, source, actor_id=actor_id, task_id=lease.task_id)
+        original_check = deps.check_state
+
+        def check():
+            with self.db.session() as sess:
+                self.tasks.validate_lease(lease, actor_id=actor_id, session=sess)
+                self._check_conversation(sess, conversation_id, generation, actor_id)
+            if original_check:
+                original_check()
+
+        return source, replace(deps, check_state=check, omit_content_trace=True)
+
+    def _publish_answer(self, conversation_id, generation, actor_id, lease, answer):
+        message = {}
+
+        def publish(sess):
+            self._check_conversation(sess, conversation_id, generation, actor_id)
+            message.update(self._record_answer(conversation_id, generation,
+                status="completed", content=answer, session=sess))
+
+        submitted = self.tasks.submit_result(lease, stage="generate", status="succeeded", publish=publish)
+        if not submitted["accepted"]:
+            raise error("STALE_RESULT_DISCARDED", status=409)
+        return message
+
+    def _fail(self, lease, exc):
+        from ..agents.limits import to_controlled_error
+        if isinstance(exc, PromptUnavailable):
+            controlled = error("PROMPT_UNAVAILABLE", status=409)
+        elif isinstance(exc, LeaseError) or getattr(exc, "code", None) == "TASK_CANCELLED":
+            controlled = error("STALE_RESULT_DISCARDED", status=409)
+        else:
+            controlled = to_controlled_error(exc)
+        if lease is not None:
+            self.tasks.submit_result(lease, stage="generate", status="failed",
+                error_code=controlled.code)
+        return controlled
+
+    def _interrupt(self, conversation_id, generation, actor_id, lease, content):
+        def publish(sess):
+            self._check_conversation(sess, conversation_id, generation, actor_id)
+            if content.strip() and len(content) <= MAX_MESSAGE_LEN:
+                self._record_answer(conversation_id, generation, status="interrupted",
+                    content=content, session=sess)
+        try:
+            self.tasks.submit_result(lease, stage="generate", status="failed",
+                error_code="TASK_CANCELLED", publish=publish)
+        except PlanningError:
+            self.tasks.submit_result(lease, stage="generate", status="failed",
+                error_code="STALE_RESULT_DISCARDED", diagnostics_only=True)
 
     def _search(self, actor_id: str, task_id: str, query: str, decision: Optional[str]) -> Optional[SearchOutcome]:
         adapter = self.search_adapter_factory(actor_id, task_id) if self.search_adapter_factory else None
@@ -462,27 +619,20 @@ class ChatService:
             )
             return [{"role": r.role, "content": r.content_ref} for r in rows]
 
-    def _record_answer(self, conversation_id: str, generation: int, *, status: str, content: str) -> dict:
-        with self.db.session() as sess:
-            row = MessageRow(
-                message_id=f"msg_{uuid.uuid4().hex[:12]}",
-                conversation_id=conversation_id,
-                generation=generation,
-                role="assistant",
-                content_ref=content,
-                status=status,
-            )
-            sess.add(row)
-            sess.flush()
-            view = {
-                "message_id": row.message_id,
-                "generation": generation,
-                "role": "assistant",
-                "content": content,
-                "status": status,
-            }
-            sess.commit()
-            return view
+    def _record_answer(self, conversation_id: str, generation: int, *, status: str,
+                       content: str, session: Optional[Session] = None) -> dict:
+        if session is None:
+            with self.db.session() as sess:
+                return self._record_answer(conversation_id, generation,
+                    status=status, content=content, session=sess)
+        row = MessageRow(
+            message_id=f"msg_{uuid.uuid4().hex[:12]}",
+            conversation_id=conversation_id, generation=generation, role="assistant",
+            content_ref=content, status=status)
+        session.add(row)
+        session.flush()
+        return {"message_id": row.message_id, "generation": generation,
+            "role": "assistant", "content": content, "status": status}
 
 
 __all__ = ["ChatService", "CHAT_PROMPT_NAME"]

@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    watch: { ignored: ["**/*.tmpdir/**"] },
     proxy: {
       "/api": "http://127.0.0.1:8000",
       "/tasks": "http://127.0.0.1:8000",

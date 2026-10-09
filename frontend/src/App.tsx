@@ -1,13 +1,14 @@
 import { Component, useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { useHashRoute } from "./hooks/useHashRoute";
-import { useSession } from "./hooks/useSession";
+import { loadGuest, useSession } from "./hooks/useSession";
 import { AUTH_LEFT, LoginView, RegisterView, ResetView, VerifyView } from "./views/auth/AuthPages";
 import AdminView from "./views/AdminView";
 import CanvasView from "./views/CanvasView";
 import CoursesPage from "./views/CoursesPage";
 import TasksView from "./views/TasksView";
 import CapabilityConfig from "./CapabilityConfig";
+import Dialog from "./ui/Dialog";
 import PlanningView from "./PlanningView";
 import ChatView from "./ChatView";
 import TaskEntry from "./TaskEntry";
@@ -16,6 +17,8 @@ import MaterialsPage from "./MaterialsPage";
 import LectureView from "./LectureView";
 import "./tokens.css";
 import "./App.css";
+
+const AUTH_DISABLED = import.meta.env.DEV && import.meta.env.VITE_DISABLE_AUTH === "1";
 
 /**
  * 应用骨架（对齐设计规范 ds-1「工程制图 / 技术手册」，v2 布局收敛）：
@@ -69,6 +72,8 @@ class PageErrorBoundary extends Component<{ children: ReactNode }, { error: stri
 export default function App() {
   const { me, setMe, booted } = useSession();
   const { route, navigate } = useHashRoute();
+  const [routePath, routeQuery = ""] = route.split("?");
+  const query = new URLSearchParams(routeQuery);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pendingCount, setPendingCount] = useState(0);
@@ -93,18 +98,12 @@ export default function App() {
     setNotice("");
   }, [route]);
 
-  // 导图步骤提示自动消失：浮层不占文档流，短暂停留后清除（失败提示保留更久）
+  // 导图步骤提示自动消失：浮层不占文档流，短暂停留后清除（成功提示足够）
   useEffect(() => {
     if (!mapMode || !notice) return;
     const t = window.setTimeout(() => setNotice(""), 4000);
     return () => window.clearTimeout(t);
   }, [mapMode, notice]);
-
-  useEffect(() => {
-    if (!mapMode || !error) return;
-    const t = window.setTimeout(() => setError(""), 12000);
-    return () => window.clearTimeout(t);
-  }, [mapMode, error]);
 
   const go = useCallback((path: string) => {
     setError("");
@@ -149,6 +148,11 @@ export default function App() {
   }, [closeSide]);
 
   const isAuthRoute = ["/login", "/register", "/verify", "/reset"].includes(route);
+
+  useEffect(() => {
+    if (AUTH_DISABLED && isAuthRoute) navigate("/home");
+  }, [isAuthRoute, navigate]);
+
   if (!booted) return <div className="auth"><div className="auth-r"><p className="muted">加载中…</p></div></div>;
 
   if (isAuthRoute) {
@@ -185,12 +189,14 @@ export default function App() {
   // 讲次教学工作区：全屏播放模式（无侧栏/顶栏骨架）
   if (route.startsWith("/lecture/")) {
     return (
+      <PageErrorBoundary key={route}>
       <LectureView
         conversationId={route.slice("/lecture/".length)}
         onErr={setError}
         onOk={setNotice}
         go={go}
       />
+      </PageErrorBoundary>
     );
   }
 
@@ -259,14 +265,15 @@ export default function App() {
           </div>
         )}
         <div className="side-foot">
-          {me ? (
+          {me && !me.is_guest ? (
             <>
               <button className="nav-a" onClick={() => go("/capabilities")}>设置</button>
               <span className="who">{me.email}</span>
               <button
                 onClick={async () => {
                   try { await api.logout(); } catch { /* ignore */ }
-                  setMe(null);
+                  // 退出后回到访客身份（访客 Cookie 未清除，之前的访客数据仍可访问）
+                  setMe(await loadGuest());
                   go("/login");
                 }}
               >
@@ -275,7 +282,8 @@ export default function App() {
             </>
           ) : (
             <>
-              <span className="who">未登录</span>
+              {me && <button className="nav-a" onClick={() => go("/capabilities")}>设置</button>}
+              <span className="who">{me ? "访客模式" : "未登录"}</span>
               <button onClick={() => go("/login")}>登录</button>
               <button onClick={() => go("/register")}>申请加入</button>
             </>
@@ -305,11 +313,9 @@ export default function App() {
         </header>
         <main className="page">
           <PageErrorBoundary key={route}>
-          {error && (mapMode ? (
-            <div className="error toast" role="alert" onClick={() => setError("")} title="点击关闭">{error}</div>
-          ) : (
-            <div className="error" role="alert" style={{ marginBottom: "var(--s4)" }}>{error}</div>
-          ))}
+          {error && (
+            <Dialog title="出错了" onClose={() => setError("")}>{error}</Dialog>
+          )}
           {notice && (mapMode ? (
             <div className="notice toast" role="status" onClick={() => setNotice("")} title="点击关闭">{notice}</div>
           ) : (
@@ -334,20 +340,29 @@ export default function App() {
             }} />
           )}
           {route === "/canvas" && <CanvasView />}
-          {route === "/capabilities" && me && (
-            <CapabilityConfig isAdmin={me.is_admin} onErr={setError} onOk={setNotice} />
+          {route === "/capabilities" && (
+            me ? (
+              <CapabilityConfig isAdmin={me.is_admin} onErr={setError} onOk={setNotice} />
+            ) : (
+              <div className="note note-info" role="status">
+                <span className="tag">登录</span>
+                <div className="tt">请先登录后管理能力配置</div>
+                <div>模型、语音和连接器配置只对登录用户开放。</div>
+                <div className="acts"><button className="btn btn-pri btn-sm" onClick={() => go("/login")}>去登录</button></div>
+              </div>
+            )
           )}
           {route === "/planning" && (
-            <PlanningView onErr={setError} onOk={setNotice} needLogin={!me} go={go} onMapMode={onMapMode} />
+            <PlanningView key={me?.user_id || "anonymous"} ownerId={me?.user_id || ""} onErr={setError} onOk={setNotice} needLogin={!me} go={go} onMapMode={onMapMode} />
           )}
           {route === "/chat" && (
             <ChatView onErr={setError} onOk={setNotice} needLogin={!me} />
           )}
           {route.startsWith("/route/") && (
-            <RouteOverview routeId={route.slice("/route/".length)} onErr={setError} go={go} />
+            <RouteOverview routeId={routePath.slice("/route/".length)} versionId={query.get("version_id") || undefined} search={query.get("q") || ""} onErr={setError} go={go} />
           )}
           {route.startsWith("/course/") && (
-            <CourseOverview courseId={route.slice("/course/".length)} onErr={setError} onOk={setNotice} go={go} />
+            <CourseOverview courseId={routePath.slice("/course/".length)} context={routeQuery} onErr={setError} onOk={setNotice} go={go} />
           )}
           </PageErrorBoundary>
         </main>

@@ -20,13 +20,17 @@ fileConfig(config.config_file_name)
 # target_metadata = None
 
 from app.models import SQLModel  # noqa
-from app.core.config import settings # noqa
+from app.infrastructure.config import settings # noqa
 from app.logging_audit.models import Base as LoggingBase  # noqa
 import app.tasks.service  # noqa: F401 — register task tables
+import app.agents.task_binding  # noqa: F401 — register durable agent budgets
 import app.prompts.service  # noqa: F401 — register prompt tables
 import app.slice1.models  # noqa: F401 — register slice1 capability/connector tables
 import app.materials.models  # noqa: F401 — register slice2 materials/parse/index tables
+import app.planning.feature_models  # noqa: F401 — register planning dialogue/cover tables
 import app.planning.models  # noqa: F401 — register slice3 planning/chat/manifest tables
+import app.teaching.learning_models  # noqa: F401 — pedagogy and private assessments
+import app.teaching.authorization  # noqa: F401 - explicit lesson consent
 import app.teaching.models  # noqa: F401 — register slice4 teaching/playback tables
 import app.cleanup.models  # noqa: F401 — register slice5 cleanup/backup tables
 

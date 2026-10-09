@@ -4,11 +4,11 @@
 - 节点/文本/箭头元素 ID 由业务对象 ID 稳定派生（可双向映射）；
 - 横向缩进树布局（tidy tree）：根在左、子级右缩、父节点按子树垂直居中；
   同层子节点按先修关系拓扑稳定排序（Kahn 稳定变体，只影响画布纵序）；
-- 归属关系用浅色肘线（line）表达；先修边用虚线箭头独立表达：
+- 归属关系用黑色肘线（line）表达；先修边保留独立声明，浏览默认隐藏：
   同列无遮挡走直线，其余经右侧外环走廊正交折线，不穿节点；
 - 画布坐标不是业务顺序来源：业务排序只看 order_index；
-- 文本按 T02 锁定常数预换行（CJK 1.0×fontSize / ASCII 0.6×fontSize），
-  标题/目标双字号（16/12），course/lesson 卡片为白底圆角 + 层级色 accent 条。
+- 文本按保守常数预换行，SVG 展示层按实际楷体/打印字体测量重新换行与排布；
+  标题/目标双字号（16/12），所有节点白底黑边黑字，不使用彩色 accent 条。
 """
 
 from __future__ import annotations
@@ -20,10 +20,9 @@ from typing import Any, Optional
 from .errors import error
 from .outputs import SCENE_ELEMENT_WHITELIST
 
-# 字体度量常数为 T02 锁定值（与 scripts/slice3_font_spike.mjs / evidence 文档一致）；
-# 几何常数为 v2 横向缩进树布局所用
+# 服务端度量仅用于初始布局；ADR-027 的 SVG 展示以实际系统打印字体复核。
 LAYOUT = {
-    "font_family": 1,
+    "font_family": 2,
     "font_size": 16,
     "desc_size": 12,
     "line_height": 1.25,
@@ -37,25 +36,25 @@ LAYOUT = {
     "margin_x": 48, "margin_y": 48,
     "max_lines": 2,
     "desc_max_lines": 2,
-    "accent_w": 5,
+    "accent_w": 0,
     "min_h_parent": 48,
     "min_h_child": 56,
     "lane_gap": 28,
     "lane_step": 12,
 }
 _CJK_RE = re.compile(r"[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef\u3000-\u303f]")
-# 卡片化配色：stage/unit 为浅底分组头，course/lesson 为白卡 + accent 条
+# ADR-027：所有层级统一黑白。
 _COLORS = {
-    "stage": {"fill": "#eef0ff", "accent": "#7a5af8"},
-    "course": {"fill": "#ffffff", "accent": "#e8930c"},
-    "unit": {"fill": "#e9f7f0", "accent": "#12946a"},
-    "lesson": {"fill": "#ffffff", "accent": "#2f6fdb"},
-    "card_stroke": "#d7dce3",
-    "parent_stroke": "#c9cfdd",
-    "title": "#1b1b1f",
-    "desc": "#6b7280",
-    "link": "#c3c8d0",
-    "prereq": "#8a8f98",
+    "stage": {"fill": "#ffffff", "accent": "#000000"},
+    "course": {"fill": "#ffffff", "accent": "#000000"},
+    "unit": {"fill": "#ffffff", "accent": "#000000"},
+    "lesson": {"fill": "#ffffff", "accent": "#000000"},
+    "card_stroke": "#000000",
+    "parent_stroke": "#000000",
+    "title": "#000000",
+    "desc": "#000000",
+    "link": "#000000",
+    "prereq": "#000000",
 }
 
 
@@ -114,15 +113,16 @@ def _text_element(
         "fontFamily": LAYOUT["font_family"],
         "lineHeight": LAYOUT["line_height"],
         "strokeColor": color or _COLORS["title"],
+        "customData": {"business_id": business_id, "role": suffix},
     }
 
 
 def _node(
     business_id: str, kind: str, x: float, y: float, w: float, title: str, goal: str = ""
 ) -> tuple[list[dict], int]:
-    """卡片节点：圆角白卡 + 左侧层级 accent 条 + 标题/目标双字号文本。
+    """卡片节点：圆角白卡、黑边黑字、标题/目标双字号文本。
 
-    stage/unit 为浅底分组头（无 accent 条）。返回 (元素列表, 节点高度)，
+    返回 (元素列表, 节点高度)，
     高度随文本行数确定，供纵向堆叠使用。
     """
     pad = LAYOUT["node_inner_pad"]
@@ -148,10 +148,13 @@ def _node(
             "fillStyle": "solid",
             "strokeWidth": 1,
             "roundness": {"type": 2, "value": 8},
+            "roughness": 0,
+            "customData": {"business_id": business_id, "role": "node", "kind": kind,
+                           "title": title, "goal": goal},
         }
     ]
     text_x = x + pad + accent_w
-    if not is_parent:
+    if accent_w:
         elements.append(
             {
                 "type": "rectangle",
@@ -308,20 +311,25 @@ def _hier_scene(
         cursor = y
         for c in ordered_children(node, depth):
             boxes.append(place(c, depth + 1, cursor))
-            cursor = boxes[-1]["y"] + boxes[-1]["h"] + LAYOUT["row_gap"]
+            cursor = boxes[-1]["bottom"] + LAYOUT["row_gap"]
         _, ph = _node(node["id"], kind, x, 0, w, node.get("title", ""), node.get("goal", ""))
         if boxes:
-            span_top = boxes[0]["y"]
-            span_bottom = boxes[-1]["y"] + boxes[-1]["h"]
+            span_top = y
+            span_bottom = boxes[-1]["bottom"]
             py = round((span_top + span_bottom) / 2 - ph / 2)
         else:
             py = y
             span_bottom = y + ph
         els, _ = _node(node["id"], kind, x, py, w, node.get("title", ""), node.get("goal", ""))
+        for element in els:
+            if element.get("customData"):
+                element["customData"]["path"] = node.get("path", node["id"])
         elements.extend(els)
         positions[node["id"]] = {"x": x, "y": py, "w": w, "h": ph}
         for b in boxes:
-            elements.append(_belonging_link(b["id"], positions[node["id"]], positions[b["id"]]))
+            link = _belonging_link(b["id"], positions[node["id"]], positions[b["id"]])
+            link["customData"] = {"role": "hierarchy", "parent_id": node["id"], "child_id": b["id"]}
+            elements.append(link)
         return {"id": node["id"], "y": py, "h": ph, "bottom": max(span_bottom, py + ph)}
 
     y = LAYOUT["margin_y"]
@@ -345,28 +353,33 @@ def route_scene(route_version: dict) -> dict:
     阶段仅承载分组数据不单独渲染；课程跨阶段按原顺序拍平。
     """
     root_children = []
-    for s in route_version.get("stages", []):
-        for c in s.get("courses", []):
+    lesson_pairs = []
+    for si, s in enumerate(route_version.get("stages", [])):
+        for ci, c in enumerate(s.get("courses", [])):
+            path = c.get("path") or f"stage_{si}course_{ci}"
             units = []
             for k, u in enumerate(c.get("units") or []):
                 units.append({
                     "id": u.get("id") or f"{c['id']}u{k}",
+                    "path": f"{path}unit_{k}",
                     "title": u.get("title", ""),
                     "children": [
                         {
                             "id": l.get("id") or f"{c['id']}u{k}l{j}",
+                            "path": f"{path}unit_{k}lesson_{j}",
                             "title": l.get("title", ""),
                             "goal": l.get("goal", ""),
                         }
                         for j, l in enumerate(u.get("lessons") or [])
                     ],
                 })
+            lesson_pairs.extend((e.get("from"), e.get("to")) for e in c.get("prerequisites", []))
             root_children.append({
-                "id": c["id"], "title": c.get("title", ""), "goal": c.get("goal", ""),
+                "id": c["id"], "path": path, "title": c.get("title", ""), "goal": c.get("goal", ""),
                 "children": units,
             })
     root = {"id": "route_root", "title": route_version.get("title", "") or "学习路线", "children": root_children}
-    pairs = [(e.get("from"), e.get("to")) for e in route_version.get("prerequisites", [])]
+    pairs = [(e.get("from"), e.get("to")) for e in route_version.get("prerequisites", [])] + lesson_pairs
     return _hier_scene(
         [root], ["stage", "course", "unit", "lesson"],
         [LAYOUT["stage_w"], LAYOUT["course_w"], LAYOUT["unit_w"], LAYOUT["lesson_w"]],
@@ -379,13 +392,13 @@ def outline_scene(outline_version: dict) -> dict:
     {title,units:[{id,title,lessons:[{id,title,goal?}]}],prerequisites:[{from,to}]}。"""
     units = [
         {
-            "id": u["id"], "title": u.get("title", ""),
+            "id": u["id"], "path": f"unit_{ui}", "title": u.get("title", ""),
             "children": [
-                {"id": l["id"], "title": l.get("title", ""), "goal": l.get("goal", "")}
-                for l in u.get("lessons", [])
+                {"id": l["id"], "path": f"unit_{ui}lesson_{li}", "title": l.get("title", ""), "goal": l.get("goal", "")}
+                for li, l in enumerate(u.get("lessons", []))
             ],
         }
-        for u in outline_version.get("units", [])
+        for ui, u in enumerate(outline_version.get("units", []))
     ]
     root = {"id": "course_root", "title": outline_version.get("title", "") or "课程", "children": units}
     pairs = [(e.get("from"), e.get("to")) for e in outline_version.get("prerequisites", [])]
@@ -422,8 +435,13 @@ def draft_scene(kind: str, content: dict, title: str = "") -> dict:
                         for l, lesson in enumerate(unit.get("lessons") or [])
                     ]
                     units.append({"id": ukey, "title": unit.get("title", ""), "lessons": lessons})
+                lesson_keys = [l["id"] for u in units for l in u["lessons"]]
+                lesson_edges = [{"from": lesson_keys[e["from_index"]], "to": lesson_keys[e["to_index"]]}
+                                for e in course.get("prerequisites", [])
+                                if 0 <= e["from_index"] < len(lesson_keys) and 0 <= e["to_index"] < len(lesson_keys)]
                 root_children.append({
-                    "id": key, "title": course.get("title", ""), "goal": course.get("goal", ""),
+                    "prerequisites": lesson_edges,
+                    "id": key, "path": key, "title": course.get("title", ""), "goal": course.get("goal", ""),
                     "units": units,
                 })
         root_title = content.get("title") or title or "学习路线"

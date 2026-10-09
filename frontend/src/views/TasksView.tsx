@@ -46,7 +46,7 @@ export default function TasksView({ me, onErr, onOk, onNeedLogin }: any) {
       <div className="phead">
         <span className="kicker">任务</span>
         <div className="row"><h1 className="h1">任务状态</h1></div>
-        <p className="lede">{me ? `已登录：${me.email}` : "未登录。请先登录后再创建任务。"}</p>
+        <p className="lede">{me ? (me.is_guest ? "访客模式" : `已登录：${me.email}`) : "未登录。请先登录后再创建任务。"}</p>
       </div>
       {!me && <button className="btn btn-pri" onClick={onNeedLogin}>去登录</button>}
       <section className="card stack">

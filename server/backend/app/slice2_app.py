@@ -40,21 +40,10 @@ def create_slice2_app(
     app.state.slice2 = state
 
     def _resolve_user(request: Request):
-        raw = request.headers.get("Authorization", "")
-        token = raw[7:] if raw.startswith("Bearer ") else ""
-        if not token:
-            for part in request.headers.get("Cookie", "").split(";"):
-                k, _, v = part.strip().partition("=")
-                if k == "session_token":
-                    token = v
-        from .auth.service import AuthError
+        # 登录态优先；无有效会话时以访客身份继续（auth/guest.py）
+        from .auth.guest import resolve_user_or_guest
 
-        try:
-            return app.state.slice0.auth.resolve_session(token)
-        except AuthError as exc:
-            raise HTTPException(
-                status_code=exc.status, detail={"error_code": exc.code, "message": exc.message}
-            )
+        return resolve_user_or_guest(request, app.state.slice0.auth)
 
     app.include_router(
         create_materials_router(

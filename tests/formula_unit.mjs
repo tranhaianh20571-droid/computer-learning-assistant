@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import {formulaHeight, formulaPlainText, renderFormula, renderFormulaBlock} from "../frontend/src/lib/formula.ts";
+import {layoutBoard} from "../frontend/src/lib/boardLayout.ts";
+
+const formula = String.raw`T(n)=O(g(n)) \iff \exists c>0,\ n_0>0,\ \forall n\ge n_0:T(n)\le c\cdot g(n)`;
+const rendered = renderFormula(formula);
+assert.equal(rendered.valid, true);
+assert(rendered.html.includes("katex"));
+assert(rendered.html.includes("∀"));
+assert(formulaPlainText(formula).includes("⇔"));
+assert(formulaHeight(formula, 600) > 0);
+const invalid = renderFormula(String.raw`\htmlClass{bad}{x}`);
+assert.equal(invalid.valid, false);
+assert(invalid.plain.length > 0);
+assert.deepEqual(renderFormulaBlock({formula:"x",format:"plain",plain_text:"plain formula"}),{valid:false,html:"",plain:"plain formula"});
+const blocks=[{id:"f",type:"formula",title:"Synthetic title",formula},
+  {id:"after",type:"text",text:"Synthetic following text",layout_group:"content:f"}];
+const ids=new Set(blocks.map(block=>block.id));
+const metrics={f:{naturalWidth:900,heights:[200,120,64]}};
+const layout=layoutBoard(blocks,1000,ids,[],{},"",{},{formulas:metrics});
+const [placed,next]=layout.pages[0].placements;
+assert.equal(placed.span,3);
+assert.equal(placed.formulaBody.height,64);
+const title=layout.pages[0].elements.find(e=>e.customData?.blockId==="f");
+assert.equal(placed.formulaBody.y,title.y+title.height+8);
+assert(next.y>=placed.formulaBody.y+placed.formulaBody.height+12);
+const shorter=layoutBoard(blocks,1000,ids,[],{},"",{},{formulas:{f:{naturalWidth:450,heights:[100,40,32]}}});
+assert.equal(shorter.pages[0].placements[0].span,2);
+assert(shorter.pages[0].placements[1].y<next.y,"measured height compacts following content");
+assert(renderFormula(String.raw`\begin{aligned}x&=\frac{a}{b}\\y&=x^2\end{aligned}`).valid);
+console.log("KaTeX rendering, plain/invalid fallback, measured spans, title/body separation and compact layout passed");

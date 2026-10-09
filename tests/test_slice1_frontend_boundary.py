@@ -31,7 +31,8 @@ class TestCapabilityConfigPage(unittest.TestCase):
     def test_only_mask_displayed(self):
         self.assertIn("credential_mask", self.page)
         self.assertNotIn("encrypted_credentials", self.page)
-        self.assertNotIn("api_key", self.page.split("credentials: { api_key")[0])
+        saved_cards = self.page.split("{configs.map((c) => (")[1].split("<h2>本机连接器</h2>")[0]
+        self.assertNotRegex(saved_cards, r"\{\s*(?:c|config)\.(?:credentials|api_key|encrypted_credentials)")
 
     def test_admin_section_gated(self):
         self.assertIn("isAdmin && (", self.page)

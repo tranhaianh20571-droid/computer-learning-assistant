@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -56,11 +57,17 @@ class OutlineUnitOut(BaseModel):
     lessons: list[OutlineLessonOut] = Field(min_length=1)
 
 
+class OutlinePrereqOut(BaseModel):
+    from_index: int = Field(ge=0)
+    to_index: int = Field(ge=0)
+
+
 class RouteCourseOut(BaseModel):
     title: str = Field(min_length=1, max_length=ROUTE_LIMITS["max_text_len"])
     goal: str = Field(default="", max_length=ROUTE_LIMITS["max_text_len"])
     # 逐课细化（outline_refine）结果：课程内嵌单元/讲次；空列表表示该课仅到课程粒度
     units: list[OutlineUnitOut] = Field(default_factory=list)
+    prerequisites: list[OutlinePrereqOut] = Field(default_factory=list)
 
     @field_validator("title", "goal")
     @classmethod
@@ -83,11 +90,6 @@ class RouteCandidate(BaseModel):
     title: str = Field(default="", max_length=ROUTE_LIMITS["max_text_len"])
     stages: list[RouteStageOut] = Field(min_length=1, max_length=ROUTE_LIMITS["max_stages"])
     prerequisites: list[RoutePrereqOut] = Field(default_factory=list)
-
-
-class OutlinePrereqOut(BaseModel):
-    from_index: int = Field(ge=0)
-    to_index: int = Field(ge=0)
 
 
 class OutlineCandidate(BaseModel):
@@ -200,9 +202,13 @@ def validate_route_candidate(candidate: RouteCandidate) -> dict:
             if course.goal:
                 course.goal = _clean_title_text(course.goal)
             if course.units:
-                lesson_total += _validate_units(course.units)
+                count = _validate_units(course.units)
+                lesson_total += count
+                _validate_prereq_indices(course.prerequisites, count, lambda e: (e.from_index, e.to_index))
         if not stage.courses:
             raise error("ROUTE_STRUCTURE_INVALID", "stage has no course")
+        if len(stage.courses) > ROUTE_LIMITS["max_courses_per_stage"]:
+            raise error("ROUTE_STRUCTURE_INVALID", "too many courses in stage")
         total += len(stage.courses)
     if total < 1:
         raise error("ROUTE_STRUCTURE_INVALID", "route needs at least one course")
@@ -271,6 +277,10 @@ class IntakeQuestion(BaseModel):
     kind: str  # single | multi
     options: list[IntakeOption] = Field(min_length=2, max_length=8)
     skippable: bool = True
+    purpose: Literal['detail_preference','prior_experience','mastery','goals','constraints','difficulties','learning_habits']
+    topic_key: str = Field(min_length=1,max_length=80)
+    information_gap: str = Field(min_length=1,max_length=240)
+    planning_effect: str = Field(min_length=1,max_length=240)
 
     @field_validator("kind")
     @classmethod
@@ -281,7 +291,40 @@ class IntakeQuestion(BaseModel):
 
 
 class IntakeQuestionSet(BaseModel):
-    questions: list[IntakeQuestion] = Field(max_length=3)
+    questions: list[IntakeQuestion] = Field(max_length=4)
+    ready_to_plan: bool
+    planning_scope: Literal['course','route']
+    learner_profile: 'LearnerProfile'
+    assumptions: list[str] = Field(default_factory=list,max_length=8)
+
+
+class PriorExperience(BaseModel):
+    domain: str = Field(min_length=1,max_length=120)
+    level: Literal['unknown','exposure','guided','independent','project'] = 'unknown'
+    experience: str = Field(default='',max_length=500)
+    familiar_concepts: list[str] = Field(default_factory=list,max_length=12)
+    uncertain_concepts: list[str] = Field(default_factory=list,max_length=12)
+    evidence_question_ids: list[str] = Field(default_factory=list,max_length=6)
+
+
+class KnowledgeTransfer(BaseModel):
+    source: str = Field(min_length=1,max_length=160)
+    target: str = Field(min_length=1,max_length=160)
+    boundary: str = Field(min_length=1,max_length=400)
+    evidence_question_ids: list[str] = Field(default_factory=list,max_length=6)
+
+
+class LearnerProfile(BaseModel):
+    learning_goal: str = Field(default='',max_length=2000)
+    detail_preference: str = Field(default='',max_length=400)
+    detail_status: Literal['confirmed','assumed','unknown'] = 'unknown'
+    prior_experience: list[PriorExperience] = Field(default_factory=list,max_length=8)
+    learning_constraints: list[str] = Field(default_factory=list,max_length=8)
+    learning_difficulties: list[str] = Field(default_factory=list,max_length=8)
+    knowledge_transfers: list[KnowledgeTransfer] = Field(default_factory=list,max_length=8)
+
+
+IntakeQuestionSet.model_rebuild()
 
 
 def validate_intake_question_set(s: IntakeQuestionSet) -> dict:

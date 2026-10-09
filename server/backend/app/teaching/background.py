@@ -1,0 +1,164 @@
+"""Bounded server-owned execution of first prewarm and one-ahead teaching."""
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event,Lock,Thread
+from time import monotonic
+import json
+from sqlalchemy import select,update
+from ..tasks.service import LearningTaskRow,LANE_CAPACITY
+from ..planning.models import ConversationRow,utcnow
+from ..prompts.service import PromptBindingRow
+from .models import PlaybackCheckpointRow,TeachingStepRow
+from .learning_models import PreparedFirstSegmentRow
+
+
+class TeachingBackground:
+    def __init__(self,service):
+        self.service=service;self.stop=Event();self.lock=Lock();self.pending={};self.thread=None
+        self._last_reconcile=0
+        self.pools={"first":ThreadPoolExecutor(max_workers=1,thread_name_prefix="first-prewarm"),
+            "text":ThreadPoolExecutor(max_workers=2,thread_name_prefix="teaching-next"),
+            "audio":ThreadPoolExecutor(max_workers=2,thread_name_prefix="teaching-audio"),
+            "refine":ThreadPoolExecutor(max_workers=1,thread_name_prefix="lesson-refine")}
+
+    def start(self):
+        if self.thread and self.thread.is_alive():return
+        self.service.server_managed=True
+        self.thread=Thread(target=self._loop,name="teaching-dispatch",daemon=True);self.thread.start()
+
+    def _loop(self):
+        cleaned=0
+        while not self.stop.is_set():
+            try:
+                if monotonic()-cleaned>600:self.service.preparation.cleanup();cleaned=monotonic()
+                self.tick()
+            except Exception as exc:self._report_failure(self.service._controlled_failure(exc))
+            self.stop.wait(.8)
+
+    def eligible(self,sess,task,*,authorization_checked=False):
+        from ..slice1.errors import Slice1Error
+        if not authorization_checked:
+            try:self.service.authorization.check_task(sess,task,audio=task.kind=='tts')
+            except Slice1Error:return False
+        if task.kind=="lesson_plan_refine":
+            return self.service.preparation.refinement_eligible(sess,task)
+        if task.kind=="lesson_first_prepare":
+            if not self.service.preparation.enabled:return False
+            cache=sess.scalars(select(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.task_id==task.task_id)).first()
+            if not cache:return False
+            if not self.service.preparation._model(cache.owner_user_id):return False
+            if not cache.consumed_conversation_id:return True
+            conv=sess.get(ConversationRow,cache.consumed_conversation_id)
+        else:
+            if ":followup:" in task.subject_id:return False
+            conv=sess.get(ConversationRow,task.subject_id.split(":")[0])
+        if not conv or conv.deleted_at or conv.session_state!="active":return False
+        if task.kind!='lesson_first_prepare' and monotonic()-self.service.observed_sessions.get(conv.conversation_id,0)>90:return False
+        checkpoint=sess.scalars(select(PlaybackCheckpointRow).where(PlaybackCheckpointRow.conversation_id==conv.conversation_id)
+            .order_by(PlaybackCheckpointRow.client_seq.desc())).first()
+        if checkpoint and self.service._presentation(json.loads(checkpoint.board_state_json)).get('paused'):return False
+        if task.kind=="lesson_first_prepare":return True
+        number=int(task.subject_id.split(":")[1]);current=max(1,checkpoint.step_no if checkpoint else 1)
+        if number<current or number>current+1:return False
+        if task.kind=="lesson_step_generate":
+            if not sess.scalar(select(PromptBindingRow.binding_id).where(PromptBindingRow.task_id==task.task_id,
+                PromptBindingRow.prompt_name=='teaching_step_v1')):return False
+            return not self.service.preparation.waiting({"kind":task.kind,"subject_id":task.subject_id})
+        return True
+
+    def tick(self):
+        for ident,last in list(self.service.observed_sessions.items()):
+            if monotonic()-last>180 and self.service.observed_sessions.get(ident)==last:
+                self.service.observed_sessions.pop(ident,None)
+        with self.lock:
+            self.pending={task_id:value for task_id,value in self.pending.items() if not value[1].done()}
+            counts={group:sum(value[0]==group for value in self.pending.values()) for group in self.pools}
+        self.service.tasks.sweep_expired_tasks(kinds=['lesson_first_prepare','lesson_step_generate','tts','lesson_plan_refine'])
+        with self.service.db.session() as sess:
+            now=utcnow()
+            tasks=list(sess.scalars(select(LearningTaskRow).where(LearningTaskRow.kind.in_(['lesson_first_prepare','lesson_step_generate','tts','lesson_plan_refine']),
+                LearningTaskRow.status.in_(['queued','leased','running']),LearningTaskRow.deadline_at>now,
+                (LearningTaskRow.status=='queued')|(LearningTaskRow.lease_until<=now)).order_by(LearningTaskRow.created_at).limit(100)))
+            tasks.sort(key=lambda task:(task.lane!='interactive',task.kind=='lesson_plan_refine',
+                task.kind=='lesson_first_prepare',task.created_at))
+            live=list(sess.scalars(select(LearningTaskRow).where(LearningTaskRow.status.in_(['leased','running']),
+                LearningTaskRow.lease_until>now)))
+            lane_counts={lane:sum(task.lane==lane for task in live) for lane in LANE_CAPACITY.lane_limits}
+            owner_counts={}
+            for item in live:owner_counts[(item.owner_user_id,item.lane)]=owner_counts.get((item.owner_user_id,item.lane),0)+1
+            selected=[];denied=[];conversations={value[2] for value in self.pending.values() if value[0]=='text'}
+            from ..slice1.errors import Slice1Error
+            for task in tasks:
+                try:self.service.authorization.check_task(sess,task,audio=task.kind=='tts')
+                except Slice1Error as exc:
+                    if task.status=='queued':denied.append((task.task_id,task.generation,task.revision,self.service._controlled_failure(exc)))
+                    continue
+                group=('first' if task.kind=='lesson_first_prepare' else 'audio' if task.kind=='tts'
+                    else 'refine' if task.kind=='lesson_plan_refine' else 'text')
+                limit=1 if group in ('first','refine') else 2
+                if counts[group]>=limit or task.task_id in self.pending or not self.eligible(sess,task,authorization_checked=True):continue
+                owner_lane=(task.owner_user_id,task.lane)
+                if sum(lane_counts.values())>=LANE_CAPACITY.global_limit or lane_counts[task.lane]>=LANE_CAPACITY.lane_limits[task.lane]:continue
+                if task.lane!='interactive' and sum(value for lane,value in lane_counts.items() if lane!='interactive')>=LANE_CAPACITY.non_interactive_capacity:continue
+                if LANE_CAPACITY.per_user_per_lane>0 and owner_counts.get(owner_lane,0)>=LANE_CAPACITY.per_user_per_lane:continue
+                if group=='text':
+                    conv=task.subject_id.split(':')[0]
+                    if conv in conversations:continue
+                    conversations.add(conv)
+                if group=='first' and task.lane!='interactive' and (counts['text'] or counts['audio']):continue
+                counts[group]+=1;lane_counts[task.lane]+=1;owner_counts[owner_lane]=owner_counts.get(owner_lane,0)+1
+                selected.append((task.task_id,group,task.subject_id.split(':')[0]))
+            active=list(sess.scalars(select(ConversationRow).where(ConversationRow.kind=='teaching',ConversationRow.session_state=='active',
+                ConversationRow.deleted_at.is_(None),ConversationRow.conversation_id.in_(
+                    [key for key,value in list(self.service.observed_sessions.items()) if monotonic()-value<90]))))
+        for task_id,generation,revision,code in denied:
+            self.service.tasks.fail_queued(task_id,expected_generation=generation,expected_revision=revision,error_code=code)
+        for task_id,group,subject in selected:
+            with self.lock:self.pending[task_id]=(group,self.pools[group].submit(self._execute,task_id,group),subject)
+        if getattr(self.service.tts_adapter_factory,'config_for_owner',None):
+            for conv in active:
+                try:
+                    if not self.service.tts_adapter_factory.config_for_owner(conv.owner_user_id):continue
+                    with self.service.db.session() as sess:
+                        checkpoint=sess.scalars(select(PlaybackCheckpointRow).where(PlaybackCheckpointRow.conversation_id==conv.conversation_id)
+                            .order_by(PlaybackCheckpointRow.client_seq.desc())).first()
+                        if checkpoint and self.service._presentation(json.loads(checkpoint.board_state_json)).get('paused'):continue
+                        current=max(1,checkpoint.step_no if checkpoint else 1)
+                        steps=list(sess.scalars(select(TeachingStepRow).where(TeachingStepRow.conversation_id==conv.conversation_id,
+                            TeachingStepRow.generation==1,TeachingStepRow.step_no.in_([current,current+1]),TeachingStepRow.audio_id.is_(None))))
+                    for step in steps:self.service.ensure_audio(conv.conversation_id,actor_id=conv.owner_user_id,step_no=step.step_no)
+                except Exception as exc:self._report_failure(self.service._controlled_failure(exc))
+        if monotonic()-self._last_reconcile>=15:
+            self._last_reconcile=monotonic()
+            for conv in active[:4]:
+                try:self.service.preparation.prepare_next(conv.conversation_id,conv.owner_user_id)
+                except Exception as exc:self._report_failure(self.service._controlled_failure(exc))
+            if not counts['text'] and not counts['audio']:
+                try:self.service.preparation.reconcile(limit=4)
+                except Exception as exc:self._report_failure(self.service._controlled_failure(exc))
+
+    def _execute(self,task_id,group):
+        try:
+            if group=='first':return self.service.preparation.run(task_id)
+            if group=='audio':return self.service.run_tts(task_id)
+            if group=='refine':return self.service.preparation.run_refinement(task_id)
+            return self.service.run_step_generation(task_id)
+        except Exception as exc:
+            code=self.service._controlled_failure(exc)
+            self._report_failure(code)
+            from ..tasks.service import Lease
+            with self.service.db.session() as sess:
+                task=sess.get(LearningTaskRow,task_id)
+                lease=Lease(task.task_id,task.attempt_id,task.lease_token,task.lease_owner,
+                    task.generation,task.attempt,task.lease_until,task.deadline_at,task.owner_user_id) if task and task.lease_token else None
+            if lease:
+                self.service.tasks.recover_worker_failure(lease,stage='tts' if group=='audio' else 'generate',error_code=code)
+            return {'status':'failed','error_code':code}
+
+    def _report_failure(self,code):
+        from ..logging_audit.metrics import record_task_diagnostic
+        record_task_diagnostic(reason='worker_recovery_failed',error_code=code)
+
+    def close(self):
+        self.stop.set();self.service.server_managed=False
+        if self.thread:self.thread.join(timeout=2)
+        for pool in self.pools.values():pool.shutdown(wait=False,cancel_futures=True)

@@ -18,6 +18,12 @@ class PlanningError(Exception):
             self.status = status
 
 
+class PlanningDuplicate(PlanningError):
+    def __init__(self, detail: dict):
+        super().__init__("PLANNING_DUPLICATE", "已有相同课程", status=409)
+        self.detail = detail
+
+
 def error(code: str, message: str = "", status: int | None = None) -> PlanningError:
     return PlanningError(code, message, status)
 

@@ -97,8 +97,13 @@ class ModelCapabilityGate:
             if expiry and expiry > monotonic_ms():
                 return "unavailable"
         status = getattr(self.adapter, "capability_status", None)
-        if isinstance(status, dict) and status.get(capability) in ("available", "unavailable"):
-            return status[capability]
+        saved = status.get(capability) if isinstance(status, dict) else None
+        if isinstance(saved, dict):
+            saved = saved.get("state")
+        if saved in ("available", "unavailable"):
+            return saved
+        if getattr(self.adapter, "defer_capability_probe", False):
+            return "available"  # actual request validates it; background probes never block teaching
         if probe is None:
             return "unavailable"
         try:
@@ -107,10 +112,10 @@ class ModelCapabilityGate:
         except Exception:  # noqa: BLE001 - 探测异常按能力缺失处理
             return "unavailable"
 
-    def choose_modes(self) -> list[str]:
+    def choose_modes(self, allowed_modes=OUTPUT_MODES) -> list[str]:
         """按能力状态给出候选模式顺序（native → tool → prompted）。"""
         modes: list[str] = []
-        for mode in OUTPUT_MODES:
+        for mode in allowed_modes:
             state = self.capability_state(_REQUIRED_CAPABILITY[mode])
             if state == "available":
                 modes.append(mode)

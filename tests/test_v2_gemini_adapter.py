@@ -85,6 +85,21 @@ class TestSchemaTranslation:
 
 
 class TestMessagesAndGenerate:
+    def test_signed_function_call_survives_pydanticai_bridge_roundtrip(self):
+        from backend.agents.bridge import raw_to_model_response, messages_to_adapter, trace_messages
+        from pydantic_ai.messages import ModelRequest, ToolReturnPart
+        adapter = _gemini(_json_handler({"candidates": [{"content": {"parts": [{
+            "functionCall": {"name": "read_context", "args": {}},
+            "thoughtSignature": "synthetic_signature"}]}}]}))
+        raw = adapter.generate(MESSAGES)
+        response = raw_to_model_response(raw)
+        call = response.parts[0]
+        messages = messages_to_adapter([response, ModelRequest(parts=[ToolReturnPart(
+            tool_name="read_context", tool_call_id=call.tool_call_id, content={"ready": True})])])
+        contents, _ = adapter._messages_to_contents(messages)
+        assert contents[0]["parts"][0]["thoughtSignature"] == "synthetic_signature"
+        assert "synthetic_signature" not in json.dumps(trace_messages(messages))
+
     def test_generate_native_maps_system_and_schema(self):
         record: list = []
         route_json = json.dumps(

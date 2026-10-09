@@ -1,0 +1,70 @@
+import {createRequire} from "node:module";
+import {spawnSync} from "node:child_process";
+import {mkdirSync,writeFileSync} from "node:fs";
+import assert from "node:assert/strict";
+const require=createRequire(import.meta.url),{chromium}=require(process.env.PW_ROOT+"/playwright");
+const backend="http://127.0.0.1:8013",base="http://127.0.0.1:5173",output=process.env.TEST_OUTPUT;
+mkdirSync(output,{recursive:true});
+const browser=await chromium.launch({headless:true,executablePath:process.env.TEST_BROWSER});
+const context=await browser.newContext({viewport:{width:1600,height:1000}});
+const guest=await context.request.get(backend+"/api/auth/guest");assert.equal(guest.status(),200);
+const fixture=spawnSync(process.env.TEST_PYTHON,[process.env.TEST_FIXTURE,(await guest.json()).user_id],{encoding:"utf8",env:process.env});
+assert.equal(fixture.status,0,fixture.stderr);const course=JSON.parse(fixture.stdout);
+await context.addInitScript(({backend})=>{
+ const original=window.fetch.bind(window);window.fetch=(input,init)=>original(typeof input==="string"&&input.startsWith("/api/")?backend+input:input,init);
+},{backend});
+const page=await context.newPage(),errors=[],checks=[];page.on("pageerror",e=>errors.push(e.message));
+let final=false;page.on("response",r=>{if(r.url().endsWith("/run"))final=true;});
+try{
+ await page.goto(base+"/#/course/"+course.course_id);
+ await page.getByRole("button",{name:"开始学习",exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('[data-teaching-preview] p')?.textContent.length>1,null,{timeout:30000});
+ const samples=[];
+ for(let i=0;i<6;i++){
+  samples.push(await page.locator('.lecture-segment p').first().textContent());
+  await new Promise(resolve=>setTimeout(resolve,65));
+ }
+ const counts=samples.map(s=>Array.from(s).length);
+ assert(counts.some((n,i)=>i>0&&n>counts[i-1]));
+ assert(counts.every((n,i)=>i===0||n-counts[i-1]<=14),JSON.stringify(counts));
+ checks.push("received_bursts_are_released_as_characters");
+ const dimensions=await page.evaluate(()=>({body:document.querySelector('.lw-body').clientWidth,text:document.querySelector('.tx-col').clientWidth}));
+ assert(Math.abs(dimensions.text-766)<4);checks.push("default_766_text_column");
+ const separator=page.getByRole("separator",{name:"调整讲解栏宽度"});
+ const initial=await separator.boundingBox();await page.mouse.move(initial.x+4,initial.y+80);await page.mouse.down();
+ await page.mouse.move(initial.x-170,initial.y+80,{steps:10});await page.mouse.up();
+ const dragged=await page.locator('.tx-col').evaluate(n=>n.clientWidth);
+ assert(dragged>dimensions.text+130);checks.push("pointer_resize");
+ await page.reload();await page.locator('.tx-col').waitFor();
+ assert(Math.abs(await page.locator('.tx-col').evaluate(n=>n.clientWidth)-dragged)<4);checks.push("width_restored_after_refresh");
+ await separator.focus();await page.keyboard.press("ArrowRight");
+ assert(await page.locator('.tx-col').evaluate(n=>n.clientWidth)<dragged-15);await separator.dblclick();
+ assert(Math.abs(await page.locator('.tx-col').evaluate(n=>n.clientWidth)-766)<4);checks.push("keyboard_resize_and_reset");
+ await page.waitForFunction(()=>document.querySelector('.teaching-board')?.dataset.boardPages>1,null,{timeout:30000});
+ await page.getByRole("button",{name:"立即显示全文",exact:true}).click();
+ await page.locator('.excalidraw canvas').first().waitFor({state:"visible"});
+ const layout=JSON.parse(await page.locator('[data-layout]').getAttribute('data-layout'));
+ assert(layout.some(p=>p.column===0));assert(layout.some(p=>p.column===1));
+ for(let i=0;i<layout.length;i++)for(const b of layout.slice(i+1)){
+  const a=layout[i];assert(a.x+a.width<=b.x||b.x+b.width<=a.x||a.y+a.height<=b.y||b.y+b.height<=a.y);
+ }
+ await page.screenshot({path:output+"/three-column-board.png",fullPage:true});checks.push("three_column_layout_and_typed_blocks");
+ await page.getByRole("button",{name:"下一页板书",exact:true}).click();
+ assert((await page.locator('.board-controls').textContent()).includes('第 2 /'));checks.push("board_pagination");
+ await page.getByRole("button",{name:"上一页板书",exact:true}).click();
+ await page.locator('.board-graph-detail summary').first().click();
+ await page.getByRole("button",{name:"确定要查找的键",exact:true}).click();
+ assert(await page.getByRole("button",{name:"确定要查找的键",exact:true}).getAttribute('aria-pressed')==='true');
+ checks.push("generic_graph_local_relationships");
+ await page.waitForFunction(()=>Array.from(document.querySelectorAll('.lecture-segment p')).reduce((total,n)=>total+n.textContent.length,0)>80,null,{timeout:30000});
+ await page.getByLabel("课程追问",{exact:true}).fill("合成追问");await page.getByRole("button",{name:"追问",exact:true}).click();
+ await page.getByRole("button",{name:"继续课程 · 不自动播放",exact:true}).waitFor({timeout:30000});
+ assert((await page.locator('[data-visible-blocks]').getAttribute('data-visible-blocks')).includes('reply_board'));
+ checks.push("followup_board_survives_final_publication");
+ await page.setViewportSize({width:390,height:844});await page.getByRole("tab",{name:"文字",exact:true}).click();
+ assert(await page.locator('.tx-col').isVisible());assert.equal(await separator.isVisible(),false);
+ assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks.push("mobile_pane_without_horizontal_overflow");
+ assert.deepEqual(errors,[]);
+ writeFileSync(output+"/browser-result.json",JSON.stringify({checks,pageErrors:errors,counts,synthetic:true},null,2));
+ console.log(JSON.stringify({checks,pageErrors:errors}));
+}finally{await browser.close();}

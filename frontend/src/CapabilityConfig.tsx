@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Dialog from "./ui/Dialog";
+import "./capabilities.css";
 import { api } from "./api";
 
 /** 切片 1：能力配置页（个人模型/TTS、管理员云能力、连接器配对、外发确认查询）。 */
 
 const CAP_LABEL: Record<string, string> = {
   text: "文本",
-  image: "图像",
+  image: "图像识别",
+  image_generate: "图片生成",
   tool_call: "工具调用",
   json_schema: "JSON Schema",
   streaming: "流式",
@@ -19,12 +22,24 @@ const CAP_STATE: Record<string, { text: string; cls: string }> = {
 };
 
 const PROTOCOL_LABEL: Record<string, string> = {
+  openai_image: "OpenAI 兼容图片生成",
   openai: "OpenAI 兼容",
   anthropic: "Anthropic 原生",
   gemini: "Gemini 原生",
   minimax: "MiniMax TTS",
   paddleocr: "PaddleOCR",
   tavily_hikari: "Tavily Hikari",
+};
+
+const CAP_DETAIL: Record<string, string> = {
+  error: "测试未完成，请检查网络、服务地址和模型名后重试",
+  capability_test_failed: "测试未完成，请检查服务地址与模型名",
+  connection_error: "连接失败，请检查网络和代理",
+  timeout: "请求超时，请稍后重试",
+  credential_invalid: "凭据被服务拒绝，请更新 API Key",
+  unsupported: "服务不支持该能力",
+  rate_limit: "服务限流，请稍后重试",
+  provider_error: "服务暂时出错，请稍后重试",
 };
 
 function CapabilityBadges({ status }: { status: Record<string, any> }) {
@@ -37,9 +52,11 @@ function CapabilityBadges({ status }: { status: Record<string, any> }) {
         const state = typeof raw === "string" ? raw : raw?.state || "unknown";
         const meta = CAP_STATE[state] || CAP_STATE.unknown;
         return (
-          <span key={cap} className={`badge ${meta.cls}`} title={typeof raw === "object" ? raw?.detail : ""}>
-            {CAP_LABEL[cap] || cap}：{meta.text}
-          </span>
+          <span key={cap} className="capability-result"><span className={`badge ${meta.cls}`}>
+             {CAP_LABEL[cap] || cap}：{meta.text}
+           </span>
+              {typeof raw === "object" && raw?.detail && state !== "available" && <small className="help">{CAP_DETAIL[raw.detail] || "服务未确认该能力，请检查配置后重试"}</small>}
+           </span>
         );
       })}
     </div>
@@ -74,6 +91,11 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
   const [pairing, setPairing] = useState<any>(null);
   const [deviceName, setDeviceName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState<ConfigItem | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [editing, setEditing] = useState<ConfigItem | null>(null);
+  const [operation, setOperation] = useState<string | null>(null);
+  const operationLock = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -100,13 +122,27 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
   }, [taskId, onErr]);
 
   return (
-    <div className="stack">
+    <div className="stack capabilities-page">
+      {editing && <ConfigEditor key={editing.config_id} config={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); onOk?.("配置已更新；能力将重新测试"); await refresh(); }} />}
+      {deleting && <Dialog title="删除配置" kind="info" onClose={() => { if (!operationLock.current) setDeleting(null); }} actions={<>
+        <button className="btn" disabled={Boolean(operation)} onClick={() => setDeleting(null)}>取消</button>
+        <button className="btn btn-danger" disabled={Boolean(operation)} onClick={async () => {
+          if (operationLock.current) return;
+          operationLock.current = true; setOperation(`delete:${deleting.config_id}`);
+          try { await api.deactivateConfig(deleting.config_id); setConfigs(prev => prev.filter(c => c.config_id !== deleting.config_id)); setDeleting(null); onOk?.("配置已删除"); }
+          catch (e: any) { setDeleteError(e?.message || "删除失败，请重试"); }
+          finally { operationLock.current = false; setOperation(null); }
+        }}>{operation ? "正在删除…" : "确认删除"}</button>
+      </>}>
+        <p>确定删除 {PROTOCOL_LABEL[deleting.protocol] || deleting.protocol} {deleting.model_name}？后续任务将停止使用该配置。</p>
+        {deleteError && <p role="alert" className="capability-detail">{deleteError}</p>}
+      </Dialog>}
       <div className="card stack">
         <h1>能力配置</h1>
         <p className="lede">
           个人内容模型与 TTS、管理员云能力。凭据加密存储，页面只显示掩码；能力测试只发送非私人样例。
         </p>
-        <button className="secondary" onClick={refresh} disabled={busy}>刷新</button>
+        <button className="btn" onClick={refresh} disabled={busy}>刷新</button>
       </div>
 
       <ContentModelForm
@@ -114,6 +150,7 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
         onOk={async (m: string) => { onOk?.(m); await refresh(); }}
         onBusy={setBusy}
       />
+      <ContentModelForm imageGeneration onErr={onErr} onOk={async (m: string) => { onOk?.(m); await refresh(); }} onBusy={setBusy} />
       <TtsForm
         onErr={onErr}
         onOk={async (m: string) => { onOk?.(m); await refresh(); }}
@@ -129,6 +166,7 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
 
       <div className="card stack">
         <h2>已保存的配置</h2>
+        <p className="help">个人同类配置默认使用最近新增的一条。状态未知表示尚未确认能力，可点击“测试能力”查看结果。</p>
         {configs.length === 0 && <p className="help">暂无配置。</p>}
         {configs.map((c) => (
           <div key={c.config_id} className="stack" style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
@@ -145,28 +183,27 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
             </div>
             <CapabilityBadges status={c.capability_status} />
             <div className="row">
+              <button className="btn" disabled={Boolean(operation)} onClick={() => setEditing(c)}>编辑</button>
               <button
-                className="secondary"
+                className="btn"
+                disabled={Boolean(operation)}
                 onClick={async () => {
+                  if (operationLock.current) return;
+                  operationLock.current = true; setOperation(`test:${c.config_id}`);
                   try {
                     const r = await api.testConfig(c.config_id);
-                    onOk?.("能力测试完成");
+                    const values = Object.values(r.capability_status || {}) as any[];
+                    const failed = values.some(raw => (typeof raw === "string" ? raw : raw?.state) === "unavailable");
+                    const unknown = values.some(raw => (typeof raw === "string" ? raw : raw?.state) === "unknown");
+                    onOk?.(failed ? "测试完成，部分能力不可用，请查看原因" : unknown ? "测试完成，部分能力仍未确认，请查看原因" : "能力测试通过");
                     setConfigs((prev) => prev.map((x) => (x.config_id === c.config_id ? { ...x, capability_status: r.capability_status } : x)));
                   } catch (e: any) { onErr?.(e?.message || "测试失败"); }
+                  finally { operationLock.current = false; setOperation(null); }
                 }}
               >
-                测试能力
+                {operation === `test:${c.config_id}` ? "正在测试…" : "测试能力"}
               </button>
-              <button
-                className="secondary"
-                onClick={async () => {
-                  if (!confirm("删除该配置？删除后 worker 将拒绝调用该地址。")) return;
-                  try { await api.deactivateConfig(c.config_id); onOk?.("配置已删除"); await refresh(); }
-                  catch (e: any) { onErr?.(e?.message || "删除失败"); }
-                }}
-              >
-                删除
-              </button>
+              <button className="btn" disabled={Boolean(operation)} onClick={() => { setDeleteError(""); setDeleting(c); }}>删除</button>
             </div>
           </div>
         ))}
@@ -206,7 +243,7 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
             </span>
             {c.status !== "revoked" && (
               <button
-                className="secondary"
+                className="btn"
                 onClick={async () => {
                   try { await api.revokeConnector(c.binding_id); onOk?.("连接器已撤销"); await refresh(); }
                   catch (e: any) { onErr?.(e?.message || "撤销失败"); }
@@ -229,7 +266,7 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
             onChange={(e) => setTaskId(e.target.value)}
             aria-label="任务 ID"
           />
-          <button className="secondary" onClick={loadDisclosures}>查询</button>
+          <button className="btn" onClick={loadDisclosures}>查询</button>
         </div>
         {disclosures.length > 0 && (
           <table className="table">
@@ -245,7 +282,7 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
                   <td>
                     {!d.revoked_at && (
                       <button
-                        className="secondary"
+                        className="btn"
                         onClick={async () => {
                           try { await api.revokeDisclosure(d.grant_id); onOk?.("授权已撤销"); await loadDisclosures(); }
                           catch (e: any) { onErr?.(e?.message || "撤销失败"); }
@@ -265,21 +302,60 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
   );
 }
 
-function ContentModelForm({ onErr, onOk, onBusy }: any) {
-  const [protocol, setProtocol] = useState("openai");
+function ConfigEditor({ config, onClose, onSaved }: { config: ConfigItem; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [endpoint, setEndpoint] = useState(config.endpoint);
+  const [model, setModel] = useState(config.model_name);
+  const [apiKey, setApiKey] = useState("");
+  const [voice, setVoice] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const saveLock = useRef(false);
+  const needsModel = ["content_model", "image_generation", "tts"].includes(config.kind);
+  const needsVoice = config.kind === "tts" && Boolean(apiKey.trim());
+  return <Dialog title="编辑配置" kind="info" onClose={() => { if (!saveLock.current) onClose(); }} actions={<>
+    <button className="btn" disabled={saving} onClick={onClose}>取消</button>
+    <button className="btn btn-pri" disabled={saving || !endpoint.trim() || (needsModel && !model.trim()) || (needsVoice && !voice.trim())} onClick={async () => {
+      if (saveLock.current) return;
+      saveLock.current = true; setSaving(true);
+      try {
+        const credentials = apiKey.trim() ? { api_key: apiKey.trim(), ...(config.kind === "tts" ? { voice_id: voice.trim() } : {}) } : undefined;
+        await api.updateConfig(config.config_id, { endpoint: endpoint.trim(), model_name: model.trim(), ...(credentials ? { credentials } : {}) });
+        await onSaved();
+      } catch (e: any) { setSaveError(e?.message || "更新失败，请重试"); }
+      finally { saveLock.current = false; setSaving(false); }
+    }}>{saving ? "正在保存…" : "保存修改"}</button>
+  </>}>
+    <div className="capability-editor">
+      <p>{PROTOCOL_LABEL[config.protocol] || config.protocol}</p>
+      <label className="field">服务地址<input disabled={saving} value={endpoint} onChange={e => setEndpoint(e.target.value)} /></label>
+      <label className="field">模型名<input disabled={saving} value={model} onChange={e => setModel(e.target.value)} /></label>
+      <label className="field">新的 API Key<input type="password" autoComplete="off" disabled={saving} value={apiKey} placeholder="留空保留现有凭据" onChange={e => setApiKey(e.target.value)} /></label>
+      {needsVoice && <label className="field">音色 ID<input disabled={saving} value={voice} onChange={e => setVoice(e.target.value)} /><span>更换语音凭据时，请填写该账号可用的音色 ID。</span></label>}
+      <p>API Key 留空会保留现有凭据。修改后需要重新确认能力状态。</p>
+      {saveError && <p role="alert" className="capability-detail">{saveError}</p>}
+    </div>
+  </Dialog>;
+}
+
+function ContentModelForm({ onErr, onOk, onBusy, imageGeneration = false }: any) {
+  const [protocol, setProtocol] = useState(imageGeneration ? "openai_image" : "openai");
   const [endpoint, setEndpoint] = useState("https://api.openai.com/v1");
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [working, setWorking] = useState(false);
+  const saveLock = useRef(false);
   return (
     <div className="card stack">
-      <h2>个人内容模型</h2>
+      <h2>{imageGeneration ? "课程封面图片模型（可选）" : "个人内容模型"}</h2>
+      {imageGeneration && <p className="help">水墨程序绘图无需此配置。图片生成使用独立模型，调用前确认外发；能力测试会生成一张合成样例图片，可能计费。</p>}
       <div className="row">
         <label className="field">
           <span>协议</span>
           <select value={protocol} onChange={(e) => setProtocol(e.target.value)}>
+            {imageGeneration ? <option value="openai_image">OpenAI 兼容图片生成</option> : <>
             <option value="openai">OpenAI 兼容</option>
             <option value="anthropic">Anthropic 原生</option>
-            <option value="gemini">Gemini 原生</option>
+            <option value="gemini">Gemini 原生</option></>}
           </select>
         </label>
         <label className="field" style={{ flex: 1 }}>
@@ -297,63 +373,95 @@ function ContentModelForm({ onErr, onOk, onBusy }: any) {
           <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
         </label>
       </div>
-      <button
+      <button className="btn btn-pri"
+        disabled={working || !endpoint.trim() || !model.trim() || !apiKey.trim()}
         onClick={async () => {
-          onBusy?.(true);
+          if (saveLock.current) return;
+          saveLock.current = true; setWorking(true); onBusy?.(true);
           try {
             await api.createConfig({
-              kind: "content_model",
+              kind: imageGeneration ? "image_generation" : "content_model",
               protocol,
-              endpoint,
-              model_name: model,
-              credentials: { api_key: apiKey },
+              endpoint: endpoint.trim(),
+              model_name: model.trim(),
+              credentials: { api_key: apiKey.trim() },
               owner_scope: "user",
-            });            onOk?.("模型配置已保存（凭据已加密）");
+            });
+            setApiKey("");
+            await onOk?.("模型配置已保存（凭据已加密）");
           } catch (e: any) { onErr?.(e?.message || "保存失败"); }
-          finally { onBusy?.(false); }
+          finally { saveLock.current = false; setWorking(false); onBusy?.(false); }
         }}
       >
-        保存模型配置
+        {working ? "正在保存…" : "保存模型配置"}
       </button>
     </div>
   );
 }
 
 function TtsForm({ onErr, onOk, onBusy }: any) {
-  const [endpoint, setEndpoint] = useState("https://api.minimax.cn");
+  const [endpoint, setEndpoint] = useState("https://api.minimaxi.com");
   const [apiKey, setApiKey] = useState("");
   const [voice, setVoice] = useState("");
+  const [voices,setVoices] = useState<{voice_id:string;name:string;category:string;description:string}[]>([]);
+  const [working,setWorking] = useState<"query"|"save"|null>(null);
+  const [catalogMessage,setCatalogMessage] = useState("");
+  const categories=[{id:"system_voice",name:"系统音色"},{id:"voice_cloning",name:"克隆音色"},{id:"voice_generation",name:"文生音色"}];
+  const resetCatalog=()=>{setVoices([]);setVoice("");setCatalogMessage("");};
+  const selected=voices.find(item=>item.voice_id===voice);
   return (
     <div className="card stack">
       <h2>个人语音（MiniMax）</h2>
       <div className="row">
         <label className="field" style={{ flex: 1 }}>
           <span>服务地址</span>
-          <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
+          <input value={endpoint} disabled={Boolean(working)} onChange={(e) => {setEndpoint(e.target.value);resetCatalog();}} />
         </label>
         <label className="field" style={{ flex: 1 }}>
-          <span>音色 ID</span>
-          <input value={voice} onChange={(e) => setVoice(e.target.value)} placeholder="按账户可用列表填写" />
+          <span>音色</span>
+          <select aria-label="音色" style={{width:"100%",minWidth:0}} value={voice} onChange={e=>setVoice(e.target.value)} disabled={Boolean(working)||!voices.length}>
+            <option value="">{working==="query"?"正在获取音色…":voices.length?"请选择音色":"先获取可用音色"}</option>
+            {categories.map(category=>{
+              const items=voices.filter(item=>item.category===category.id);
+              return items.length?<optgroup key={category.id} label={category.name}>
+                {items.map(item=><option key={item.voice_id} value={item.voice_id}>{item.name===item.voice_id?item.name:`${item.name} · ${item.voice_id}`}</option>)}
+              </optgroup>:null;
+            })}
+          </select>
         </label>
+        <button className="btn" style={{alignSelf:"flex-end"}} disabled={Boolean(working)||!apiKey.trim()||!endpoint.trim()}
+          onClick={async()=>{
+            setWorking("query");onBusy?.(true);setCatalogMessage("");setVoices([]);setVoice("");
+            try{
+              const result=await api.listTtsVoices({endpoint,api_key:apiKey});
+              const items=result.data||[];setVoices(items);
+              setCatalogMessage(items.length?`已获取 ${items.length} 个音色` : "当前账号未返回可用音色。");
+            }catch(e:any){
+              setCatalogMessage("获取失败，请检查服务地址与 API Key 后重试。");onErr?.(e?.message||"获取音色失败");
+            }finally{setWorking(null);onBusy?.(false);}
+          }}>{working==="query"?"正在获取…":"获取可用音色"}</button>
       </div>
+      {catalogMessage&&<p className="help" role="status">{catalogMessage}</p>}
+      {selected?.description&&<p className="help">{selected.description}</p>}
       <label className="field">
         <span>API Key</span>
-        <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
+        <input type="password" value={apiKey} disabled={Boolean(working)} onChange={(e) => {setApiKey(e.target.value);resetCatalog();}} autoComplete="off" />
       </label>
       <button
+        disabled={Boolean(working)||!voice||!apiKey.trim()||!endpoint.trim()}
         onClick={async () => {
-          onBusy?.(true);
+          setWorking("save");onBusy?.(true);
           try {
             await api.createConfig({
               kind: "tts",
               protocol: "minimax",
-              endpoint,
+              endpoint: endpoint.trim(),
               model_name: "speech-2.8-hd",
-              credentials: { api_key: apiKey, voice_id: voice },
+              credentials: { api_key: apiKey.trim(), voice_id: voice },
               owner_scope: "user",
             });            onOk?.("TTS 配置已保存（默认 speech-2.8-hd）");
           } catch (e: any) { onErr?.(e?.message || "保存失败"); }
-          finally { onBusy?.(false); }
+          finally { setWorking(null);onBusy?.(false); }
         }}
       >
         保存 TTS 配置
@@ -368,6 +476,8 @@ function AdminCloudForm({ onErr, onOk, onBusy }: any) {
   const [endpoint, setEndpoint] = useState("https://ocr.example.com/api");
   const [model, setModel] = useState("PaddleOCR-VL-1.6");
   const [apiKey, setApiKey] = useState("");
+  const [working, setWorking] = useState(false);
+  const saveLock = useRef(false);
   return (
     <div className="card stack">
       <h2>管理员云能力</h2>
@@ -406,23 +516,27 @@ function AdminCloudForm({ onErr, onOk, onBusy }: any) {
           <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
         </label>
       </div>
-      <button
+      <button className="btn btn-pri"
+        disabled={working || !endpoint.trim() || !apiKey.trim()}
         onClick={async () => {
-          onBusy?.(true);
+          if (saveLock.current) return;
+          saveLock.current = true; setWorking(true); onBusy?.(true);
           try {
             await api.createConfig({
               kind,
               protocol,
-              endpoint,
-              model_name: model,
-              credentials: { api_key: apiKey },
+              endpoint: endpoint.trim(),
+              model_name: model.trim(),
+              credentials: { api_key: apiKey.trim() },
               owner_scope: "admin",
-            });            onOk?.("云能力配置已保存");
+            });
+            setApiKey("");
+            await onOk?.("云能力配置已保存");
           } catch (e: any) { onErr?.(e?.message || "保存失败"); }
-          finally { onBusy?.(false); }
+          finally { saveLock.current = false; setWorking(false); onBusy?.(false); }
         }}
       >
-        保存云能力配置
+        {working ? "正在保存…" : "保存云能力配置"}
       </button>
     </div>
   );

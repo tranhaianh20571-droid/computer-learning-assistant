@@ -4,7 +4,7 @@
 凭据来自模板 .env 的 FIRST_SUPERUSER / FIRST_SUPERUSER_PASSWORD，脚本不打印密码。
 """
 
-from app.core.config import settings
+from app.infrastructure.config import settings
 from app.slice0_app import app as slice0_app
 
 

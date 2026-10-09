@@ -12,10 +12,11 @@ from typing import Any
 
 import httpx
 
-from .base import CAPABILITIES, PROBE_TEXT, AdapterBase, image_data_url
+from .base import CAPABILITIES, PROBE_TEXT, AdapterBase, AdapterError, image_data_url
 
 
 class GeminiAdapter(AdapterBase):
+    supports_text_stream = True
     kind = "content_model"
     protocol = "gemini"
     capabilities = CAPABILITIES
@@ -25,7 +26,8 @@ class GeminiAdapter(AdapterBase):
         return {"Content-Type": "application/json"}
 
     def _model_url(self, method: str) -> str:
-        return f"{self.endpoint}/v1beta/models/{self.model_name}:{method}"
+        endpoint = self.endpoint.rstrip("/").removesuffix("/v1").removesuffix("/v1beta")
+        return f"{endpoint}/v1beta/models/{self.model_name}:{method}"
 
     def _params(self) -> dict[str, str]:
         key = self.credentials.get("api_key", "")
@@ -80,22 +82,19 @@ class GeminiAdapter(AdapterBase):
 
     def _probe_streaming(self) -> None:
         payload = {"contents": [{"role": "user", "parts": [{"text": PROBE_TEXT}]}]}
-        client = self._client_or_new()
         try:
-            with client.stream(
+            with self._stream_request(
                 "POST",
                 self._model_url("streamGenerateContent"),
                 json=payload,
                 params={**self._params(), "alt": "sse"},
                 headers={**self.headers, "Accept": "text/event-stream"},
-            ) as response:
-                if not (200 <= response.status_code < 300):
-                    self._map_status(response.status_code, {"raw": response.read()[:256]})
-                for _ in response.iter_lines():
+            ) as lines:
+                for _ in lines:
                     return
+        except AdapterError:
+            raise
         except Exception as exc:  # noqa: BLE001
-            from .base import AdapterError
-
             raise AdapterError("connection_error", status=502) from exc
 
     # ------------------------------------------------------------------
@@ -109,6 +108,8 @@ class GeminiAdapter(AdapterBase):
         """Pydantic/OpenAPI schema → Gemini OpenAPI 子集：$ref 内联、剥离不支持键。"""
         if not isinstance(schema, dict):
             return schema
+        if defs is None:
+            defs = schema.get("$defs", {})
         if "$ref" in schema:
             name = str(schema["$ref"]).rsplit("/", 1)[-1]
             if name in seen:
@@ -139,18 +140,51 @@ class GeminiAdapter(AdapterBase):
 
     def _messages_to_contents(self, messages: list[dict]) -> tuple[list[dict], Optional[dict]]:
         """system → systemInstruction；assistant → model；返回 (contents, system_instruction)。"""
+        import json
         contents: list[dict] = []
         system_parts: list[dict] = []
         for m in messages:
-            text = str(m.get("content", "") or "")
-            if not text:
-                continue
+            content = m.get("content", "") or ""
             if m.get("role") == "system":
-                system_parts.append({"text": text})
+                system_parts.append({"text": str(content)})
                 continue
-            contents.append(
-                {"role": "model" if m.get("role") == "assistant" else "user", "parts": [{"text": text}]}
-            )
+            parts = []
+            if m.get("role") == "tool":
+                try:
+                    result = json.loads(content)
+                except (TypeError, ValueError):
+                    result = {"result": str(content)}
+                if not isinstance(result, dict):
+                    result = {"result": result}
+                parts.append({"functionResponse": {"name": m.get("name", ""), "response": result}})
+            elif isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "text":
+                        parts.append({"text": item["text"]})
+                    elif item.get("type") == "image_url":
+                        url = item["image_url"]["url"]
+                        if not url.startswith("data:"):
+                            from .base import AdapterError
+                            raise AdapterError("unsupported_capability", status=422)
+                        header, data = url.split(",", 1)
+                        parts.append({"inline_data": {"mime_type": header[5:].split(";")[0], "data": data}})
+            elif content:
+                parts.append({"text": str(content)})
+            for call in m.get("tool_calls", []):
+                fn = call["function"]
+                args = fn.get("arguments", {})
+                part = {"functionCall": {"name": fn["name"],
+                         "args": json.loads(args) if isinstance(args, str) else args}}
+                signature = (call.get("provider_details") or {}).get("thought_signature")
+                if signature:
+                    part["thoughtSignature"] = signature
+                parts.append(part)
+            if parts:
+                role = "model" if m.get("role") == "assistant" else "user"
+                if contents and contents[-1]["role"] == role:
+                    contents[-1]["parts"].extend(parts)
+                else:
+                    contents.append({"role": role, "parts": parts})
         return contents, ({"parts": system_parts} if system_parts else None)
 
     def generate(self, messages: list[dict], **options: Any) -> dict:
@@ -202,17 +236,20 @@ class GeminiAdapter(AdapterBase):
         return self._parse_generate_body(body)
 
     def _parse_generate_body(self, body: dict) -> dict:
+        import uuid
         candidates = body.get("candidates") or [{}]
         cand = candidates[0] or {}
         parts = ((cand.get("content") or {}).get("parts")) or []
-        text = "".join(str(p.get("text", "")) for p in parts if "text" in p)
-        tool_arguments = None
+        text = "".join(str(p.get("text", "")) for p in parts if "text" in p and not p.get("thought"))
+        calls = []
         for p in parts:
-            fc = p.get("function_call")
+            fc = p.get("function_call") or p.get("functionCall")
             if fc and isinstance(fc, dict):
-                tool_arguments = fc.get("args") or {}
-                break
-        return {"content": text, "tool_arguments": tool_arguments}
+                calls.append({"id": fc.get("id") or f"gemini_{uuid.uuid4().hex[:16]}", "type": "function",
+                              "function": {"name": fc.get("name", ""), "arguments": fc.get("args") or {}},
+                              "provider_details": {"thought_signature": p.get("thoughtSignature") or p.get("thought_signature")}})
+        return {"content": text, "tool_arguments": calls[0]["function"]["arguments"] if calls else None,
+                "tool_calls": calls}
 
     def stream(self, messages: list[dict], **options: Any):
         """SSE 流式纯文本生成：streamGenerateContent?alt=sse，逐段 yield 文本增量。"""
@@ -220,18 +257,15 @@ class GeminiAdapter(AdapterBase):
         payload: dict[str, Any] = {"contents": contents}
         if system_instruction:
             payload["systemInstruction"] = system_instruction
-        client = self._client_or_new()
         try:
-            with client.stream(
+            with self._stream_request(
                 "POST",
                 self._model_url("streamGenerateContent"),
                 json=payload,
                 params={**self._params(), "alt": "sse"},
                 headers={**self.headers, "Accept": "text/event-stream"},
-            ) as response:
-                if not (200 <= response.status_code < 300):
-                    self._map_status(response.status_code, {"raw": response.read()[:256]})
-                for line in response.iter_lines():
+            ) as lines:
+                for line in lines:
                     if not line or not line.startswith("data:"):
                         continue
                     data = line[5:].strip()
@@ -244,7 +278,7 @@ class GeminiAdapter(AdapterBase):
                     parts = ((chunk.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
                     for p in parts:
                         t = p.get("text")
-                        if t:
+                        if t and not p.get("thought"):
                             yield t
         except httpx.TimeoutException as exc:
             from .base import AdapterError

@@ -71,21 +71,10 @@ def create_slice1_app(state: Optional[Slice1State] = None, slice0_state: Optiona
     app.state.slice1 = state
 
     def resolve_user(request: Request):
-        raw = request.headers.get("Authorization", "")
-        token = raw[7:] if raw.startswith("Bearer ") else ""
-        if not token:
-            for part in request.headers.get("Cookie", "").split(";"):
-                k, _, v = part.strip().partition("=")
-                if k == "session_token":
-                    token = v
-        from .auth.service import AuthError
+        # 登录态优先；无有效会话时以访客身份继续（auth/guest.py）
+        from .auth.guest import resolve_user_or_guest
 
-        try:
-            return slice0_state.auth.resolve_session(token)
-        except AuthError as exc:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=exc.status, detail={"error_code": exc.code, "message": exc.message})
+        return resolve_user_or_guest(request, slice0_state.auth)
 
     app.include_router(
         create_slice1_router(

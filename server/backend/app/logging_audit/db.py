@@ -2,7 +2,7 @@
 
 连接串单一事实来源：`server/.env` 的 `DATABASE_URL`。
 优先级：LEARNING_DATABASE_URL 环境变量 > server/.env 的 DATABASE_URL > 内置开发默认值。
-这样 alembic CLI（经 app.core.config 读 server/.env）与测试使用同一个库，
+这样 alembic CLI（经 app.infrastructure.config 读 server/.env）与测试使用同一个库，
 避免“迁移成功但测试报缺列”的双库不一致。
 """
 
@@ -92,6 +92,9 @@ class Database:
         self._factory = sessionmaker(bind=self.engine, expire_on_commit=False, future=True)
 
     def create_all(self) -> None:
+        from ..agents.task_binding import AgentBudgetRow  # noqa: F401
+        from ..teaching.authorization import LessonAuthorizationRow  # noqa: F401
+
         Base.metadata.create_all(self.engine)
         if self.url.startswith("postgresql"):
             install_audit_triggers(self.engine)

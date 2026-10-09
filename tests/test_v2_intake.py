@@ -1,322 +1,220 @@
-"""v2 生成前访谈：awaiting_intake 等待态、范围并入第一轮、模型追问、4 轮上限、降级。
-
-合成适配器与合成数据；无真实凭据。流程口径：
-- route_generate 任务先进入 awaiting_intake（第一轮 3 题规则问卷，范围题不可跳过）；
-- decision(kind=intake) 提交答案 → 恢复任务；范围题答案直接落 resolved_scope；
-- 后续轮次由模型追问（返回空 questions 即完成）；失败/无 adapter 降级直接生成；
-- 轮次达到 MAX_INTAKE_ROUNDS=4 后不再提问。
-"""
-
-from __future__ import annotations
-
-import json
-import sys
-import uuid
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "support"))
-
-import pytest
+"""Dynamic PydanticAI interview: 4-6 questions, depth, semantic answers and AI scope."""
+import json,uuid
+from copy import deepcopy
+from sqlalchemy import select
 from fastapi.testclient import TestClient
-
+import pytest
+from threading import Event
+from concurrent.futures import ThreadPoolExecutor
 from backend.logging_audit.db import Database
-from backend.logging_audit.models import install_audit_triggers
 from backend.logging_audit.repositories import PgAuditLog
 from backend.slice0_app import Slice0State
-from backend.slice3_app import Slice3State, create_slice3_app
-
-from common_fixtures import (
-    ROUTE_OK_PAYLOAD,
-    SyntheticModelAdapter,
-    auth_headers,
-    make_user,
-)
-
-PASSWORD = "synthetic-password-12345"
+from backend.slice3_app import Slice3State,create_slice3_app
+from backend.planning.models import PlanningTaskStateRow,LearningRouteRow
+from backend.prompts.service import PromptBindingRow
+from common_fixtures import synthetic_output_schema, synthetic_output_response
+from common_fixtures import SyntheticModelAdapter,SyntheticSearchAdapter,ROUTE_OK_PAYLOAD,OUTLINE_OK_PAYLOAD,make_user,auth_headers
 
 
-@pytest.fixture(scope="module")
-def database() -> Database:
-    db = Database()
-    db.create_all()
-    install_audit_triggers(db.engine)
-    return db
+def questions(prefix='q'):
+    purposes=['detail_preference','prior_experience','constraints','goals']
+    labels=['希望讲得详细，包含解释和例子','能独立完成一般任务，较复杂任务需查资料','每周能学习六小时','希望独立完成实际项目']
+    return [{'question_id':prefix+str(i+1),'purpose':purpose,'topic_key':prefix+purpose,
+        'question':['希望当前主题的讲解展开到什么程度？','已有相关经验的实际使用情况更接近哪一种？','每周能稳定投入多少学习时间？','学完后希望独立完成什么任务？'][i],
+        'kind':'single','skippable':True,'information_gap':'补齐影响教学安排的信息','planning_effect':'决定解释、实践和先修安排',
+        'options':[{'key':'a','label':labels[i]},{'key':'b','label':'另一种合成学习情况'}]} for i,purpose in enumerate(purposes)]
 
 
-@pytest.fixture()
-def env(database: Database):
-    container = {"model": None, "search": None}
-    state = Slice3State(
-        database, PgAuditLog(database),
-        model_adapter_factory=lambda owner, task_id: container["model"],
-        search_adapter_factory=lambda owner, task_id: container["search"],
-    )
-    app = create_slice3_app(state=state)
-    app.state.slice0 = Slice0State(database, PgAuditLog(database))
-    return {
-        "client": TestClient(app),
-        "database": database,
-        "container": container,
-    }
+class InterviewAdapter(SyntheticModelAdapter):
+    def __init__(self,scope='route',followups=0,bad_once=False):
+        super().__init__();self.scope=scope;self.followups=followups;self.bad_once=bad_once;self.interview_contexts=[];self.plan_messages=[]
+    def generate(self,messages,**options):
+        functions=[item['function'] for item in options.get('tools',[])]
+        native_schema=synthetic_output_schema(options)
+        schemas=[native_schema.get('properties',{})] if native_schema else [item.get('parameters',{}).get('properties',{}) for item in functions]
+        if any('ready_to_plan' in properties for properties in schemas):
+            context=next(json.loads(item['content']) for item in messages if item['role']=='user' and item['content'].startswith('{'))
+            self.interview_contexts.append(context)
+            first=context['shown_count']==0
+            pending=questions() if first else []
+            if not first and context['shown_count']==4 and self.followups:
+                pending=[{**questions('extra')[0],'question_id':'mastery','purpose':'mastery','topic_key':'actual_application',
+                    'question':'独立使用已有语言时通常需要多少帮助？'},
+                    {**questions('extra')[1],'question_id':'difficulty','purpose':'difficulties','topic_key':'learning_obstacles',
+                    'question':'学习新语言时最常遇到什么困难？'}][:self.followups]
+            answered=[answer for answer in context['answers'] if answer.get('status')=='answered']
+            profile={'learning_goal':context['original_request'],'detail_preference':'详细解释并提供例子','detail_status':'confirmed' if answered else 'unknown'}
+            prior=next((answer for answer in answered if answer.get('purpose')=='prior_experience'),None)
+            if prior:
+                profile['prior_experience']=[{'domain':'C++','level':'independent','experience':prior['free_text'] or '能独立完成一般任务',
+                    'evidence_question_ids':[prior['question_id']],'familiar_concepts':[],'uncertain_concepts':['具体概念是否熟悉尚不确定']}]
+                profile['knowledge_transfers']=[{'source':'C++实际编程经验','target':'Java程序结构','boundary':'不是所有概念都熟悉，不自动压缩基础解释',
+                    'evidence_question_ids':[prior['question_id']]}]
+            output={'questions':pending,'ready_to_plan':not pending,'planning_scope':self.scope,'learner_profile':profile,'assumptions':[]}
+            if self.bad_once and first:
+                self.bad_once=False;output['questions'][0]['purpose']='goals'
+        else:
+            self.plan_messages.append(messages)
+            output=deepcopy(OUTLINE_OK_PAYLOAD if any('units' in properties for properties in schemas) else ROUTE_OK_PAYLOAD)
+        return synthetic_output_response(output,options)
 
 
-def _setup_task(env) -> tuple[str, str, str]:
-    """注册用户 + 建路线壳 + 建 route_generate 任务，返回 (user_id, token, task_id)。"""
-    client = env["client"]
-    user_id, token = make_user(client, env["database"])
-    r = client.post(
-        "/api/planning/routes", headers=auth_headers(token),
-        json={"title": "机器学习入门路线", "scenario": "self_study"},
-    )
-    assert r.status_code == 201, r.text
-    route_id = r.json()["route_id"]
-    r = client.post(
-        "/api/planning/tasks", headers=auth_headers(token),
-        json={
-            "idempotency_key": f"t-{uuid.uuid4().hex[:8]}",
-            "task_kind": "route_generate",
-            "planning_scope": "auto",
-            "target_route_id": route_id,
-        },
-    )
-    assert r.status_code == 201, r.text
-    return user_id, token, r.json()["task_id"]
+@pytest.fixture(scope='module')
+def database():
+    db=Database();db.create_all();yield db;db.dispose()
 
 
-def _state(client, token: str, task_id: str) -> dict:
-    r = client.get(f"/api/planning/tasks/{task_id}", headers=auth_headers(token))
-    assert r.status_code == 200, r.text
-    return r.json()
+@pytest.fixture
+def env(database):
+    model=InterviewAdapter();state=Slice3State(database,PgAuditLog(database),model_adapter_factory=lambda *args:model,
+        search_adapter_factory=lambda *args:SyntheticSearchAdapter())
+    app=create_slice3_app(state);app.state.slice0=Slice0State(database,PgAuditLog(database));client=TestClient(app)
+    owner,token=make_user(client,database)
+    route=client.post('/api/planning/routes',headers=auth_headers(token),json={'title':'Java学习','input':'想详细学习Java，有C++使用经历但不熟悉所有概念。'}).json()['route_id']
+    task=client.post('/api/planning/tasks',headers=auth_headers(token),json={'task_kind':'route_generate','planning_scope':'auto',
+        'target_route_id':route,'idempotency_key':uuid.uuid4().hex}).json()['task_id']
+    return client,state,owner,auth_headers(token),task,model,route
 
 
-class TestIntakeRound1:
-    def test_first_run_enters_intake_with_rule_questions(self, env) -> None:
-        _, token, task_id = _setup_task(env)
-        r = env["client"].post(
-            f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token)
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["task_status"] == "partial"
-        assert body["wait_state"] == "awaiting_intake"
-
-        st = _state(env["client"], token, task_id)
-        assert st["wait_state"] == "awaiting_intake"
-        intake = st["intake"]
-        assert intake["round"] == 1 and intake["max_rounds"] == 4
-        qids = [q["question_id"] for q in intake["questions"]]
-        assert qids == ["scope", "foundation", "depth"]
-        scope_q = intake["questions"][0]
-        assert scope_q["skippable"] is False
-        assert {o["key"] for o in scope_q["options"]} == {"course", "route"}
-
-    def test_requires_login(self, env) -> None:
-        _, _, task_id = _setup_task(env)
-        r = env["client"].post(f"/api/planning/tasks/{task_id}/run")
-        assert r.status_code == 401, r.text
+def read(env):return env[0].get('/api/planning/tasks/'+env[4],headers=env[3]).json()
+def run(env):return env[0].post('/api/planning/tasks/'+env[4]+'/run',headers=env[3])
+def answer(env,skip=False,free=None):
+    pending=read(env)['intake']['questions']
+    values=[{'question_id':question['question_id'],'selections':[] if skip else ['a'],'skipped':skip,
+        'free_text':free if question['purpose']=='prior_experience' and free else ''} for question in pending]
+    return env[0].post('/api/planning/tasks/'+env[4]+'/decision',headers=env[3],json={'kind':'intake','answers':values})
 
 
-class TestIntakeAnswersResume:
-    def test_answers_merge_scope_and_generate(self, env) -> None:
-        client = env["client"]
-        env["container"]["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
-        _, token, task_id = _setup_task(env)
-        client.post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-
-        r = client.post(
-            f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(token),
-            json={
-                "kind": "intake",
-                "answers": [
-                    {"question_id": "scope", "selections": ["route"]},
-                    {"question_id": "foundation", "selections": ["some"]},
-                    {"question_id": "depth", "selections": ["practice"]},
-                ],
-            },
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        # 无 adapter 追问能力 → 降级直接生成；答案注入后候选生成成功
-        assert body["task_status"] == "succeeded", body
-        assert body.get("draft", {}).get("draft_id")
-
-        st = _state(client, token, task_id)
-        # 范围题答案直接落 resolved_scope（合并旧的范围澄清）
-        assert st["resolved_scope"] == "route"
-        assert st["intake"]["done"] is True
-        assert st["intake"]["round"] == 1
-
-    def test_free_text_only_answer_rejected(self, env) -> None:
-        _, token, task_id = _setup_task(env)
-        env["client"].post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-        r = env["client"].post(
-            f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(token),
-            json={"kind": "intake", "answers": [{"question_id": "", "selections": ["x"]}]},
-        )
-        assert r.status_code == 400, r.text
+def test_first_batch_is_ai_generated_four_questions_with_depth_and_original_goal(env):
+    assert run(env).json()['wait_state']=='awaiting_intake'
+    intake=read(env)['intake'];assert intake['shown_count']==4 and intake['min_questions']==4 and intake['max_questions']==6
+    assert len(intake['questions'])==4 and any(question['purpose']=='detail_preference' for question in intake['questions'])
+    assert not any(question['question_id']=='scope' for question in intake['questions'])
+    assert env[5].interview_contexts[0]['original_request']=='想详细学习Java，有C++使用经历但不熟悉所有概念。'
+    with env[1].db.session() as session:
+        binding=session.scalar(select(PromptBindingRow).where(PromptBindingRow.task_id==env[4],PromptBindingRow.prompt_name=='learning_interview_v3'))
+        assert binding and binding.template_sha256
 
 
-class TestModelFollowups:
-    def test_followup_round_then_complete(self, env) -> None:
-        client = env["client"]
-        followup_q = {
-            "questions": [{
-                "question_id": "time_budget",
-                "question": "每周能投入多少时间？",
-                "kind": "single",
-                "skippable": True,
-                "options": [
-                    {"key": "low", "label": "3 小时以内", "detail": ""},
-                    {"key": "mid", "label": "3-10 小时", "detail": ""},
-                ],
-            }],
-        }
-
-        class Adapter(SyntheticModelAdapter):
-            """访谈追问调用返回追问集，其余调用返回路线候选。"""
-
-            def __init__(self):
-                super().__init__(payload=ROUTE_OK_PAYLOAD)
-                self.rounds = [followup_q, {"questions": []}]
-
-            def generate(self, messages, **options):
-                joined = "".join(str(m.get("content", "")) for m in messages)
-                if "学习者目标与已回答内容" in joined:
-                    payload = self.rounds.pop(0) if self.rounds else {"questions": []}
-                    # 按请求形状应答（ADR-023：Agent 路径 tool 档优先）
-                    if "tools" in options:
-                        return {"tool_arguments": json.dumps(payload, ensure_ascii=False)}
-                    return {"content": json.dumps(payload, ensure_ascii=False)}
-                return super().generate(messages, **options)
-
-        env["container"]["model"] = Adapter()
-        _, token, task_id = _setup_task(env)
-        client.post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-
-        # 第一轮答案 → 模型追问一轮（round 2）
-        r = client.post(
-            f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(token),
-            json={"kind": "intake", "answers": [
-                {"question_id": "scope", "selections": ["route"]},
-                {"question_id": "foundation", "selections": ["zero"]},
-                {"question_id": "depth", "selections": ["concept"]},
-            ]},
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["task_status"] == "partial" and body["wait_state"] == "awaiting_intake"
-        st = _state(client, token, task_id)
-        assert st["intake"]["round"] == 2
-        assert st["intake"]["questions"][0]["question_id"] == "time_budget"
-
-        # 第二轮答案 → 模型返回空 → 完成并生成
-        r = client.post(
-            f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(token),
-            json={"kind": "intake", "answers": [
-                {"question_id": "time_budget", "selections": ["mid"]},
-            ]},
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["task_status"] == "succeeded", r.text
-        st = _state(client, token, task_id)
-        assert st["intake"]["done"] is True
-        assert st["intake"]["round"] == 2
-
-    def test_followup_model_error_degrades_to_generate(self, env) -> None:
-        client = env["client"]
-
-        class Adapter(SyntheticModelAdapter):
-            """追问调用直接抛错 → 降级直接生成。"""
-
-            def generate(self, messages, **options):
-                joined = "".join(str(m.get("content", "")) for m in messages)
-                if "学习者目标与已回答内容" in joined:
-                    raise RuntimeError("timeout")
-                return super().generate(messages, **options)
-
-        env["container"]["model"] = Adapter()
-        _, token, task_id = _setup_task(env)
-        client.post(f"/api/planning/tasks/{task_id}/run", headers=auth_headers(token))
-        r = client.post(
-            f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(token),
-            json={"kind": "intake", "answers": [
-                {"question_id": "scope", "selections": ["course"]},
-                {"question_id": "foundation", "selections": ["solid"]},
-                {"question_id": "depth", "selections": ["deep"]},
-            ]},
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["task_status"] == "succeeded", r.text
-        st = _state(client, token, task_id)
-        assert st["intake"]["done"] is True
+def test_semantic_answers_profile_and_transfer_reach_planning(env):
+    run(env);response=answer(env,free='独立写过小程序，遇到复杂问题仍需帮助。');assert response.status_code==200,response.text
+    assert response.json()['task_status']=='succeeded'
+    intake=read(env)['intake'];assert intake['done'] and len(intake['history'])==4
+    assert intake['learner_profile']['detail_status']=='confirmed'
+    assert intake['learner_profile']['prior_experience'][0]['level']=='independent'
+    assert any('独立写过小程序' in json.dumps(messages,ensure_ascii=False) and 'knowledge_transfers' in json.dumps(messages) for messages in env[5].plan_messages)
+    assert intake['answers'][0]['labels']==['希望讲得详细，包含解释和例子']
 
 
-class TestIntakeCapAndGuards:
-    def test_round_cap_stops_asking(self, env) -> None:
-        client = env["client"]
-        followup_q = {
-            "questions": [{
-                "question_id": "always", "question": "还会追问吗？", "kind": "single",
-                "skippable": True,
-                "options": [{"key": "yes", "label": "会", "detail": ""},
-                            {"key": "no", "label": "不会", "detail": ""}],
-            }],
-        }
+def test_followups_cannot_exceed_six_and_refresh_keeps_question_history(env):
+    env[5].followups=2;run(env);assert answer(env).json()['wait_state']=='awaiting_intake'
+    intake=read(env)['intake'];assert intake['shown_count']==6 and len(intake['history'])==6 and len(intake['questions'])==2
+    assert answer(env).json()['task_status']=='succeeded'
+    assert read(env)['intake']['shown_count']==6 and read(env)['intake']['done']
 
-        class Adapter(SyntheticModelAdapter):
-            def __init__(self):
-                super().__init__(payload=ROUTE_OK_PAYLOAD)
 
-            def generate(self, messages, **options):
-                joined = "".join(str(m.get("content", "")) for m in messages)
-                if "学习者目标与已回答内容" in joined:
-                    return {"content": json.dumps(followup_q, ensure_ascii=False)}
-                return super().generate(messages, **options)
+def test_five_question_finish_is_allowed(env):
+    env[5].followups=1;run(env);answer(env);assert read(env)['intake']['shown_count']==5
+    assert answer(env).json()['task_status']=='succeeded'
 
-        env["container"]["model"] = Adapter()
-        _, token, task_id = _setup_task(env)
-        headers = auth_headers(token)
-        client.post(f"/api/planning/tasks/{task_id}/run", headers=headers)
 
-        # 连续回答：第一轮带范围题；第 4 轮达到上限 → 直接生成；第 5 次 decision → 409
-        answer_scope = {"kind": "intake", "answers": [
-            {"question_id": "scope", "selections": ["route"]},
-            {"question_id": "always", "selections": ["yes"]},
-        ]}
-        answer = {"kind": "intake", "answers": [{"question_id": "always", "selections": ["yes"]}]}
-        statuses = []
-        for i in range(4):
-            payload = answer_scope if i == 0 else answer
-            r = client.post(
-                f"/api/planning/tasks/{task_id}/decision", headers=headers, json=payload,
-            )
-            assert r.status_code == 200, r.text
-            body = r.json()
-            statuses.append(body.get("wait_state") or body["task_status"])
-        assert statuses[:3] == ["awaiting_intake"] * 3, statuses
-        assert statuses[3] == "succeeded", statuses
-        r = client.post(
-            f"/api/planning/tasks/{task_id}/decision", headers=headers, json=answer,
-        )
-        assert r.status_code == 409, r.text  # 访谈已关闭（上限生效）
-        st = _state(client, token, task_id)
-        assert st["intake"]["round"] == 4 and st["intake"]["done"] is True
+def test_all_skipped_is_valid_and_depth_is_assumption(env):
+    run(env);response=answer(env,skip=True);assert response.status_code==200,response.text
+    data=read(env)['intake'];assert data['done'] and all(item['status']=='skipped' for item in data['answers'])
+    assert data['learner_profile']['detail_status']=='assumed'
 
-    def test_wrong_state_and_cross_owner(self, env) -> None:
-        client = env["client"]
-        owner_token, other = None, None
-        _, token, task_id = _setup_task(env)
-        owner_token = token
-        _, other = make_user(client, env["database"])
-        # 任务未进入等待态（未 run）→ 409
-        r = client.post(
-            f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(owner_token),
-            json={"kind": "intake", "answers": [{"question_id": "scope", "selections": ["route"]}]},
-        )
-        assert r.status_code == 409, r.text
-        # 他人 → 404（不泄露存在性）
-        r = client.post(
-            f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(other),
-            json={"kind": "intake", "answers": [{"question_id": "scope", "selections": ["route"]}]},
-        )
-        assert r.status_code == 404, r.text
+
+def test_validator_uses_pydanticai_retry_for_missing_depth(env):
+    env[5].bad_once=True;assert run(env).json()['wait_state']=='awaiting_intake'
+    assert len(env[5].interview_contexts)==2
+
+
+def test_ai_course_scope_produces_course_draft_without_scope_question(env):
+    env[5].scope='course';run(env);response=answer(env)
+    assert response.json()['task_status']=='succeeded',response.text
+    state=read(env);assert state['resolved_scope']=='course' and state['target_kind']=='course'
+    draft=env[0].get('/api/planning/drafts/'+state['draft_id'],headers=env[3]).json()
+    assert draft['draft_kind']=='course_outline' and draft['content']['units']
+    with env[1].db.session() as session:assert session.get(LearningRouteRow,env[6]).deleted_at
+
+
+@pytest.mark.parametrize('values',[
+    [{'question_id':'fake','selections':['a']}],
+    [{'question_id':'q1','selections':['invalid']}],
+    [{'question_id':'q1','selections':['a','b']}],
+    [{'question_id':'q1','selections':['a']},{'question_id':'q1','selections':['a']}],
+])
+def test_forged_or_invalid_answer_does_not_mutate_state(env,values):
+    run(env);before=read(env)['intake']
+    response=env[0].post('/api/planning/tasks/'+env[4]+'/decision',headers=env[3],json={'kind':'intake','answers':values})
+    assert response.status_code==400 and read(env)['intake']==before
+
+
+def test_cross_owner_denied_and_duplicate_submission_does_not_add_questions(env):
+    run(env);stranger,token=make_user(env[0],env[1].db)
+    assert env[0].get('/api/planning/tasks/'+env[4],headers=auth_headers(token)).status_code==404
+    answer(env);before=read(env)['intake']['shown_count']
+    response=env[0].post('/api/planning/tasks/'+env[4]+'/decision',headers=env[3],json={'kind':'intake','answers':[{'question_id':'q1','selections':['a']}]})
+    assert response.status_code==409 and read(env)['intake']['shown_count']==before
+
+
+def test_provider_failure_does_not_fallback_to_fixed_questionnaire(env):
+    env[1].planning.model_adapter_factory=lambda *args:None
+    assert run(env).json()['task_status']=='failed'
+    assert not read(env)['intake']['questions']
+
+
+def test_legacy_unfinished_answers_are_preserved_and_depth_not_reasked(env):
+    from backend.planning.intake import normalize_intake
+    old={'round':1,'questions':[{'question_id':'depth','question':'旧详略题','kind':'single','options':[{'key':'deep','label':'详细学习'}]}],
+        'answers':[{'question_id':'depth','selections':['deep'],'free_text':''}],'done':False}
+    migrated=normalize_intake(old)
+    assert migrated['schema_version']==3 and migrated['shown_count']==1
+    assert migrated['answers'][0]['labels']==['详细学习'] and migrated['history'][0]['purpose']=='detail_preference'
+
+
+def test_profile_reaches_lesson_context_and_changes_prewarm_key(env):
+    from test_teaching_assessments import LearningAdapter
+    from backend.teaching.pedagogy import lesson_context
+    client,state,owner,headers,task,model,route=env
+    model.scope='course';run(env);answer(env,free='相关语言只跟过教程，独立使用不熟悉。')
+    info=read(env);draft=client.get('/api/planning/drafts/'+info['draft_id'],headers=headers).json()
+    assert client.post('/api/planning/drafts/'+draft['draft_id']+'/confirm',headers=headers,json={'revision':draft['revision'],'idempotency_key':uuid.uuid4().hex}).status_code==200
+    overview=state.overview.course_overview(info['target_id'],actor_id=owner);lesson=overview['units'][0]['lessons'][0]['lesson_id']
+    state.teaching.model_adapter_factory=lambda *args:LearningAdapter()
+    start=state.teaching.start_lesson(info['target_id'],lesson,actor_id=owner)
+    conv=state.teaching._conversation(start['conversation_id'],owner)
+    context=lesson_context(state.teaching,conv)
+    assert context['learner_profile']['profile']['detail_status']=='confirmed'
+    assert context['learner_profile']['answers'][1]['free_text']=='相关语言只跟过教程，独立使用不熟悉。'
+    before=state.teaching.preparation.keys(conv)[0]
+    with state.db.session() as session:
+        row=session.get(PlanningTaskStateRow,task);data=json.loads(row.intake_json)
+        data['learner_profile']['detail_preference']='希望简洁介绍';row.intake_json=json.dumps(data,ensure_ascii=False)
+    assert state.teaching.preparation.keys(conv)[0]!=before
+
+
+@pytest.mark.parametrize('action',['cancel','delete'])
+def test_late_interview_result_does_not_publish_after_cancel_or_delete(env,action):
+    began,release=Event(),Event();model=env[5];original=model.generate
+    def paused(messages,**options):
+        began.set();assert release.wait(10);return original(messages,**options)
+    model.generate=paused
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future=pool.submit(run,env);assert began.wait(4)
+        if action=='cancel':env[1].tasks.request_cancel(env[4],actor_id=env[2])
+        else:assert env[0].delete('/api/planning/routes/'+env[6],headers=env[3]).status_code==200
+        release.set();result=future.result(timeout=10)
+    assert result.json()['task_status']=='failed'
+    assert not read(env)['intake']['questions']
+
+
+def test_unanswered_old_questionnaire_is_replaced_and_keeps_legacy_snapshot(env):
+    old={'round':1,'questions':[{'question_id':'scope','question':'旧范围题','kind':'single','options':[{'key':'route','label':'路线'}]}],
+        'answers':[],'done':False}
+    with env[1].db.session() as session:
+        row=session.get(PlanningTaskStateRow,env[4]);row.intake_json=json.dumps(old,ensure_ascii=False);row.wait_state='awaiting_intake'
+    response=env[0].post('/api/planning/tasks/'+env[4]+'/decision',headers=env[3],json={'kind':'intake','answers':[]})
+    assert response.json()['wait_state']=='awaiting_intake'
+    assert read(env)['intake']['shown_count']==4 and not any(question['question_id']=='scope' for question in read(env)['intake']['questions'])
+    with env[1].db.session() as session:assert json.loads(session.get(PlanningTaskStateRow,env[4]).intake_json)['legacy_history']==old['questions']

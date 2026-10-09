@@ -166,8 +166,8 @@ class TestViewState:
         _, other_token = make_user(client, env["database"])
         other = client.get(
             f"/api/planning/viewstates/route/{route_id}", headers=auth_headers(other_token)
-        ).json()
-        assert other["canvas"] == {}
+        )
+        assert other.status_code == 404
 
 
 class TestLayoutConstants:
@@ -178,7 +178,7 @@ class TestLayoutConstants:
         assert LAYOUT["stage_w"] == 220
         assert LAYOUT["course_w"] == 300
         assert LAYOUT["level_gap"] == 72 and LAYOUT["row_gap"] == 18
-        assert LAYOUT["accent_w"] == 5
+        assert LAYOUT["accent_w"] == 0
 
     def test_indent_tree_geometry_parent_centered(self) -> None:
         payload = {
@@ -215,10 +215,10 @@ class TestLayoutConstants:
         assert cards and all(el.get("roundness", {}).get("type") == 2 for el in cards)
         bars = [el for el in scene["elements"]
                 if el["type"] == "rectangle" and el["id"].startswith("acc_")]
-        assert bars, "课程卡片应有层级色 accent 条"
+        assert not bars, "黑白节点不使用彩色强调条"
         descs = [el for el in scene["elements"]
                  if el["type"] == "text" and el["fontSize"] == LAYOUT["desc_size"]]
-        assert descs and all(el["strokeColor"] == "#6b7280" for el in descs)
+        assert descs and all(el["strokeColor"] == "#000000" for el in descs)
 
     def test_prereq_arrow_orthogonal_no_crossing(self) -> None:
         payload = {

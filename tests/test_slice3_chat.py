@@ -8,11 +8,12 @@ import uuid
 import pytest
 
 from common_fixtures import (
-    SyntheticModelAdapter,
     SyntheticSearchAdapter,
     auth_headers,
     make_user,
 )
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.models.function import FunctionModel
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -23,12 +24,16 @@ from backend.slice0_app import Slice0State  # noqa: E402
 from backend.slice3_app import Slice3State, create_slice3_app  # noqa: E402
 
 
-class ChatModelAdapter(SyntheticModelAdapter):
-    """合成聊天适配器：纯文字输出。"""
+class ChatModelAdapter(FunctionModel):
+    """Native synthetic model retaining request observations for API assertions."""
 
-    def generate(self, messages, **options):
-        self.generate_calls.append({"options": options, "messages": [m["role"] for m in messages]})
-        return {"content": f"已收到（合成回答 {len(self.generate_calls)}）"}
+    def __init__(self):
+        self.generate_calls = []
+        super().__init__(self._answer)
+
+    def _answer(self, messages, info):
+        self.generate_calls.append({"messages": messages, "instructions": info.instructions})
+        return ModelResponse(parts=[TextPart(f"已收到（合成回答 {len(self.generate_calls)}）")])
 
 
 @pytest.fixture(scope="module")
@@ -82,6 +87,10 @@ class TestChatFlow:
                   "idempotency_key": f"m{uuid.uuid4().hex[:8]}"},
         )
         assert r2.json()["generation"] == 2
+        native_call = env["container"]["model"].generate_calls[-1]
+        assert "什么是事务？" in str(native_call["messages"])
+        assert "已收到（合成回答 1）" in str(native_call["messages"])
+        assert native_call["instructions"]
 
         # 历史完整：旧 generation 消息保留、不回填
         got = client.get(f"/api/chat/{conv_id}", headers=auth_headers(token)).json()
@@ -251,20 +260,18 @@ class TestChatBoundaries:
         assert r.status_code == 404
 
 
-class StreamingChatAdapter:
-    """合成流式聊天适配器：固定分段 yield，记录调用。"""
+class StreamingChatAdapter(FunctionModel):
+    """Synthetic native streaming model with fixed ordered text fragments."""
 
     CHUNKS = ["TCP ", "三次握手", "的目的是建立可靠连接。"]
 
-    def probe(self, capability: str):
-        from types import SimpleNamespace
+    def __init__(self):
+        super().__init__(self._answer, stream_function=self._stream)
 
-        return SimpleNamespace(capability=capability, state="available")
+    def _answer(self, messages, info):
+        return ModelResponse(parts=[TextPart("".join(self.CHUNKS))])
 
-    def generate(self, messages, **options):
-        return {"content": "".join(self.CHUNKS)}
-
-    def stream(self, messages, **options):
+    async def _stream(self, messages, info):
         for chunk in self.CHUNKS:
             yield chunk
 

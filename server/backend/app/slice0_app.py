@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .auth import AuthError, AuthService
 from .auth.router import create_auth_router
+from .auth.guest import GUEST_COOKIE, GUEST_TOKEN_STATE, resolve_user_or_guest
 from .db import Database, get_db
 from .logging_audit.app import AppState, create_app as create_logging_app
 from .logging_audit.repositories import PgAuditLog, PgTaskEventStore
@@ -54,6 +55,22 @@ def create_slice0_app(state: Optional[Slice0State] = None) -> FastAPI:
 
     app.include_router(create_auth_router(state.auth))
 
+    @app.middleware("http")
+    async def guest_cookie(request: Request, call_next):
+        response = await call_next(request)
+        token = getattr(request.state, GUEST_TOKEN_STATE, None)
+        if token and not request.cookies.get(GUEST_COOKIE):
+            response.set_cookie(
+                GUEST_COOKIE,
+                token,
+                httponly=True,
+                secure=request.url.scheme == "https",
+                samesite="lax",
+                max_age=30 * 24 * 60 * 60,
+                path="/",
+            )
+        return response
+
     @app.exception_handler(LeaseError)
     async def lease_err(_: Request, exc: LeaseError):
         from fastapi.responses import JSONResponse
@@ -70,20 +87,7 @@ def create_slice0_app(state: Optional[Slice0State] = None) -> FastAPI:
         )
 
     def _session_actor(request: Request) -> str:
-        raw = request.headers.get("Authorization", "")
-        token = raw[7:] if raw.startswith("Bearer ") else ""
-        if not token:
-            for part in request.headers.get("Cookie", "").split(";"):
-                k, _, v = part.strip().partition("=")
-                if k == "session_token":
-                    token = v
-        if not token:
-            raise HTTPException(status_code=401, detail={"error_code": "SESSION_INVALID", "message": "auth required"})
-        try:
-            user = state.auth.resolve_session(token)
-            return user.user_id
-        except AuthError as exc:
-            raise HTTPException(status_code=exc.status, detail={"error_code": exc.code, "message": exc.message})
+        return resolve_user_or_guest(request, state.auth).user_id
 
     @app.get("/api/tasks/{task_id}/sse")
     def sse_for_session(task_id: str, request: Request):
@@ -225,4 +229,3 @@ def create_slice0_app(state: Optional[Slice0State] = None) -> FastAPI:
 
 
 app = create_slice0_app()
-

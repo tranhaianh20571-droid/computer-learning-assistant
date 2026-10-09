@@ -14,6 +14,7 @@ from typing import Optional
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -64,6 +65,7 @@ class LearningRouteRow(Base):
     scenario: Mapped[str] = mapped_column(String(20), nullable=False, default="self_study")
     title_ref: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     current_route_version_id: Mapped[str | None] = mapped_column(String(64))
+    input_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -82,6 +84,9 @@ class RouteVersionRow(Base):
     version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     source_task_id: Mapped[str | None] = mapped_column(String(64))
     prompt_binding_id: Mapped[str | None] = mapped_column(String(64))
+    title_snapshot: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    content_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    content_fingerprint: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
@@ -112,6 +117,7 @@ class RouteCourseNodeRow(Base):
         String(64), ForeignKey("route_stages.stage_id"), nullable=False
     )
     course_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    outline_version_id: Mapped[str | None] = mapped_column(String(64))
     order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     goal_snapshot_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
     scope_snapshot_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -173,12 +179,33 @@ class OutlineVersionRow(Base):
     version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     source_task_id: Mapped[str | None] = mapped_column(String(64))
     prompt_binding_id: Mapped[str | None] = mapped_column(String(64))
+    title_snapshot: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    content_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    content_fingerprint: Mapped[str | None] = mapped_column(String(80))
     # 由路线展开大纲时记录来源（§5.1）
     source_route_version_id: Mapped[str | None] = mapped_column(String(64))
     source_route_node_id: Mapped[str | None] = mapped_column(String(64))
     goal_snapshot_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
     scope_snapshot_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class PlanningConfirmationRow(Base):
+    __tablename__ = "planning_confirmations"
+    __table_args__ = (UniqueConstraint("draft_id", "revision", name="uq_planning_confirmation_revision"),)
+    confirmation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    draft_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class RouteDetachedCourseRow(Base):
+    __tablename__ = "route_detached_courses"
+    route_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    course_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    detached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
 class CourseUnitRow(Base):
@@ -208,6 +235,7 @@ class LessonRow(Base):
         String(64), ForeignKey("course_units.unit_id"), nullable=False
     )
     order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    title_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
     goal_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
     status_preparation: Mapped[str] = mapped_column(String(20), nullable=False, default="not_generated")
 
@@ -431,6 +459,11 @@ class PlanningTaskStateRow(Base):
     clarification_question: Mapped[str | None] = mapped_column(String(300))
     # 生成前访谈（v2）：{round, questions:[{question_id,question,kind,options,skippable}], answers:[...], done}
     intake_json: Mapped[str | None] = mapped_column(Text)
+    abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    background_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    auto_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    answer_draft_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]", server_default="[]")
+    answer_draft_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     material_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     search_decision: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)

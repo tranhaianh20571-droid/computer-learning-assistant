@@ -32,7 +32,7 @@ class TaskStateRow(Base):
 
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    subject_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(129), nullable=False)
     stage: Mapped[str] = mapped_column(String(40), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -61,7 +61,7 @@ class TaskEventRow(Base):
         String(64), ForeignKey("task_states.task_id", ondelete="CASCADE"), nullable=False
     )
     owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    subject_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(129), nullable=False)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     stage: Mapped[str] = mapped_column(String(40), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)

@@ -50,7 +50,7 @@ def env(database: Database):
     return {"client": client, "state": state, "container": container, "database": database}
 
 
-def _confirmed_route(env, *, cycle: bool = False, empty: bool = False):
+def _confirmed_route(env, *, cycle: bool = False, empty: bool = False, confirm_first: bool = True):
     """生成并确认一条路线，返回 (user_id, token, route_id, course_ids)。"""
     client = env["client"]
     user_id, token = make_user(client, env["database"])
@@ -67,6 +67,8 @@ def _confirmed_route(env, *, cycle: bool = False, empty: bool = False):
     ).json()["task_id"]
     body = run_route_generate(client, token, task_id)
     draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
+    if not confirm_first:
+        return user_id, token, route_id, []
     confirmed = client.post(
         f"/api/planning/drafts/{body['draft']['draft_id']}/confirm", headers=auth_headers(token),
         json={"revision": draft["revision"], "idempotency_key": f"c{uuid.uuid4().hex[:8]}"},
@@ -79,7 +81,7 @@ def _confirmed_route(env, *, cycle: bool = False, empty: bool = False):
 
 class TestDraftOptimisticLock:
     def test_revision_mismatch_rejected(self, env) -> None:
-        user_id, token, route_id, _ = _confirmed_route(env)
+        user_id, token, route_id, _ = _confirmed_route(env, confirm_first=False)
         client = env["client"]
         # 直接构造草稿内容保存
         draft = env["state"].drafts.find_or_create_draft(
@@ -103,7 +105,7 @@ class TestDraftOptimisticLock:
         assert new_revision == draft["revision"] + 1
 
     def test_cross_user_save_denied(self, env) -> None:
-        user_id, token, route_id, _ = _confirmed_route(env)
+        user_id, token, route_id, _ = _confirmed_route(env, confirm_first=False)
         draft = env["state"].drafts.find_or_create_draft(
             owner_user_id=user_id, draft_kind="route", target_id=route_id, base_version_id=None,
         )
@@ -115,7 +117,7 @@ class TestDraftOptimisticLock:
         assert r.status_code == 404  # 越权以 not_found 呈现，不泄露存在性
 
     def test_save_failed_visible(self, env) -> None:
-        user_id, token, route_id, _ = _confirmed_route(env)
+        user_id, token, route_id, _ = _confirmed_route(env, confirm_first=False)
         draft = env["state"].drafts.find_or_create_draft(
             owner_user_id=user_id, draft_kind="route", target_id=route_id, base_version_id=None,
         )
@@ -141,7 +143,7 @@ class TestConfirmTransaction:
         assert all(c["course_id"] for s in overview["stages"] for c in s["courses"])
 
     def test_confirm_idempotent_same_key(self, env) -> None:
-        user_id, token, route_id, _ = _confirmed_route(env)
+        user_id, token, route_id, _ = _confirmed_route(env, confirm_first=False)
         client = env["client"]
         # 新草稿 + 同幂等键确认两次 → 返回既有版本号，不产生重复有效版本
         draft = env["state"].drafts.find_or_create_draft(
@@ -165,7 +167,7 @@ class TestConfirmTransaction:
         assert overview["version_no"] == r1.json()["version_no"]
 
     def test_confirm_with_stale_revision_fails(self, env) -> None:
-        user_id, token, route_id, _ = _confirmed_route(env)
+        user_id, token, route_id, _ = _confirmed_route(env, confirm_first=False)
         draft = env["state"].drafts.find_or_create_draft(
             owner_user_id=user_id, draft_kind="route", target_id=route_id, base_version_id=None,
         )
@@ -177,7 +179,7 @@ class TestConfirmTransaction:
         assert r.json()["error_code"] == "DRAFT_REVISION_MISMATCH"
 
     def test_confirm_cycle_rejected_wholly(self, env) -> None:
-        user_id, token, route_id, _ = _confirmed_route(env)
+        user_id, token, route_id, _ = _confirmed_route(env, confirm_first=False)
         client = env["client"]
         draft = env["state"].drafts.find_or_create_draft(
             owner_user_id=user_id, draft_kind="route", target_id=route_id, base_version_id=None,
@@ -195,7 +197,7 @@ class TestConfirmTransaction:
         assert r.json()["error_code"] == "DAG_CYCLE"
         # 整体不生效：路线当前版本不变
         overview = client.get(f"/api/routes/{route_id}/overview", headers=auth_headers(token)).json()
-        assert overview["version_no"] == 1
+        assert overview["version_no"] is None
 
     def test_confirm_empty_outline_rejected(self, env) -> None:
         user_id, token, route_id, course_ids = _confirmed_route(env)
@@ -271,7 +273,7 @@ class TestRouteToOutlineExpansion:
 
 class TestScopeSwitch:
     def test_switch_keeps_input_new_draft(self, env) -> None:
-        user_id, token, route_id, _ = _confirmed_route(env)
+        user_id, token, route_id, _ = _confirmed_route(env, confirm_first=False)
         client = env["client"]
         draft = env["state"].drafts.find_or_create_draft(
             owner_user_id=user_id, draft_kind="route", target_id=route_id, base_version_id=None,
@@ -283,7 +285,9 @@ class TestScopeSwitch:
         assert r.status_code == 200, r.text
         body = r.json()
         # 输入保留：新草稿承接旧内容
-        assert body["draft"]["content"] == draft["content"]
+        assert body["draft"]["content"]["stages"] == draft["content"]["stages"]
+        assert body["draft"]["target_id"] != route_id
+        assert body["draft"]["draft_kind"] == "course_outline"
         assert body["new_kind"] == "course_outline"
 
 

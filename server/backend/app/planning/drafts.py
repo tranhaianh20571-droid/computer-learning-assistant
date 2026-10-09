@@ -16,7 +16,7 @@ import json
 import uuid
 from typing import Callable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from ..logging_audit.db import Database
 from ..logging_audit.repositories import PgAuditLog
@@ -28,9 +28,13 @@ from .models import (
     LearningRouteRow,
     LessonPrerequisiteEdgeRow,
     LessonRow,
+    LessonContentVersionRow,
+    LessonProgressRow,
     OutlineVersionRow,
     PlanningCandidateRow,
     PlanningDraftRow,
+    PlanningConfirmationRow,
+    PlanningTaskStateRow,
     RouteCourseNodeRow,
     RoutePrerequisiteEdgeRow,
     RouteStageRow,
@@ -39,6 +43,9 @@ from .models import (
     utcnow,
 )
 from .outputs import OutlineCandidate, RouteCandidate, validate_content_json
+from .library import LibrarySnapshot, canonical_content, encoded_identity, fingerprint
+from .errors import PlanningDuplicate
+from .locking import planning_target
 
 
 class DraftService:
@@ -64,7 +71,8 @@ class DraftService:
             row = sess.get(PlanningDraftRow, draft_id)
             if row is None or row.owner_user_id != actor_id:
                 raise error("draft_not_found", status=404)
-            return self._view(row)
+            _, locked = planning_target(sess, row.draft_kind, row.target_id, actor_id)
+            return self._view(row) | {"locked": locked}
 
     def _view(self, row: PlanningDraftRow) -> dict:
         return {
@@ -91,6 +99,7 @@ class DraftService:
         if draft_kind not in ("route", "course_outline"):
             raise error("invalid_field", f"unknown draft_kind {draft_kind}")
         with self.db.session() as sess:
+            planning_target(sess, draft_kind, target_id, owner_user_id, mutable=True)
             row = (
                 sess.execute(
                     select(PlanningDraftRow).where(
@@ -134,9 +143,10 @@ class DraftService:
         if saved_state not in DRAFT_SAVED_STATES:
             raise error("invalid_field", f"unknown saved_state {saved_state}")
         with self.db.session() as sess:
-            row = sess.get(PlanningDraftRow, draft_id)
+            row = sess.get(PlanningDraftRow, draft_id, with_for_update=True)
             if row is None or row.owner_user_id != actor_id:
                 raise error("draft_not_found", status=404)
+            planning_target(sess, row.draft_kind, row.target_id, actor_id, mutable=True)
             if row.revision != revision:
                 raise error("DRAFT_REVISION_MISMATCH", f"expected revision {row.revision}", status=409)
             # 内容形态校验（长度/层级/索引合法）；DAG 留给确认事务
@@ -168,9 +178,18 @@ class DraftService:
         content: dict,
         source_task_id: str,
         base_draft_revision: int = 0,
+        lease=None,
     ) -> dict:
         """AI 候选落库；人工编辑（更高 revision）后旧候选不得替换新草稿。"""
         with self.db.session() as sess:
+            target_kind = "route" if candidate_kind != "outline_generate" else "course_outline"
+            planning_target(sess, target_kind, target_id, owner_user_id, mutable=True)
+            if lease is not None:
+                from ..tasks.service import LearningTaskRow
+                task = sess.get(LearningTaskRow, source_task_id, with_for_update=True)
+                if (not task or task.cancel_requested or task.generation != lease.generation
+                    or task.lease_token != lease.lease_token or not task.lease_until or task.lease_until <= utcnow()):
+                    raise error("STALE_RESULT_DISCARDED", status=409)
             draft = (
                 sess.execute(
                     select(PlanningDraftRow).where(
@@ -178,14 +197,22 @@ class DraftService:
                         PlanningDraftRow.draft_kind
                         == ("route" if candidate_kind != "outline_generate" else "course_outline"),
                         PlanningDraftRow.target_id == target_id,
-                    )
+                    ).with_for_update()
                 )
                 .scalars()
                 .first()
             )
             if draft is not None and base_draft_revision < draft.revision:
-                # 草稿已被人工推进：候选只记录，不覆盖草稿
-                return {"applied": False, "reason": "draft_advanced", "draft_revision": draft.revision}
+                candidate = PlanningCandidateRow(
+                    candidate_id=f"cand_{uuid.uuid4().hex[:12]}", draft_id=draft.draft_id,
+                    target_id=target_id, candidate_kind=candidate_kind,
+                    base_draft_revision=base_draft_revision, generation_revision=1,
+                    content_json=json.dumps(content, ensure_ascii=False), source_task_id=source_task_id,
+                )
+                sess.add(candidate)
+                sess.commit()
+                return {"applied": False, "reason": "draft_advanced", "draft_revision": draft.revision,
+                        "candidate_id": candidate.candidate_id}
             if draft is None:
                 draft = PlanningDraftRow(
                     draft_id=f"draft_{uuid.uuid4().hex[:12]}",
@@ -201,6 +228,7 @@ class DraftService:
                 sess.flush()
             else:
                 draft.content_json = json.dumps(content, ensure_ascii=False)
+                draft.revision += 1
                 draft.saved_state = "saved"
                 draft.updated_at = utcnow()
             candidate = PlanningCandidateRow(
@@ -221,6 +249,44 @@ class DraftService:
             return result
 
     # ---- 确认事务 ----
+    def edit_confirmed(self, target_kind, target_id, *, actor_id):
+        if target_kind not in ("route", "course"):
+            raise error("invalid_field")
+        with self.db.session() as sess:
+            _, locked = planning_target(sess, target_kind, target_id, actor_id)
+        if locked:
+            raise error("PLANNING_LOCKED", "课程已确认，不能再调整规划。", status=409)
+        raise error("state_invalid", "尚无已确认课程", status=409)
+
+    def _identity(self, sess, draft, target):
+        content = load_json_field(draft.content_json, {}).copy()
+        # Only server-owned task state supplies material scope, never client-supplied basis.
+        state = sess.execute(select(PlanningTaskStateRow).where(
+            PlanningTaskStateRow.owner_user_id == draft.owner_user_id,
+            PlanningTaskStateRow.draft_id == draft.draft_id
+        ).order_by(PlanningTaskStateRow.updated_at.desc())).scalars().first()
+        content["basis"] = load_json_field(state.material_ids_json, []) if state else []
+        return canonical_content(draft.draft_kind, content, target.title_ref, target.scenario)
+
+    def duplicate_check(self, draft_id, *, actor_id, revision):
+        with self.db.session() as sess:
+            draft = sess.get(PlanningDraftRow, draft_id)
+            if draft is None or draft.owner_user_id != actor_id:
+                raise error("draft_not_found", status=404)
+            if draft.revision != revision:
+                raise error("DRAFT_REVISION_MISMATCH", status=409)
+            library = LibrarySnapshot(sess, actor_id)
+            target = (library.routes if draft.draft_kind == "route" else library.courses).get(draft.target_id)
+            if target is None:
+                raise error("draft_not_found", status=404)
+            content = load_json_field(draft.content_json, {})
+            validate_content_json(draft.draft_kind, content)
+            identity = self._identity(sess, draft, target)
+            current = library.identity(draft.draft_kind, draft.target_id)
+            return {"revision": revision, "fingerprint": fingerprint(identity),
+                "same_target": current is not None and encoded_identity(current) == encoded_identity(identity),
+                "matches": library.matches(draft.draft_kind, identity, draft.target_id)}
+
     def confirm_draft(
         self,
         draft_id: str,
@@ -228,20 +294,41 @@ class DraftService:
         actor_id: str,
         revision: int,
         idempotency_key: str,
+        allow_duplicate: bool = False,
+        duplicate_fingerprint: str | None = None,
     ) -> dict:
         """确认草稿 → 不可变版本。单事务校验 + 建版本 + 指针 + 审计。"""
         with self.db.session() as sess:
-            draft = sess.get(PlanningDraftRow, draft_id)
+            # Owner-scoped transaction lock: different draft/target rows cannot race dedupe.
+            if sess.bind.dialect.name == "postgresql":
+                sess.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:owner, 0))"),
+                             {"owner": "planning-confirm:" + actor_id})
+            draft = sess.get(PlanningDraftRow, draft_id, with_for_update=True)
             if draft is None or draft.owner_user_id != actor_id:
                 raise error("draft_not_found", status=404)
 
-            # 幂等：同幂等键已确认过 → 返回既有版本，不产生重复有效版本
+            target_model = LearningRouteRow if draft.draft_kind == "route" else CourseRow
+            target = sess.get(target_model, draft.target_id, with_for_update=True)
+            if target is None or target.owner_user_id != actor_id or target.deleted_at is not None:
+                raise error("draft_not_found", status=404)
+            receipt = sess.execute(select(PlanningConfirmationRow).where(
+                PlanningConfirmationRow.draft_id == draft_id,
+                PlanningConfirmationRow.revision == revision,
+                PlanningConfirmationRow.owner_user_id == actor_id)).scalar_one_or_none()
+            if receipt:
+                return load_json_field(receipt.result_json, {}) | {"deduped": True}
+
+            # Legacy idempotency lookup must be scoped to this target, never another owner.
+            version_model = RouteVersionRow if draft.draft_kind == "route" else OutlineVersionRow
             existing = (
                 sess.execute(
-                    select(RouteVersionRow if draft.draft_kind == "route" else OutlineVersionRow).where(
+                    select(version_model).where(
                         (RouteVersionRow.source_task_id == f"confirm:{idempotency_key}")
                         if draft.draft_kind == "route"
                         else (OutlineVersionRow.source_task_id == f"confirm:{idempotency_key}")
+                    ).where(
+                        RouteVersionRow.route_id == draft.target_id if draft.draft_kind == "route"
+                        else OutlineVersionRow.course_id == draft.target_id
                     )
                 )
                 .scalars()
@@ -259,11 +346,34 @@ class DraftService:
 
             content = load_json_field(draft.content_json, {})
             validate_content_json(draft.draft_kind, content)
-
-            if draft.draft_kind == "route":
-                result = self._confirm_route(sess, draft, actor_id, idempotency_key, content)
+            identity = self._identity(sess, draft, target)
+            identity_fingerprint = fingerprint(identity)
+            if allow_duplicate and duplicate_fingerprint != identity_fingerprint:
+                raise error("DUPLICATE_ACK_STALE", "草稿已变化，请重新确认", status=409)
+            library = LibrarySnapshot(sess, actor_id)
+            current = library.identity(draft.draft_kind, draft.target_id)
+            if current is not None and encoded_identity(current) == encoded_identity(identity):
+                vid = target.current_route_version_id if draft.draft_kind == "route" else target.current_outline_version_id
+                version = sess.get(version_model, vid)
+                result = {"version_id": vid, "version_no": version.version_no, "deduped": True}
             else:
-                result = self._confirm_outline(sess, draft, actor_id, idempotency_key, content)
+                if target.current_route_version_id if draft.draft_kind == "route" else target.current_outline_version_id:
+                    raise error("PLANNING_LOCKED", "课程已确认，不能再调整规划。", status=409)
+                matches = library.matches(draft.draft_kind, identity, draft.target_id)
+                if matches and not allow_duplicate:
+                    raise PlanningDuplicate({"revision": revision, "fingerprint": identity_fingerprint,
+                                             "matches": matches})
+                result = (self._confirm_route(sess, draft, actor_id, idempotency_key, content)
+                          if draft.draft_kind == "route" else
+                          self._confirm_outline(sess, draft, actor_id, idempotency_key, content))
+                version = sess.get(version_model, result["version_id"])
+                version.title_snapshot = identity["title"]
+                version.content_snapshot_json = encoded_identity(identity)
+                version.content_fingerprint = identity_fingerprint
+                target.title_ref = identity["title"]
+            sess.add(PlanningConfirmationRow(confirmation_id=f"pc_{uuid.uuid4().hex[:12]}",
+                owner_user_id=actor_id, draft_id=draft_id, revision=revision,
+                idempotency_key=idempotency_key, result_json=json.dumps(result)))
             sess.commit()
             return result
 
@@ -306,7 +416,18 @@ class DraftService:
             sess.add(stage_row)
             sess.flush()
             for c_index, course in enumerate(stage.courses):
-                course_id = course_rows.get(course_order) or f"crs_{uuid.uuid4().hex[:12]}"
+                raw_course = content["stages"][s_index]["courses"][c_index]
+                source_id = raw_course.get("_source_course_id")
+                old_node = sess.execute(select(RouteCourseNodeRow).where(
+                    RouteCourseNodeRow.route_version_id == draft.base_version_id,
+                    RouteCourseNodeRow.course_id == source_id)).scalars().first() if source_id and draft.base_version_id else None
+                source_course = sess.get(CourseRow, source_id) if old_node else None
+                if source_course and source_course.owner_user_id == actor_id and not source_course.deleted_at:
+                    course_id = source_id
+                    course_rows[course_order] = course_id
+                    source_course.title_ref = course.title
+                else:
+                    course_id = f"crs_{uuid.uuid4().hex[:12]}"
                 if course_order not in course_rows:
                     sess.add(
                         CourseRow(
@@ -326,17 +447,20 @@ class DraftService:
                     course_id=course_id,
                     order_index=c_index,
                     goal_snapshot_ref=course.goal,
-                    scope_snapshot_ref="",
+                    scope_snapshot_ref=str(content["stages"][s_index]["courses"][c_index].get("scope", "")),
                     prereq_requirements_ref="",
                 )
                 sess.add(node_row)
                 candidate_node_by_index[course_order] = node_row.node_id
                 if course.units:
                     # 四层草稿：确认时逐课落不可变大纲版本（导图与讲次同版）
-                    self._materialize_course_outline(
-                        sess, course_id=course_id, units=course.units,
+                    node_row.outline_version_id = self._materialize_course_outline(
+                        sess, course_id=course_id, units=course.units, prerequisites=course.prerequisites,
                         source_route_version_id=version.route_version_id,
-                        source_task_id=f"confirm:{idem}",
+                        source_task_id=f"confirm:{idem}", raw_units=raw_course.get("units", []),
+                        course_goal=course.goal, course_scope=str(raw_course.get("scope", "")),
+                        source_outline_id=old_node.outline_version_id if old_node and old_node.goal_snapshot_ref == course.goal
+                        and old_node.scope_snapshot_ref == str(raw_course.get("scope", "")) else None,
                     )
                 course_order += 1
             stage_index += 1
@@ -363,8 +487,9 @@ class DraftService:
         return {"version_id": version.route_version_id, "version_no": version.version_no, "deduped": False}
 
     def _materialize_course_outline(
-        self, sess, *, course_id: str, units,
-        source_route_version_id: str, source_task_id: str,
+        self, sess, *, course_id: str, units, prerequisites=(),
+        source_route_version_id: str, source_task_id: str, raw_units=(), source_outline_id=None,
+        course_goal="", course_scope="",
     ) -> str:
         """课程内嵌单元/讲次 → 该课程的不可变大纲版本（四层图确认后保持到讲次粒度）。
 
@@ -385,16 +510,18 @@ class DraftService:
         version = OutlineVersionRow(
             outline_version_id=f"ov_{uuid.uuid4().hex[:12]}",
             course_id=course_id,
+            title_snapshot=course.title_ref,
             version_no=max_no + 1,
             source_task_id=source_task_id,
             prompt_binding_id=None,
             source_route_version_id=source_route_version_id,
             source_route_node_id=None,
-            goal_snapshot_ref="",
-            scope_snapshot_ref="",
+            goal_snapshot_ref=course_goal,
+            scope_snapshot_ref=course_scope,
         )
         sess.add(version)
         sess.flush()
+        lesson_ids = []
         for u_index, unit in enumerate(units):
             unit_row = CourseUnitRow(
                 unit_id=f"unit_{uuid.uuid4().hex[:12]}",
@@ -405,16 +532,27 @@ class DraftService:
             sess.add(unit_row)
             sess.flush()
             for l_index, lesson in enumerate(unit.lessons):
+                lesson_id = f"les_{uuid.uuid4().hex[:12]}"
+                lesson_ids.append(lesson_id)
                 sess.add(
                     LessonRow(
-                        lesson_id=f"les_{uuid.uuid4().hex[:12]}",
+                        lesson_id=lesson_id,
                         outline_version_id=version.outline_version_id,
                         unit_id=unit_row.unit_id,
                         order_index=l_index,
+                        title_ref=lesson.title,
                         goal_ref=lesson.goal or lesson.title,
                         status_preparation="not_generated",
                     )
                 )
+        sess.flush()
+        for edge in prerequisites:
+            sess.add(LessonPrerequisiteEdgeRow(
+                edge_id=f"lpe_{uuid.uuid4().hex[:12]}", outline_version_id=version.outline_version_id,
+                from_lesson_id=lesson_ids[edge.from_index], to_lesson_id=lesson_ids[edge.to_index],
+            ))
+        self._carry_metadata_progress(sess, course_id, source_outline_id, version.outline_version_id,
+                                      raw_units, prerequisites)
         course.current_outline_version_id = version.outline_version_id
         return version.outline_version_id
 
@@ -441,8 +579,8 @@ class DraftService:
             prompt_binding_id=None,
             source_route_version_id=course.source_route_version_id,
             source_route_node_id=course.source_route_node_id,
-            goal_snapshot_ref="",
-            scope_snapshot_ref="",
+            goal_snapshot_ref=str(content.get("goal", "")),
+            scope_snapshot_ref=str(content.get("scope", "")),
         )
         sess.add(version)
         sess.flush()
@@ -464,6 +602,7 @@ class DraftService:
                     outline_version_id=version.outline_version_id,
                     unit_id=unit_row.unit_id,
                     order_index=l_index,
+                    title_ref=lesson.title,
                     goal_ref=lesson.goal,
                     status_preparation="not_generated",
                 )
@@ -483,12 +622,56 @@ class DraftService:
                 )
             )
 
+        old_outline = sess.get(OutlineVersionRow, draft.base_version_id) if draft.base_version_id else None
+        same_scope = old_outline and old_outline.goal_snapshot_ref == str(content.get("goal", "")) and old_outline.scope_snapshot_ref == str(content.get("scope", ""))
+        self._carry_metadata_progress(sess, course.course_id, draft.base_version_id if same_scope else None,
+                                      version.outline_version_id, content.get("units", []), candidate.prerequisites)
         course.current_outline_version_id = version.outline_version_id
         self._audit(
             "config.changed", actor_id=actor_id, object_id=version.outline_version_id,
             result="outline_confirmed",
         )
         return {"version_id": version.outline_version_id, "version_no": version.version_no, "deduped": False}
+
+    def _carry_metadata_progress(self, sess, course_id, old_version_id, new_version_id, raw_units, prerequisites):
+        """Carry only exact goal/scope/prerequisite matches; old versions stay immutable."""
+        if not old_version_id:
+            return
+        old_version = sess.get(OutlineVersionRow, old_version_id)
+        course = sess.get(CourseRow, course_id)
+        if not old_version or old_version.course_id != course_id:
+            return
+        raw = [l for u in raw_units for l in u.get("lessons", [])]
+        new_units = list(sess.scalars(select(CourseUnitRow).where(CourseUnitRow.outline_version_id == new_version_id).order_by(CourseUnitRow.order_index)))
+        new_lessons = [l for u in new_units for l in sess.scalars(select(LessonRow).where(LessonRow.unit_id == u.unit_id).order_by(LessonRow.order_index))]
+        old_lessons = {l.lesson_id:l for l in sess.scalars(select(LessonRow).where(LessonRow.outline_version_id == old_version_id))}
+        sources = [l.get("_source_lesson_id") for l in raw]
+        old_incoming = {}
+        for e in sess.scalars(select(LessonPrerequisiteEdgeRow).where(LessonPrerequisiteEdgeRow.outline_version_id == old_version_id)):
+            old_incoming.setdefault(e.to_lesson_id,set()).add(e.from_lesson_id)
+        new_incoming = {}
+        for e in prerequisites:
+            if e.from_index < len(sources) and e.to_index < len(sources):
+                new_incoming.setdefault(e.to_index,set()).add(sources[e.from_index])
+        used = set()
+        for i,(metadata,new) in enumerate(zip(raw,new_lessons)):
+            source = metadata.get("_source_lesson_id"); old = old_lessons.get(source)
+            if (not old or source in used or old.goal_ref != new.goal_ref
+                or old_incoming.get(source,set()) != new_incoming.get(i,set())):
+                continue
+            used.add(source)
+            previous = sess.execute(select(LessonContentVersionRow).where(LessonContentVersionRow.lesson_id == source)
+                .order_by(LessonContentVersionRow.content_version_no.desc())).scalars().first()
+            if not previous or previous.goal_ref != new.goal_ref:
+                continue
+            fresh = LessonContentVersionRow(content_version_id=f"lcv_{uuid.uuid4().hex[:12]}", lesson_id=new.lesson_id,
+                content_version_no=1, goal_ref=previous.goal_ref, scope_ref=previous.scope_ref)
+            sess.add(fresh); sess.flush()
+            progress = sess.execute(select(LessonProgressRow).where(LessonProgressRow.owner_user_id == course.owner_user_id,
+                LessonProgressRow.lesson_id == source, LessonProgressRow.lesson_content_version_id == previous.content_version_id)).scalars().first()
+            if progress:
+                sess.add(LessonProgressRow(progress_id=f"prog_{uuid.uuid4().hex[:12]}",owner_user_id=course.owner_user_id,
+                    lesson_id=new.lesson_id,lesson_content_version_id=fresh.content_version_id,learning_state=progress.learning_state))
 
     # ---- 教学门槛（本切片只校验） ----
     def ensure_outline_confirmed(self, course_id: str, *, actor_id: str) -> None:

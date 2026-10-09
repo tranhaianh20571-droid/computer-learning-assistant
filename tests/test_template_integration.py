@@ -30,7 +30,7 @@ def client():
 
 def _login(client) -> str:
     """用模板 FIRST_SUPERUSER 登录获取 JWT。"""
-    from app.core.config import settings
+    from app.infrastructure.config import settings
 
     r = client.post(
         f"{settings.API_V1_STR}/login/access-token",
@@ -43,13 +43,13 @@ def _login(client) -> str:
 
 class TestTemplateLearningAPI:
     def test_health(self, client):
-        from app.core.config import settings
+        from app.infrastructure.config import settings
 
         r = client.get(f"{settings.API_V1_STR}/utils/health-check/")
         assert r.status_code == 200
 
     def test_login_and_create_task_with_lease(self, client):
-        from app.core.config import settings
+        from app.infrastructure.config import settings
 
         token = _login(client)
         h = {"Authorization": f"Bearer {token}"}
@@ -97,7 +97,7 @@ class TestTemplateLearningAPI:
         assert r.json()["status"] == "succeeded"
 
     def test_stale_lease_rejected(self, client):
-        from app.core.config import settings
+        from app.infrastructure.config import settings
 
         token = _login(client)
         h = {"Authorization": f"Bearer {token}"}
@@ -129,7 +129,7 @@ class TestTemplateLearningAPI:
         assert r_new.json()["accepted"] is True
 
     def test_prompt_binding(self, client):
-        from app.core.config import settings
+        from app.infrastructure.config import settings
 
         token = _login(client)
         h = {"Authorization": f"Bearer {token}"}
@@ -145,7 +145,7 @@ class TestTemplateLearningAPI:
         assert r.json()["source"] == "local_fallback"
 
     def test_unauthenticated_rejected(self, client):
-        from app.core.config import settings
+        from app.infrastructure.config import settings
 
         r = client.get(f"{settings.API_V1_STR}/learning/tasks/unknown/status")
         assert r.status_code == 401

@@ -139,7 +139,7 @@ class TestCourseOverview:
         assert all(l["status_preparation"] == "not_generated" for l in lessons)
         assert all(l["learning_state"] == "not_started" for l in lessons)
         # 进度按当前已确认大纲讲次等权：本切片全部未开始
-        assert body["progress"] == {"lesson_total": 4, "lesson_started": 0}
+        assert body["progress"] == {"lesson_total": 4, "lesson_started": 0, "lesson_completed": 0}
 
     def test_prereq_hint_present(self, env) -> None:
         user_id, token, route_id, course_id = _confirm_route_and_outline(env)

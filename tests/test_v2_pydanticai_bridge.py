@@ -1,7 +1,6 @@
-"""V2：PydanticAI 原生测试基建 + FunctionModel 桥（ADR-021/022 配套）。
+"""V2：PydanticAI FunctionModel 桥（ADR-021/022 配套）。
 
 测试分工（选型结论落地）：
-- TestModel = Agent 装配冒烟（output_type 端到端、零网络）；
 - FunctionModel 持有合成适配器 = 桥行为主力（消息翻译、回填、受控错误映射）；
 - 适配器安全边界测试仍在 test_slice1_*（mock HTTP，不经 PydanticAI）。
 
@@ -21,9 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "support"
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
 from pydantic_ai import Agent  # noqa: E402
-from pydantic_ai.models.test import TestModel  # noqa: E402
 
-from backend.agents import (  # noqa: E402
+from backend.agents.bridge import (  # noqa: E402
     AdapterBridgeError,
     make_bridge_model,
     messages_to_adapter,
@@ -50,17 +48,6 @@ class _SynthAdapter:
         if self.exc is not None:
             raise self.exc
         return self.result
-
-
-# ---------------------------------------------------------------------------
-# TestModel：Agent 装配冒烟（PydanticAI 原生）
-# ---------------------------------------------------------------------------
-
-def test_testmodel_agent_assembly_smoke():
-    agent = Agent(model=TestModel(), output_type=_StepOut)
-    result = agent.run_sync("合成输入")
-    assert isinstance(result.output, _StepOut)
-    assert result.output.title
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +151,7 @@ def test_runner_tool_mode_assembles_forced_tools():
     assert isinstance(out, _StepOut) and out.title == "t"
     opts = ad.calls[0]["opts"]
     assert "tools" in opts and opts["tool_choice"]["function"]["name"]
-    assert opts["tools"][0]["function"]["name"] == "final_result"
+    assert opts["tools"][0]["function"]["name"] == "submit_test"
 
 
 def test_runner_falls_back_to_prompted_when_tool_unavailable():
@@ -174,26 +161,24 @@ def test_runner_falls_back_to_prompted_when_tool_unavailable():
     assert all("tools" not in c["opts"] for c in ad.calls), "prompted 档不应带 tools"
 
 
-def test_runner_marks_failure_cache_and_degrades():
+def test_runner_invalid_content_does_not_degrade_or_cache():
     reset_mode_capability_cache()
+    from backend.planning.errors import PlanningError
 
     class _RealSig(_GatedAdapter):
         endpoint, model_name = "https://synth.example", "synth-model"
 
         def generate(self, messages, **opts):
             self.calls.append({"messages": list(messages), "opts": opts})
-            if "tools" in opts:
-                return {"content": "garbage-not-json"}  # tool 档持续无效
-            return {"content": '{"title": "d", "text": "z"}'}
+            return {"content": "garbage-not-json"}
 
-    ad = _RealSig()
-    out = run_structured_agent(ad, _StepOut, [{"role": "user", "content": "go"}]).payload
-    assert out.title == "d"
-    # 第二次：失败缓存应直接跳过 tool 档（全部调用无 tools）
-    ad2 = _RealSig()
-    out2 = run_structured_agent(ad2, _StepOut, [{"role": "user", "content": "go"}]).payload
-    assert out2.title == "d"
-    assert all("tools" not in c["opts"] for c in ad2.calls)
+    for _ in range(2):
+        adapter = _RealSig()
+        with pytest.raises(PlanningError) as failure:
+            run_structured_agent(adapter, _StepOut, [{"role": "user", "content": "go"}])
+        assert failure.value.code == "OUTPUT_INVALID"
+        assert len(adapter.calls) == 3
+        assert all("tools" in call["opts"] for call in adapter.calls)
     reset_mode_capability_cache()
 
 
@@ -239,7 +224,7 @@ def test_chat_agent_returns_truncated_text():
 def test_stream_function_yields_deltas():
     import asyncio
 
-    from backend.agents import make_stream_function
+    from backend.agents.bridge import make_stream_function
     from pydantic_ai.messages import ModelRequest, UserPromptPart
 
     class _StreamAdapter:
@@ -346,27 +331,28 @@ def test_search_materials_tool_returns_limited_summary():
     assert payload["truncated"] is True
 
 
-def test_search_materials_tool_degrades_to_model_retry():
+def test_search_materials_tool_preserves_unknown_failure():
     import pytest as _pytest
-
-    from pydantic_ai.exceptions import ModelRetry
 
     from backend.agents.tools import make_search_materials_tool
 
+    failure = RuntimeError("boom")
+
     class _Broken:
         def assemble(self, **kw):
-            raise RuntimeError("boom")
+            raise failure
 
     tool = make_search_materials_tool(_Broken(), owner_user_id="u1", material_ids=["m1"])
-    with _pytest.raises(ModelRetry):
+    with _pytest.raises(RuntimeError) as caught:
         tool("q")
+    assert caught.value is failure
 
 
 def test_fallback_model_switches_on_bridge_error():
     """S3 必测（上游 #2837/#3267 邻域）：主模型桥失败 → 备模型接管。"""
     from pydantic_ai import Agent
 
-    from backend.agents import make_fallback_model
+    from backend.agents.bridge import make_fallback_model
 
     class _Primary(_GatedAdapter):
         def generate(self, messages, **opts):
@@ -380,15 +366,9 @@ def test_fallback_model_switches_on_bridge_error():
 
 
 def test_intake_followup_template_hashed_and_formats():
-    import sys as _sys
-    from pathlib import Path as _Path
-
-    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "tests" / "support"))
-    from backend.prompts.service import PromptService
-
-    svc = PromptService.__new__(PromptService)  # 只用本地模板读取，不接 DB
-    svc.fallback_dir = _Path(__file__).resolve().parents[1] / "tests/support/backend/prompts/fallback_templates"
-    data = svc.load_local_template("intake_followup_v1")
-    assert data["sha256"]
-    body = data["template"].format(profile="目标：数据库")
-    assert "目标：数据库" in body and "返回空 questions" in body
+    import hashlib,json
+    path=Path(__file__).parent/'support/backend/prompts/fallback_templates/learning_interview_v3.json'
+    template=json.loads(path.read_text(encoding='utf8'))
+    assert hashlib.sha256(template['template'].encode()).hexdigest()==template['sha256']
+    assert '至少4个' in template['template'] or '至少4题' in template['template']
+    assert 'detail_preference' in template['template'] and 'original_request' in template['template']

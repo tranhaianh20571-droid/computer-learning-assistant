@@ -9,18 +9,20 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func, select, update
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from ..logging_audit.contracts import validate_error_code, validate_stage, validate_status
+from ..logging_audit.contracts import ERROR_CODES, normalize_error_code, validate_error_code, validate_stage, validate_status
 from ..logging_audit.db import Database
-from ..logging_audit.models import Base
+from ..logging_audit.models import Base, TaskStateRow
 from ..logging_audit.task_events import AccessDeniedError, TaskEvent
 from ..logging_audit.repositories import PgTaskEventStore
+from ..logging_audit.trace import business_span
 
 LANES = ("interactive", "teaching_prefetch", "ocr", "maintenance")
 
@@ -78,7 +80,7 @@ class LearningTaskRow(Base):
     # OCR 任务指针（仅 lane=ocr 使用）
     material_id: Mapped[str | None] = mapped_column(String(64))
     page_no: Mapped[int | None] = mapped_column(Integer)
-    subject_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(129), nullable=False)
     stage: Mapped[str] = mapped_column(String(40), nullable=False, default="upload")
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="queued")
     # queued | leased | running | succeeded | failed | cancelled | expired
@@ -128,6 +130,7 @@ class Lease:
     attempt: int
     lease_until: datetime
     deadline_at: Optional[datetime]
+    owner_user_id: Optional[str] = None
 
 
 class LeaseError(Exception):
@@ -155,11 +158,12 @@ class TaskService:
         deadline_seconds: int = 3600,
         progress_total: int = 0,
         lane: str = "interactive",
+        session: Optional[Session] = None,
     ) -> dict:
         validate_stage(stage)
         if lane not in LANES:
             raise LeaseError("INVALID_LANE", f"unknown lane {lane}")
-        with self.db.session() as sess:
+        with business_span("queue"), (nullcontext(session) if session is not None else self.db.session()) as sess:
             existing = sess.execute(
                 select(LearningTaskRow).where(
                     LearningTaskRow.owner_user_id == owner_user_id,
@@ -190,6 +194,11 @@ class TaskService:
                 )
             )
             sess.flush()
+            # Bind task-wide native request accounting in the same transaction.
+            from ..agents.task_binding import AgentBudgetRow
+            from ..logging_audit.trace import capture_task_traceparent
+            sess.add(AgentBudgetRow(task_id=task_id, traceparent=capture_task_traceparent()))
+            sess.flush()
             # 同事务写首个任务事件
             self.events.create_task(
                 task_id,
@@ -197,9 +206,129 @@ class TaskService:
                 subject_id,
                 stage,
                 progress_total=progress_total,
+                session=sess,
             )
-            sess.commit()
+            if session is None:
+                sess.commit()
             return {"task_id": task_id, "status": "queued", "deduped": False}
+
+    @staticmethod
+    def _failure_code(code, *, task_id=None, attempt=None) -> str:
+        normalized = normalize_error_code(code)
+        if normalized == "INTERNAL_ERROR" and code != "INTERNAL_ERROR":
+            from ..logging_audit.metrics import record_task_diagnostic
+            record_task_diagnostic(reason="unknown_error_code", error_code=normalized,
+                task_id=task_id, attempt=attempt)
+        return normalized
+
+    def _terminal(self, sess, row, *, status, error_code, now, stage=None):
+        """One locked transaction owns task, attempts, state and event."""
+        row.status = status
+        row.stage = stage or row.stage
+        row.revision += 1
+        row.updated_at = now
+        row.lease_token = row.lease_owner = row.lease_until = None
+        attempts = sess.scalars(select(TaskAttemptRow).where(
+            TaskAttemptRow.task_id == row.task_id, TaskAttemptRow.finished_at.is_(None)))
+        for attempt in attempts:
+            attempt.finished_at = now
+            attempt.result_status = status
+        self.events.record(row.task_id, stage=row.stage,
+            status="cancelled" if status == "cancelled" else "failed", error_code=error_code,
+            generation=row.generation, attempt=row.attempt, session=sess)
+        return {"task_id": row.task_id, "status": status, "error_code": error_code,
+            "generation": row.generation, "revision": row.revision}
+
+    def fail_queued(self, task_id: str, *, expected_generation: int, expected_revision: int,
+            error_code: str) -> dict:
+        """Fail only the observed queue revision; never take over a worker lease."""
+        code = self._failure_code(error_code, task_id=task_id)
+        with self.db.session() as sess:
+            row = sess.scalar(select(LearningTaskRow).where(LearningTaskRow.task_id == task_id)
+                .with_for_update().execution_options(populate_existing=True))
+            if row is None:
+                raise LeaseError("TASK_NOT_FOUND", "task not found")
+            if (row.status != "queued" or row.generation != expected_generation
+                    or row.revision != expected_revision):
+                return {"accepted": False, "task_id": task_id, "reason": "stale_discarded"}
+            now = utcnow()
+            if row.cancel_requested:
+                status, code = "cancelled", "TASK_CANCELLED"
+            elif row.deadline_at is not None and self._as_utc(row.deadline_at) <= now:
+                status, code = "expired", "TASK_EXPIRED"
+            else:
+                status = "failed"
+            return {**self._terminal(sess, row, status=status, error_code=code, now=now),
+                "accepted": True}
+
+    def sweep_expired_tasks(self, *, now: Optional[datetime] = None, limit: int = 100,
+            kinds: Optional[list[str]] = None, task_ids: Optional[list[str]] = None) -> list[dict]:
+        """Bounded sweep; callers can scope maintenance to their own kinds/tasks."""
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        now = self._as_utc(now or utcnow())
+        query = select(LearningTaskRow).where(
+            LearningTaskRow.status.in_(("queued", *ACTIVE_STATUSES)),
+            LearningTaskRow.deadline_at.is_not(None), LearningTaskRow.deadline_at <= now)
+        if kinds is not None:
+            query = query.where(LearningTaskRow.kind.in_(kinds))
+        if task_ids is not None:
+            query = query.where(LearningTaskRow.task_id.in_(task_ids))
+        with self.db.session() as sess:
+            rows = sess.scalars(query.order_by(LearningTaskRow.deadline_at, LearningTaskRow.task_id)
+                .limit(limit).with_for_update(skip_locked=True)
+                .execution_options(populate_existing=True)).all()
+            result = []
+            for row in rows:
+                cancelled = row.cancel_requested
+                result.append(self._terminal(sess, row, status="cancelled" if cancelled else "expired",
+                    error_code="TASK_CANCELLED" if cancelled else "TASK_EXPIRED", now=now))
+            return result
+
+    def recover_worker_failure(self, lease: Lease, *, stage: str = "generate",
+            error_code: str = "INTERNAL_ERROR", max_attempts: int = 2) -> dict:
+        """Retry only a terminal write, never model execution or business publication."""
+        validate_stage(stage)
+        if not 1 <= max_attempts <= 2:
+            raise ValueError("max_attempts must be 1 or 2")
+        code = self._failure_code(error_code, task_id=lease.task_id, attempt=lease.attempt)
+        for recovery in range(max_attempts):
+            try:
+                with self.db.session() as sess:
+                    row = sess.scalar(select(LearningTaskRow).where(
+                        LearningTaskRow.task_id == lease.task_id).with_for_update()
+                        .execution_options(populate_existing=True))
+                    if row is None:
+                        raise LeaseError("TASK_NOT_FOUND", "task not found")
+                    matching = (row.generation == lease.generation and row.attempt == lease.attempt
+                        and row.attempt_id == lease.attempt_id and row.lease_token == lease.lease_token
+                        and row.lease_owner == lease.lease_owner and bool(lease.lease_token)
+                        and bool(lease.attempt_id) and bool(lease.lease_owner)
+                        and lease.owner_user_id == row.owner_user_id)
+                    if not matching or row.status not in ACTIVE_STATUSES:
+                        return {"accepted": False, "task_id": lease.task_id, "reason": "stale_discarded"}
+                    now = utcnow()
+                    if row.cancel_requested:
+                        status, terminal_code = "cancelled", "TASK_CANCELLED"
+                    elif row.deadline_at is not None and self._as_utc(row.deadline_at) <= now:
+                        status, terminal_code = "expired", "TASK_EXPIRED"
+                    else:
+                        status, terminal_code = "failed", code
+                    result = self._terminal(sess, row, status=status, error_code=terminal_code,
+                        now=now, stage=stage)
+                    sess.commit()
+                    return {**result, "accepted": True, "recovery_attempts": recovery + 1}
+            except (LeaseError, AccessDeniedError):
+                raise
+            except Exception:
+                from ..logging_audit.metrics import record_task_diagnostic
+                exhausted = recovery + 1 == max_attempts
+                record_task_diagnostic(reason="worker_recovery_failed" if exhausted else "worker_recovery_retry",
+                    error_code="WORKER_RECOVERY_FAILED" if exhausted else "INTERNAL_ERROR",
+                    task_id=lease.task_id, attempt=lease.attempt)
+                if exhausted:
+                    raise LeaseError("WORKER_RECOVERY_FAILED", "terminal task write unavailable") from None
+        raise LeaseError("WORKER_RECOVERY_EXHAUSTED", "terminal recovery exhausted")
 
     def claim(
         self,
@@ -207,6 +336,7 @@ class TaskService:
         *,
         lease_owner: str,
         lease_seconds: int = 60,
+        allow_reclaim_active: bool = True,
     ) -> Lease:
         """worker 行锁领取；生成不可复用 attempt_id + lease_token。"""
         with self.db.session() as sess:
@@ -216,14 +346,16 @@ class TaskService:
             if row is None:
                 raise LeaseError("TASK_NOT_FOUND", "task not found")
             now = utcnow()
-            if row.deadline_at and row.deadline_at < now:
-                row.status = "expired"
-                sess.commit()
-                raise LeaseError("TASK_EXPIRED", "deadline exceeded")
             if row.status not in ("queued", "leased", "running"):
                 raise LeaseError("TASK_NOT_CLAIMABLE", f"status={row.status}")
+            if row.deadline_at and self._as_utc(row.deadline_at) <= now:
+                self._terminal(sess, row, status="expired", error_code="TASK_EXPIRED", now=now)
+                sess.commit()
+                raise LeaseError("TASK_EXPIRED", "deadline exceeded")
+            if not allow_reclaim_active and row.status in ("leased", "running") and row.lease_until and self._as_utc(row.lease_until) > now:
+                raise LeaseError("TASK_NOT_CLAIMABLE", "task already has a live worker")
             if row.cancel_requested:
-                row.status = "cancelled"
+                self._terminal(sess, row, status="cancelled", error_code="TASK_CANCELLED", now=now)
                 sess.commit()
                 raise LeaseError("TASK_CANCELLED", "cancel requested")
 
@@ -261,6 +393,7 @@ class TaskService:
                 attempt=attempt,
                 lease_until=lease_until,
                 deadline_at=row.deadline_at,
+                owner_user_id=row.owner_user_id,
             )
 
     def claim_next(
@@ -282,6 +415,7 @@ class TaskService:
             raise LeaseError("INVALID_LANE", f"unknown lane {lane}")
         cfg = capacity or LANE_CAPACITY
         now = utcnow()
+        self.sweep_expired_tasks(now=now)
         with self.db.session() as sess:
             counts = dict(
                 sess.execute(
@@ -320,13 +454,13 @@ class TaskService:
             )
             row = None
             for candidate in candidates:
-                if candidate.deadline_at and candidate.deadline_at < now:
-                    candidate.status = "expired"
-                    sess.commit()
+                if candidate.deadline_at and self._as_utc(candidate.deadline_at) <= now:
+                    self._terminal(sess, candidate, status="expired", error_code="TASK_EXPIRED", now=now)
+                    sess.flush()
                     continue
                 if candidate.cancel_requested:
-                    candidate.status = "cancelled"
-                    sess.commit()
+                    self._terminal(sess, candidate, status="cancelled", error_code="TASK_CANCELLED", now=now)
+                    sess.flush()
                     continue
                 if cfg.per_user_per_lane > 0:
                     user_active = int(
@@ -345,6 +479,7 @@ class TaskService:
                 row = candidate
                 break
             if row is None:
+                sess.commit()
                 raise LeaseError("NO_QUEUED_TASK", f"no claimable task in lane {lane}")
 
             attempt = row.attempt + 1
@@ -380,28 +515,78 @@ class TaskService:
                 attempt=attempt,
                 lease_until=lease_until,
                 deadline_at=row.deadline_at,
+                owner_user_id=row.owner_user_id,
             )
 
+    def validate_lease(
+        self, lease: Lease, *, actor_id: Optional[str] = None,
+        session: Optional[Session] = None,
+    ) -> LearningTaskRow:
+        """Read current database fences; supplied sessions retain the row lock.
+
+        No lease field from a startup snapshot substitutes for current state.
+        The returned row is a snapshot when this method owns the session.
+        """
+        with business_span("commit_fence", task_id=lease.task_id, attempt=lease.attempt):
+            if session is None:
+                with self.db.session() as sess:
+                    return self._validate_lease(lease, actor_id=actor_id, session=sess)
+            return self._validate_lease(lease, actor_id=actor_id, session=session)
+
+    def _validate_lease(
+        self, lease: Lease, *, actor_id: Optional[str], session: Session,
+    ) -> LearningTaskRow:
+        # Do not flush a cached task before refreshing its current fences.
+        with session.no_autoflush:
+            row = session.execute(
+                select(LearningTaskRow).where(LearningTaskRow.task_id == lease.task_id)
+                .with_for_update().execution_options(populate_existing=True)
+            ).scalar_one_or_none()
+        if row is None:
+            raise LeaseError("TASK_NOT_FOUND", "task not found")
+        now = utcnow()
+        if actor_id is not None and actor_id != row.owner_user_id:
+            raise AccessDeniedError("not_owner")
+        if lease.owner_user_id is not None and lease.owner_user_id != row.owner_user_id:
+            raise LeaseError("LEASE_LOST", "task owner changed")
+        if row.cancel_requested or row.status == "cancelled":
+            raise LeaseError("TASK_CANCELLED", "cancel requested")
+        if row.deadline_at is not None and self._as_utc(row.deadline_at) <= now:
+            raise LeaseError("TASK_EXPIRED", "deadline exceeded")
+        if (
+            row.status not in ACTIVE_STATUSES
+            or not lease.attempt_id or not lease.lease_token or not lease.lease_owner
+            or row.attempt_id != lease.attempt_id
+            or row.attempt != lease.attempt
+            or row.generation != lease.generation
+            or row.lease_owner != lease.lease_owner
+            or row.lease_token != lease.lease_token
+            or row.lease_until is None or self._as_utc(row.lease_until) <= now
+        ):
+            raise LeaseError("LEASE_LOST", "lease is no longer active")
+        return row
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
     def heartbeat(self, lease: Lease, lease_seconds: int = 60) -> datetime:
+        if lease_seconds <= 0:
+            raise LeaseError("LEASE_LOST", "heartbeat must extend a live lease")
         with self.db.session() as sess:
-            result = sess.execute(
-                update(LearningTaskRow)
-                .where(
-                    LearningTaskRow.task_id == lease.task_id,
-                    LearningTaskRow.lease_token == lease.lease_token,
-                    LearningTaskRow.lease_owner == lease.lease_owner,
-                    LearningTaskRow.generation == lease.generation,
-                )
-                .values(
-                    heartbeat_at=utcnow(),
-                    lease_until=utcnow() + timedelta(seconds=lease_seconds),
-                    status="running",
-                )
-            )
-            if result.rowcount != 1:
-                raise LeaseError("LEASE_LOST", "lease token mismatch or expired")
+            row = self.validate_lease(lease, session=sess)
+            now = utcnow()
+            lease_until = now + timedelta(seconds=lease_seconds)
+            if row.deadline_at is not None:
+                lease_until = min(lease_until, self._as_utc(row.deadline_at))
+            row.heartbeat_at = now
+            row.lease_until = lease_until
+            row.status = "running"
+            attempt = sess.get(TaskAttemptRow, lease.attempt_id)
+            if attempt is not None:
+                attempt.lease_until = lease_until
             sess.commit()
-            return utcnow() + timedelta(seconds=lease_seconds)
+            return lease_until
 
     def submit_result(
         self,
@@ -413,55 +598,65 @@ class TaskService:
         duration_ms: Optional[int] = None,
         progress_current: Optional[int] = None,
         diagnostics_only: bool = False,
+        preserve_partial: bool = False,
+        publish=None,
     ) -> dict:
         """条件更新提交结果：必须匹配 task_id + generation + attempt_id + lease_token。"""
         validate_stage(stage)
         validate_status(status)
         if error_code:
+            if status == "failed":
+                error_code = self._failure_code(error_code, task_id=lease.task_id, attempt=lease.attempt)
             validate_error_code(error_code)
 
-        with self.db.session() as sess:
+        with (
+            business_span("save", task_id=lease.task_id, attempt=lease.attempt),
+            business_span("transaction", task_id=lease.task_id, attempt=lease.attempt),
+            self.db.session() as sess,
+        ):
             row = sess.execute(
                 select(LearningTaskRow).where(LearningTaskRow.task_id == lease.task_id).with_for_update()
             ).scalar_one_or_none()
             if row is None:
                 raise LeaseError("TASK_NOT_FOUND", "task not found")
 
+            try:
+                self.validate_lease(lease, session=sess)
+                fence_ok = not diagnostics_only
+            except LeaseError:
+                fence_ok = False
             now = utcnow()
-            fence_ok = (
-                row.lease_token == lease.lease_token
-                and row.lease_owner == lease.lease_owner
-                and row.generation == lease.generation
-                and row.attempt == lease.attempt
-            )
-            lease_valid = row.lease_until is not None and row.lease_until >= now
-
-            if not fence_ok or not lease_valid or diagnostics_only:
-                # 迟到 worker：只写诊断
-                try:
-                    self.events.record(
-                        lease.task_id,
-                        stage=stage,
-                        status="stale_discarded",
-                        error_code="STALE_RESULT_DISCARDED",
-                        generation=lease.generation,
-                        attempt=lease.attempt,
-                        diagnostics_only=True,
-                    )
-                except Exception:
-                    pass
+            if not fence_ok:
+                self.events.record(
+                    lease.task_id,
+                    stage=stage,
+                    status="stale_discarded",
+                    error_code="STALE_RESULT_DISCARDED",
+                    generation=lease.generation,
+                    attempt=lease.attempt,
+                    diagnostics_only=True,
+                    session=sess,
+                )
                 sess.commit()
                 return {"accepted": False, "reason": "stale_discarded", "task_id": lease.task_id}
 
             # 围栏通过：更新任务并写事件
+            if publish is not None:
+                with business_span("publish", task_id=lease.task_id, attempt=lease.attempt):
+                    publish(sess)
             if status in ("succeeded", "partial", "failed"):
-                row.status = status if status != "partial" else "succeeded"
+                row.status = status if status != "partial" or preserve_partial else "succeeded"
             row.revision += 1
             row.updated_at = now
             row.lease_token = None
             row.lease_owner = None
             row.lease_until = None
 
+            row.stage = stage
+            attempt = sess.get(TaskAttemptRow, lease.attempt_id)
+            if attempt is not None:
+                attempt.finished_at = now
+                attempt.result_status = status
             self.events.record(
                 lease.task_id,
                 stage=stage,
@@ -471,6 +666,7 @@ class TaskService:
                 progress_current=progress_current,
                 generation=lease.generation,
                 attempt=lease.attempt,
+                session=sess,
             )
             sess.commit()
             return {
@@ -487,6 +683,8 @@ class TaskService:
                 raise LeaseError("TASK_NOT_FOUND", "task not found")
             if actor_id is not None and actor_id != row.owner_user_id:
                 raise AccessDeniedError("not_owner")
+            state = sess.get(TaskStateRow, task_id)
+            error_code = normalize_error_code(state.error_code) if state and state.error_code else None
             return {
                 "task_id": row.task_id,
                 "owner_user_id": row.owner_user_id,
@@ -498,27 +696,32 @@ class TaskService:
                 "revision": row.revision,
                 "attempt": row.attempt,
                 "cancel_requested": row.cancel_requested,
+                "error_code": error_code,
+                "retryable": bool(error_code and ERROR_CODES[error_code].retryable),
                 "prompt_binding_id": row.prompt_binding_id,
                 "deadline_at": row.deadline_at.isoformat() if row.deadline_at else None,
             }
 
     def request_cancel(self, task_id: str, *, actor_id: str) -> dict:
         with self.db.session() as sess:
-            row = sess.get(LearningTaskRow, task_id)
+            row = sess.scalar(select(LearningTaskRow).where(LearningTaskRow.task_id == task_id)
+                .with_for_update().execution_options(populate_existing=True))
             if row is None:
                 raise LeaseError("TASK_NOT_FOUND", "task not found")
             if row.owner_user_id != actor_id:
                 raise AccessDeniedError("not_owner")
-            row.cancel_requested = True
-            if row.status in ("queued", "leased"):
-                row.status = "cancelled"
+            if row.status in ("queued", *ACTIVE_STATUSES):
+                row.cancel_requested = True
+                self._terminal(sess, row, status="cancelled", error_code="TASK_CANCELLED", now=utcnow())
             sess.commit()
-            return {"task_id": task_id, "cancel_requested": True, "status": row.status}
+            return {"task_id": task_id, "cancel_requested": row.cancel_requested, "status": row.status}
 
-    def requeue_after_wait(self, task_id: str, *, actor_id: str) -> dict:
+    def requeue_after_wait(self, task_id: str, *, actor_id: str, deadline_seconds: int = 3600) -> dict:
         """业务等待（awaiting_*）决策后重排队：generation+1、状态回 queued。
 
         围栏语义延续：旧 generation worker 的迟到结果仍会被拒绝。
+        用户作答间隔不计入总截止：awaiting_* 是等人交互而非排队，恢复时刷新
+        `deadline_at`，避免访谈停留超过原截止后作答必然 `TASK_EXPIRED`。
         """
         with self.db.session() as sess:
             row = sess.execute(
@@ -528,11 +731,70 @@ class TaskService:
                 raise LeaseError("TASK_NOT_FOUND", "task not found")
             if row.owner_user_id != actor_id:
                 raise AccessDeniedError("not_owner")
+            if row.cancel_requested or row.status == "cancelled":
+                raise LeaseError("TASK_CANCELLED", "cancel requested")
             row.generation += 1
             row.status = "queued"
             row.lease_token = None
             row.lease_owner = None
             row.lease_until = None
+            row.deadline_at = utcnow() + timedelta(seconds=deadline_seconds)
             row.updated_at = utcnow()
             sess.commit()
             return {"task_id": task_id, "generation": row.generation, "status": row.status}
+
+    def requeue_for_retry(
+        self,
+        task_id: str,
+        *,
+        actor_id: str,
+        deadline_seconds: int = 3600,
+    ) -> dict:
+        """用户主动重试失败/过期任务：generation+1、状态回 queued、刷新总截止。
+
+        架构 §3.2「重试只替换失败或过期尝试」：只对 failed/expired 生效，由用户
+        显式触发，不自动无限重试。规划状态（访谈答案、resolved_scope 等）保留在
+        同一 task_id 下，供重试继续；非可重试状态原样返回（由调用方按既有语义处理）。
+        """
+        with self.db.session() as sess:
+            row = sess.execute(
+                select(LearningTaskRow).where(LearningTaskRow.task_id == task_id).with_for_update()
+            ).scalar_one_or_none()
+            if row is None:
+                raise LeaseError("TASK_NOT_FOUND", "task not found")
+            if row.owner_user_id != actor_id:
+                raise AccessDeniedError("not_owner")
+            now = utcnow()
+            if row.cancel_requested or row.status == "cancelled":
+                raise LeaseError("TASK_CANCELLED", "cancel requested")
+            deadline_passed = row.deadline_at is not None and self._as_utc(row.deadline_at) <= now
+            if deadline_passed and row.status in ("queued", *ACTIVE_STATUSES):
+                self._terminal(sess, row, status="expired", error_code="TASK_EXPIRED", now=now)
+            elif row.status in ACTIVE_STATUSES and (
+                    row.lease_until is None or self._as_utc(row.lease_until) <= now):
+                self._terminal(sess, row, status="failed", error_code="TASK_LEASE_EXPIRED", now=now)
+            retryable = row.status in ("failed", "expired")
+            if not retryable:
+                return {
+                    "task_id": task_id,
+                    "generation": row.generation,
+                    "status": row.status,
+                    "requeued": False,
+                }
+            row.generation += 1
+            row.status = "queued"
+            row.lease_token = None
+            row.lease_owner = None
+            row.lease_until = None
+            row.deadline_at = now + timedelta(seconds=deadline_seconds)
+            row.updated_at = now
+            self.events.record(task_id, stage=row.stage, status="started",
+                generation=row.generation, attempt=row.attempt, session=sess)
+            row.revision = sess.get(TaskStateRow, task_id).revision
+            sess.commit()
+            return {
+                "task_id": task_id,
+                "generation": row.generation,
+                "status": row.status,
+                "requeued": True,
+            }

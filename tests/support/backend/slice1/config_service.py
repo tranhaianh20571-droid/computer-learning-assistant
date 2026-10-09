@@ -17,7 +17,7 @@ from typing import Callable, Optional
 from sqlalchemy import select
 
 from ..logging_audit.db import Database
-from .crypto import decrypt, encrypt, load_key, mask_credentials
+from .crypto import CredentialCryptoError, decrypt, encrypt, load_key, mask_credentials
 from .errors import Slice1Error, error
 from .models import (
     ADMIN_KINDS,
@@ -57,7 +57,13 @@ class ConfigService:
     def _key_material(self) -> bytes:
         # 懒加载：缺少 APP_ENCRYPTION_KEY 时应用仍可启动，只在凭据操作时报受控错误。
         if self._key_cache is None:
-            self._key_cache = load_key(self._explicit_key)
+            try:
+                self._key_cache = load_key(self._explicit_key)
+            except CredentialCryptoError:
+                raise error(
+                    "credential_invalid",
+                    "服务器尚未配置凭据加密密钥，请联系管理员设置 APP_ENCRYPTION_KEY 并重启服务后重试。",
+                ) from None
         return self._key_cache
 
     # ---- 内部：加密/解密 ----
@@ -67,7 +73,13 @@ class ConfigService:
     def _decrypt(self, ciphertext: str) -> dict:
         if not ciphertext:
             return {}
-        raw = decrypt(ciphertext, self._key_material)
+        try:
+            raw = decrypt(ciphertext, self._key_material)
+        except CredentialCryptoError:
+            raise error(
+                "credential_invalid",
+                "无法解密已保存的服务凭据。服务器加密密钥可能已变更，或凭据已损坏；请联系管理员确认原 APP_ENCRYPTION_KEY，或在配置中重新填写并保存 API Key。",
+            ) from None
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:  # pragma: no cover - defensive
@@ -278,10 +290,16 @@ class ConfigService:
         self._notify(config_id, actor_id, "deactivated")
         return view
 
-    def set_capability_status(self, config_id: str, status: dict) -> dict:
+    def set_capability_status(self, config_id: str, status: dict, *, expected_version=None, merge=False) -> dict:
         with self.db.session() as sess:
-            row = self._load(sess, config_id)
-            row.capability_status = json.dumps(status)
+            row = sess.get(ServiceConfigRow, config_id, with_for_update=True)
+            if row is None:
+                raise error("config_not_found")
+            if expected_version is not None and (not row.is_active or row.config_version != expected_version):
+                return self.public_view(row)
+            combined = row.status_dict() if merge else {}
+            combined.update(status)
+            row.capability_status = json.dumps(combined)
             row.updated_at = utcnow()
             sess.flush()
             view = self.public_view(row)
@@ -306,6 +324,9 @@ class ConfigService:
     def _notify(self, config_id: str, actor_id: str, action: str) -> None:
         if self._on_config_changed is not None:
             self._on_config_changed(config_id, actor_id, action)
+        refresher = getattr(self,"capability_refresher",None)
+        if refresher is not None:
+            refresher.changed(config_id,actor_id,action)
 
 
 def protocol_capabilities(protocol: str) -> tuple[str, ...]:

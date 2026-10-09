@@ -1,0 +1,15 @@
+.capabilities-page { max-width: 1120px; margin: 0 auto; }
+.capabilities-page .row > .field { min-width: 200px; }
+.capabilities-page input, .capabilities-page select, .capability-editor input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--rule2); border-radius: var(--r2); background: var(--surface); }
+.capabilities-page .mono { overflow-wrap: anywhere; }
+.capabilities-page .config-item { border-top: 1px solid var(--rule); padding-top: var(--s4); }
+.capabilities-page .help { font-size: var(--t-s); color: var(--ink2); }
+.capabilities-page .capability-detail { font-size: var(--t-s); color: var(--err); }
+.capability-editor .field { margin-bottom: var(--s4); }
+.capability-result { display: inline-flex; flex-direction: column; gap: 6px; max-width: 260px; }
+.capability-editor { display: grid; gap: 12px; }
+.capability-editor .field { display: grid; gap: 8px; }
+.capability-editor input { font: inherit; color: inherit; }
+.capabilities-page button:not(.btn) { min-height: 40px; padding: 8px 16px; border: 1px solid var(--rule2); border-radius: var(--r2); cursor: pointer; background: var(--surface); }
+.capabilities-page button:disabled { cursor: wait; opacity: .6; }
+@media (max-width: 600px) { .capabilities-page .row > .field { flex-basis: 100%; min-width: 0; } .capabilities-page .card { padding: var(--s4); } }

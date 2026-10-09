@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import Dialog from "./ui/Dialog";
+import { planningMatchLink } from "./lib/learningLinks";
 
 /**
  * 首页 · 选择学习任务（v2 对齐原型布局）：
@@ -76,6 +78,7 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
     if (resume.lesson && resume.startable) {
       api.startLessonV2(resume.courseId, resume.lesson.id)
         .then((r: any) => {
+          if (!r) return;
           if (r.conversation_id) {
             sessionStorage.setItem("slice4.pendingTask", r.task_id);
             go(`/lecture/${r.conversation_id}`);
@@ -113,15 +116,21 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
     setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
   }, []);
 
-  const submit = useCallback(async () => {
+  const [possibleDuplicate, setPossibleDuplicate] = useState<any[] | null>(null);
+  const submit = useCallback(async (continuePlanning = false) => {
     if (!me) return onErr("请先登录后再开始。");
     const goal = text.trim();
     if (!goal || busy) return;
     setBusy(true);
     try {
       if (type === "plan") {
+        if (!continuePlanning) {
+          const check = await api.inputMatches(goal);
+          if (check.matches.length) { setPossibleDuplicate(check.matches); return; }
+        }
+        setPossibleDuplicate(null);
         const title = goal.split(/[。.，,\n]/)[0].slice(0, 40) || "学习路线";
-        const route = await api.createRoute(title, "self_study");
+        const route = await api.createRoute(title, "self_study", goal);
         const task = await api.createPlanningTask({
           idempotency_key: `web-${Date.now()}`,
           task_kind: "route_generate",
@@ -151,6 +160,11 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
 
   return (
     <div className="home">
+      {possibleDuplicate && <Dialog kind="info" title="可能已有相同规划" onClose={() => setPossibleDuplicate(null)} actions={<>
+        <button className="btn btn-sm" disabled={busy} onClick={() => setPossibleDuplicate(null)}>返回修改</button>
+        <button className="btn btn-sm" disabled={busy} onClick={() => submit(true)}>继续生成</button>
+        <button className="btn btn-pri btn-sm" disabled={busy} onClick={() => go(planningMatchLink(possibleDuplicate[0]))}>查看已有课程</button>
+      </>}><p>学习目标与已有规划相同，最终课程内容可能不同。</p><ul>{possibleDuplicate.map(m => <li key={m.id}><a href={`#${planningMatchLink(m)}`}>{m.title}</a></li>)}</ul></Dialog>}
       <section aria-labelledby="ask">
         {resume && (
           <button className="nextpill" style={{ marginBottom: 18 }} onClick={resumeGo}>
@@ -166,14 +180,6 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
             ? "把目标、问题或资料交给学伴，它会搜索、整理，再生成一张可以继续探索的学习图。"
             : "直接提问，学伴会结合你的资料和上下文一步步回答。"}
         </p>
-
-        {!me && (
-          <div className="note note-info" role="note" style={{ marginBottom: 16 }}>
-            <span className="tag">登录</span>
-            <div className="tt">先登录再开始</div>
-            <div>规划和对话都需要账户；提交前请先在侧栏登录。</div>
-          </div>
-        )}
 
         <div className="composer task-card">
           <div className="task-type" role="radiogroup" aria-label="任务类型">
@@ -224,11 +230,14 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
               </span>
             ))}
             <span className="grow" />
-            <button type="button" className="btn btn-pri submit" disabled={busy || !text.trim() || !me} onClick={submit}>
+            <button type="button" className="btn btn-pri submit" aria-describedby={type === "plan" ? "planning-cover-notice" : undefined} disabled={busy || !text.trim() || !me} onClick={() => submit()}>
               {busy ? <><span className="spin" />正在提交…</> : type === "plan" ? "生成规划草稿" : "开始对话"}
             </button>
           </div>
         </div>
+        {type === "plan" && <p className="help" id="planning-cover-notice">
+          规划提交不会自动外发图片请求。封面生成需另行确认图片模型、知识主题和费用范围。
+        </p>}
 
         {!text.trim() && (
           <div className="hint-row" aria-label="示例">

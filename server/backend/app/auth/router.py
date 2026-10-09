@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
 
 from ..logging_audit.audit import AuditWriteError
+from .guest import resolve_user_or_guest
 from .service import AuthError, AuthService
 
 
@@ -25,6 +26,7 @@ class VerifyIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+    remember_me: bool = False
 
 
 class PasswordResetRequestIn(BaseModel):
@@ -101,7 +103,7 @@ def create_auth_router(service: AuthService) -> APIRouter:
             httponly=True,
             secure=request.url.scheme == "https",
             samesite="lax",
-            max_age=14 * 24 * 60 * 60,
+            max_age=14 * 24 * 60 * 60 if body.remember_me else None,
             path="/",
         )
         return resp | {"session_token": raw_token}
@@ -168,6 +170,24 @@ def create_auth_router(service: AuthService) -> APIRouter:
             "is_admin": user.is_admin,
             "status": user.status,
             "display_name": user.display_name,
+        }
+
+    @router.get("/guest")
+    def guest(request: Request) -> dict:
+        """访客会话引导：有效登录态返回真实用户，否则签发/复用访客 Cookie。
+
+        前端在 /me 返回 401 后先调用本接口，确保后续并发请求共享同一访客身份
+        （Cookie 由 slice0 的 guest_cookie 中间件写入响应）。
+        """
+        user = resolve_user_or_guest(request, service)
+        return {
+            "user_id": user.user_id,
+            "email": user.email,
+            "role": user.role,
+            "is_admin": bool(user.is_admin),
+            "status": user.status,
+            "display_name": user.display_name,
+            "is_guest": bool(getattr(user, "is_guest", False)),
         }
 
     @router.post("/password-reset/request")

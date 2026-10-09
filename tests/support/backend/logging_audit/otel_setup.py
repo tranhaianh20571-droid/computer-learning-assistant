@@ -1,24 +1,20 @@
-"""ADR-022：OTel 装配（OTLP/HTTP → 自托管 Langfuse）与内容 span 辅助。
+"""Operational OTel runtime and explicitly separate legacy content hook.
 
-- `OTEL_ENABLED` 与 `OTEL_EXPORTER_OTLP_ENDPOINT` 同时设置才装配，否则完全
-  no-op：不建 TracerProvider、不影响业务导入路径与测试。
-- Langfuse 认证：OTLP 端点 Basic 头（public key:secret key），密钥只从环境
-  变量读取，不写日志、不进事件。
-- 导出失败由 SDK 批处理器丢弃并计入 exporter 统计；核心任务永不因导出失败
-  而失败（规范 §1 降级语义不变）。
-- 内容 span 遵循 GenAI 语义约定属性（`gen_ai.prompt` / `gen_ai.completion`），
-  仅当 `CONTENT_TRACE_ENABLED` 开启时由 `content_trace` 调用（ADR-022 内容三项）。
+OTLP/HTTP traces and metrics go to deployment-injected Logfire endpoints. No
+cloud configuration, content migration, or platform deletion is performed here.
 """
-
 from __future__ import annotations
 
 import base64
 import os
+import threading
+import time
 from typing import Optional
 
-_tracer = None
+_tracer = None  # Legacy controlled content hook only; NEVER the native runtime tracer.
 _configured_endpoint: Optional[str] = None
-
+_runtime = None
+_runtime_lock = threading.Lock()
 DEFAULT_LANGFUSE_OTLP_PATH = "/api/public/otel/v1/traces"
 
 
@@ -28,117 +24,204 @@ def _basic_auth_header(public_key: str, secret_key: str) -> str:
 
 
 def resolve_otlp_endpoint(endpoint: str) -> str:
-    """补全 Langfuse 默认 OTLP 路径：允许只配 base URL。"""
+    """Legacy content endpoint resolver, retained for existing callers."""
     if endpoint.rstrip("/").endswith("/traces"):
         return endpoint
     return endpoint.rstrip("/") + DEFAULT_LANGFUSE_OTLP_PATH
 
 
-def configure_otel(
-    *,
-    enabled: bool,
-    endpoint: Optional[str],
-    public_key: Optional[str] = None,
-    secret_key: Optional[str] = None,
-    service_name: str = "learning-assistant",
-) -> bool:
-    """装配全局 TracerProvider；未启用/缺端点时保持 no-op 并返回 False。
+def resolve_signal_endpoint(endpoint: str, signal: str) -> str:
+    from urllib.parse import urlsplit
+    parts = urlsplit(endpoint)
+    if parts.scheme not in {"https", "http"} or not parts.netloc or parts.username or parts.password or parts.query or parts.fragment:
+        raise ValueError("OBSERVABILITY_ENDPOINT_INVALID")
+    if signal not in {"traces", "metrics"}:
+        raise ValueError("OBSERVABILITY_ENDPOINT_INVALID")
+    base = endpoint.rstrip("/")
+    if base.endswith("/v1/traces") or base.endswith("/v1/metrics"):
+        base = base.rsplit("/", 1)[0]
+    elif not base.endswith("/v1"):
+        base += "/v1"
+    return base + "/" + signal
 
-    重复调用是幂等的：仅在尚未装配时创建 provider（测试用 reset_otel 复位）。
-    """
-    global _tracer, _configured_endpoint
-    if _tracer is not None:
-        return True
-    if not enabled or not endpoint:
+
+class ObservabilityRuntime:
+    """One application-owned trace provider and meter provider, no global override."""
+    def __init__(self, *, span_exporter=None, metric_exporter=None, metric_readers=(), service_name="learning-assistant", environment="development", max_queue=256, batch_size=32, export_timeout=1.0, metric_interval_ms=10000):
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.metrics import MeterProvider, AlwaysOffExemplarFilter
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from .instrumentation import SafeMeterProvider
+        from .exporter import SafeSpanExporter, SafeMetricExporter, SafeSpanProcessor
+        # Resource.create() adds host/process/env-detected fields; use an explicit resource.
+        self.resource = Resource({"service.name": "learning-assistant", "deployment.environment.name": environment if environment in {"development", "test", "staging", "production"} else "other"})
+        self.tracer_provider = TracerProvider(resource=self.resource, shutdown_on_exit=False)
+        self.processor = None
+        if span_exporter is not None:
+            self.processor = SafeSpanProcessor(SafeSpanExporter(span_exporter), max_queue=max_queue, batch_size=batch_size, export_timeout=export_timeout)
+            self.tracer_provider.add_span_processor(self.processor)
+        readers = list(metric_readers)
+        if metric_exporter is not None:
+            readers.append(PeriodicExportingMetricReader(SafeMetricExporter(metric_exporter), export_interval_millis=metric_interval_ms, export_timeout_millis=export_timeout * 1000))
+        self.raw_meter_provider = MeterProvider(resource=self.resource, metric_readers=readers, exemplar_filter=AlwaysOffExemplarFilter(), shutdown_on_exit=False)
+        self.meter_provider = SafeMeterProvider(self.raw_meter_provider)
+        self.tracer = self.tracer_provider.get_tracer("learning-assistant.business")
+        self._closed = False
+        self._shutdown_result = False
+        self._close_lock = threading.Lock()
+        self._lifecycle_locks = (threading.Lock(), threading.Lock())
+
+    def force_flush(self, timeout_millis=2000) -> bool:
+        deadline = time.monotonic() + max(0, timeout_millis) / 1000
+        ok = True
+        for provider, lock in zip((self.tracer_provider, self.raw_meter_provider), self._lifecycle_locks):
+            remaining = max(0, int((deadline - time.monotonic()) * 1000))
+            ok = _bounded_call(lambda p=provider, ms=remaining: p.force_flush(timeout_millis=ms), remaining, lock=lock) and ok
+        return ok
+
+    def shutdown(self, timeout_millis=2000) -> bool:
+        with self._close_lock:
+            if self._closed:
+                return self._shutdown_result
+            self._closed = True
+        deadline = time.monotonic() + max(0, timeout_millis) / 1000
+        ok = True
+        for provider, lock in zip((self.tracer_provider, self.raw_meter_provider), self._lifecycle_locks):
+            remaining = max(0, int((deadline - time.monotonic()) * 1000))
+            if provider is self.tracer_provider:
+                call = provider.shutdown
+            else:
+                call = lambda p=provider, ms=remaining: p.shutdown(timeout_millis=ms)
+            ok = _bounded_call(call, remaining, lock=lock) and ok
+        if self.processor is not None:
+            ok = self.processor._closed.is_set() and ok
+        with self._close_lock:
+            self._shutdown_result = ok
+        return ok
+
+    def close(self, timeout_millis=2000) -> bool:
+        return self.shutdown(timeout_millis)
+
+
+def _bounded_call(call, timeout_millis, *, lock=None) -> bool:
+    from .exporter import HEALTH
+    if lock is not None and not lock.acquire(blocking=False):
+        HEALTH.add("lifecycle_timeouts")
         return False
-    # 延迟导入：未启用 OTel 的环境（含部分测试）不支付导入成本
-    from opentelemetry import trace
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    done = threading.Event()
+    result = [False]
+    def run():
+        try:
+            result[0] = call() is not False
+        except Exception:
+            HEALTH.add("lifecycle_failures")
+        finally:
+            if lock is not None:
+                lock.release()
+            done.set()
+    threading.Thread(target=run, daemon=True, name="observability-lifecycle").start()
+    if not done.wait(max(0, timeout_millis) / 1000):
+        HEALTH.add("lifecycle_timeouts")
+        return False
+    return result[0]
 
-    headers = None
-    if public_key and secret_key:
-        headers = {"authorization": _basic_auth_header(public_key, secret_key)}
-    exporter = OTLPSpanExporter(
-        endpoint=resolve_otlp_endpoint(endpoint), headers=headers, timeout=5
-    )
-    provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
-    provider.add_span_processor(BatchSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
-    _tracer = trace.get_tracer("learning-assistant.content")
-    _configured_endpoint = endpoint
-    return True
+
+def configure_otel(*, enabled: bool, endpoint: Optional[str], public_key: Optional[str] = None, secret_key: Optional[str] = None, service_name: str = "learning-assistant", token: Optional[str] = None, environment: str = "development", traces_endpoint: Optional[str] = None, metrics_endpoint: Optional[str] = None) -> bool:
+    """Initialize the operational pipeline once; credentials only from deployment.
+
+    Legacy Langfuse credential arguments remain accepted, but cannot implicitly
+    send the content channel to operational Logfire monitoring.
+    """
+    global _runtime, _configured_endpoint
+    from .exporter import HEALTH, suppress_transport_logs
+    if not enabled or not (endpoint or (traces_endpoint and metrics_endpoint)):
+        return False
+    with _runtime_lock:
+        if _runtime is not None:
+            return True
+        try:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+            suppress_transport_logs()
+            trace_url = resolve_signal_endpoint(traces_endpoint or endpoint, "traces")
+            metric_url = resolve_signal_endpoint(metrics_endpoint or endpoint, "metrics")
+            headers = {"authorization": token} if token else {}
+            runtime = ObservabilityRuntime(
+                span_exporter=OTLPSpanExporter(endpoint=trace_url, headers=headers, timeout=1),
+                metric_exporter=OTLPMetricExporter(endpoint=metric_url, headers=headers, timeout=1),
+                service_name=service_name, environment=environment,
+            )
+            _runtime = runtime
+            _configured_endpoint = endpoint
+            return True
+        except Exception:
+            HEALTH.add("configuration_failures")
+            return False
+
+
+def get_runtime():
+    return _runtime
 
 
 def get_tracer():
-    """返回已装配 tracer；未装配时返回 None（调用方需自行跳过 span）。"""
-    return _tracer
+    return _runtime.tracer if _runtime else None
 
 
 def otel_configured() -> bool:
-    return _tracer is not None
+    return _runtime is not None
 
 
-def record_model_span(
-    name: str,
-    *,
-    task_id: Optional[str] = None,
-    mode: Optional[str] = None,
-    prompt: Optional[str] = None,
-    answer: Optional[str] = None,
-    user_question: Optional[str] = None,
-) -> None:
-    """内容 span：GenAI 语义约定属性。未装配 tracer 或超长时静默跳过。"""
-    tracer = _tracer
-    if tracer is None:
+def record_model_span(name: str, *, task_id: Optional[str] = None, mode: Optional[str] = None, prompt: Optional[str] = None, answer: Optional[str] = None, user_question: Optional[str] = None) -> None:
+    """Legacy explicitly injected content tracer, never the operational provider.
+
+    The existing controlled content_stream still receives its own events. This
+    compatibility hook does not configure a second provider or migrate content.
+    """
+    if _tracer is None:
         return
     try:
-        with tracer.start_as_current_span(name) as span:
-            if task_id:
-                span.set_attribute("task.id", task_id)
-            if mode:
-                span.set_attribute("gen_ai.operation.mode", mode)
-            if prompt:
-                span.set_attribute("gen_ai.prompt", prompt[:16384])
-            if answer:
-                span.set_attribute("gen_ai.completion", answer[:16384])
-            if user_question:
-                span.set_attribute("user.question", user_question[:16384])
-    except Exception:  # noqa: BLE001 — span 失败绝不影响业务
-        pass
+        with _tracer.start_as_current_span(name, record_exception=False, set_status_on_exception=False) as span:
+            for key, value in (("task.id", task_id), ("gen_ai.operation.mode", mode), ("gen_ai.prompt", prompt), ("gen_ai.completion", answer), ("user.question", user_question)):
+                if value:
+                    span.set_attribute(key, value[:16384])
+    except Exception:
+        from .exporter import HEALTH
+        HEALTH.add("content_hook_failures")
+
+
+def shutdown_otel(timeout_millis=2000) -> bool:
+    global _runtime
+    with _runtime_lock:
+        runtime, _runtime = _runtime, None
+    return runtime.shutdown(timeout_millis) if runtime else True
 
 
 def reset_otel() -> None:
-    """测试复位：关闭 provider 并清空全局 tracer。"""
     global _tracer, _configured_endpoint
-    if _tracer is not None:
-        try:
-            from opentelemetry import trace
-
-            provider = trace.get_tracer_provider()
-            shutdown = getattr(provider, "shutdown", None)
-            if callable(shutdown):
-                shutdown()
-        except Exception:  # noqa: BLE001
-            pass
+    shutdown_otel()
+    # An injected legacy content tracer is owned by its injector, not this runtime.
     _tracer = None
     _configured_endpoint = None
 
 
 def otel_from_env(service_name: str = "learning-assistant") -> bool:
-    """按环境变量装配（main 启动入口用）。"""
+    """Explicit deployment opt-in avoids reusing old content endpoints/credentials."""
     return configure_otel(
         enabled=os.environ.get("OTEL_ENABLED", "").lower() in ("1", "true", "yes"),
-        endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or None,
-        public_key=os.environ.get("LANGFUSE_PUBLIC_KEY") or None,
-        secret_key=os.environ.get("LANGFUSE_SECRET_KEY") or None,
+        endpoint=os.environ.get("LOGFIRE_OTLP_ENDPOINT") or None,
+        traces_endpoint=os.environ.get("LOGFIRE_OTLP_TRACES_ENDPOINT") or None,
+        metrics_endpoint=os.environ.get("LOGFIRE_OTLP_METRICS_ENDPOINT") or None,
+        token=os.environ.get("LOGFIRE_TOKEN") or None,
+        environment=os.environ.get("ENVIRONMENT", "development"),
         service_name=service_name,
     )
 
 
-__all__ = [
-    "configure_otel", "otel_from_env", "get_tracer", "otel_configured",
-    "record_model_span", "reset_otel", "resolve_otlp_endpoint",
-]
+def observability_health_snapshot() -> dict:
+    from .exporter import HEALTH
+    snapshot = HEALTH.snapshot()
+    snapshot["configured"] = otel_configured()
+    runtime = get_runtime()
+    snapshot["queue_length"] = runtime.processor.queue_length() if runtime and runtime.processor else 0
+    return snapshot

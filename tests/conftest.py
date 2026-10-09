@@ -21,3 +21,20 @@ os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 from backend.logging_audit.db import get_database_url  # noqa: E402
 
 os.environ.setdefault("LEARNING_DATABASE_URL", get_database_url())
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def native_synthetic_model_session(monkeypatch):
+    """Legacy generate ducks only; configured adapters retain native wire checks.
+
+    Conversion is test infrastructure, not a production capability fallback.
+    TestModel/FunctionModel and AdapterBase are deliberately delegated unchanged.
+    Services keep the original source and its mutable counters/config metadata.
+    """
+    from backend.agents import runner
+    from native_model_support import synthetic_session_factory
+    monkeypatch.setattr(runner, "native_model_session",
+                        synthetic_session_factory(runner.native_model_session))

@@ -1,257 +1,87 @@
-"""路线总览与课程总览查询（T07）。
-
-- 总览与导图从同一个已确认版本读取（同版口径）；
-- 课程进度按当前已确认大纲的讲次等权计算；lesson_progress 本切片只有
-  「未开始」默认值（完成写入归切片 4）；
-- 路线总览不输出整体百分比（§8.1 明确不做）；
-- 未确认大纲（current_outline_version_id 为空）的课程返回受控门槛状态，
-  前端据此禁用「开始学习」入口；服务端教学门槛另有 LESSON_UNLOCK_REQUIRED。
-"""
+"""Owner-scoped, version-consistent course and route queries (ADR-026)."""
 
 from __future__ import annotations
 
-from sqlalchemy import select
-
-from ..logging_audit.db import Database
+from .library import LibrarySnapshot, normalize_text, read_snapshot_session
 from .errors import error
-from .models import (
-    CourseRow,
-    CourseUnitRow,
-    LearningNavigationStateRow,
-    LessonProgressRow,
-    LessonPrerequisiteEdgeRow,
-    LessonRow,
-    OutlineVersionRow,
-    LearningRouteRow,
-    RouteCourseNodeRow,
-    RoutePrerequisiteEdgeRow,
-    RouteStageRow,
-    RouteVersionRow,
-    utcnow,
-)
+from .models import LearningNavigationStateRow, utcnow
 
-# 「安排过先修 ≠ 已掌握」提示的稳定键（前端按切片 0 视觉规则渲染）
 PREREQ_NOT_MASTERY_HINT = "prereq_arranged_not_mastered"
 
 
 class OverviewService:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db):
         self.db = db
 
-    # ------------------------------------------------------------------
-    def route_overview(self, route_id: str, *, actor_id: str) -> dict:
+    def route_overview(self, route_id, *, actor_id, version_id=None):
         with self.db.session() as sess:
-            route = sess.get(LearningRouteRow, route_id)
-            if route is None or route.owner_user_id != actor_id or route.deleted_at is not None:
-                raise error("route_not_found", status=404)
-            version = (
-                sess.get(RouteVersionRow, route.current_route_version_id)
-                if route.current_route_version_id
-                else None
-            )
-            stages: list[dict] = []
-            if version is not None:
-                stage_rows = (
-                    sess.execute(
-                        select(RouteStageRow)
-                        .where(RouteStageRow.route_version_id == version.route_version_id)
-                        .order_by(RouteStageRow.order_index)
-                    )
-                    .scalars()
-                    .all()
-                )
-                node_rows = (
-                    sess.execute(
-                        select(RouteCourseNodeRow).where(
-                            RouteCourseNodeRow.route_version_id == version.route_version_id
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                nodes_by_stage: dict[str, list[RouteCourseNodeRow]] = {}
-                for node in node_rows:
-                    nodes_by_stage.setdefault(node.stage_id, []).append(node)
-                for stage in stage_rows:
-                    courses = []
-                    for node in sorted(nodes_by_stage.get(stage.stage_id, []), key=lambda n: n.order_index):
-                        course = sess.get(CourseRow, node.course_id)
-                        courses.append(
-                            {
-                                "course_id": node.course_id,
-                                "node_id": node.node_id,
-                                "order_index": node.order_index,
-                                "title": course.title_ref if course else "",
-                                "goal_snapshot": node.goal_snapshot_ref,
-                                "outline_confirmed": bool(course and course.current_outline_version_id),
-                                "progress": self.course_progress(sess, node.course_id),
-                            }
-                        )
-                    stages.append(
-                        {
-                            "stage_id": stage.stage_id,
-                            "order_index": stage.order_index,
-                            "title": stage.title_ref,
-                            "course_count": len(courses),
-                            "courses": courses,
-                        }
-                    )
-            return {
-                "route_id": route.route_id,
-                "scenario": route.scenario,
-                "current_version_id": version.route_version_id if version else None,
-                "version_no": version.version_no if version else None,
-                "has_version": version is not None,
-                "stages": stages,
-                # 注意：不输出路线整体百分比（§8.1）
-            }
+            read_snapshot_session(sess)
+            return LibrarySnapshot(sess, actor_id).route(route_id, version_id)
 
-    # ------------------------------------------------------------------
-    def course_overview(self, course_id: str, *, actor_id: str) -> dict:
+    def course_overview(self, course_id, *, actor_id, route_id=None, route_version_id=None):
         with self.db.session() as sess:
-            course = sess.get(CourseRow, course_id)
-            if course is None or course.owner_user_id != actor_id or course.deleted_at is not None:
-                raise error("course_not_found", status=404)
-            version = (
-                sess.get(OutlineVersionRow, course.current_outline_version_id)
-                if course.current_outline_version_id
-                else None
-            )
-            units: list[dict] = []
-            lesson_total = 0
-            if version is not None:
-                unit_rows = (
-                    sess.execute(
-                        select(CourseUnitRow)
-                        .where(CourseUnitRow.outline_version_id == version.outline_version_id)
-                        .order_by(CourseUnitRow.order_index)
-                    )
-                    .scalars()
-                    .all()
-                )
-                lesson_rows = (
-                    sess.execute(
-                        select(LessonRow).where(
-                            LessonRow.outline_version_id == version.outline_version_id
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                lessons_by_unit: dict[str, list[LessonRow]] = {}
-                for lesson in lesson_rows:
-                    lessons_by_unit.setdefault(lesson.unit_id, []).append(lesson)
-                prereq_targets = set(
-                    sess.execute(
-                        select(LessonPrerequisiteEdgeRow.to_lesson_id).where(
-                            LessonPrerequisiteEdgeRow.outline_version_id == version.outline_version_id
-                        )
-                    ).scalars().all()
-                )
-                for unit in unit_rows:
-                    lessons = []
-                    for lesson in sorted(lessons_by_unit.get(unit.unit_id, []), key=lambda l: l.order_index):
-                        lesson_total += 1
-                        progress = sess.execute(
-                            select(LessonProgressRow).where(
-                                LessonProgressRow.owner_user_id == actor_id,
-                                LessonProgressRow.lesson_id == lesson.lesson_id,
-                            )
-                        ).scalar_one_or_none()
-                        lessons.append(
-                            {
-                                "lesson_id": lesson.lesson_id,
-                                "order_index": lesson.order_index,
-                                "title": lesson.goal_ref or "",
-                                "goal": lesson.goal_ref,
-                                "status_preparation": lesson.status_preparation,
-                                "learning_state": progress.learning_state if progress else "not_started",
-                                "prereq_arranged": lesson.lesson_id in prereq_targets,
-                                "prereq_hint": PREREQ_NOT_MASTERY_HINT
-                                if lesson.lesson_id in prereq_targets
-                                else None,
-                                # 教学门槛：大纲已确认但讲次未就绪 → 入口禁用原因
-                                "startable": lesson.status_preparation == "ready",
-                            }
-                        )
-                    units.append(
-                        {
-                            "unit_id": unit.unit_id,
-                            "order_index": unit.order_index,
-                            "title": unit.title_ref,
-                            "lesson_count": len(lessons),
-                            "lessons": lessons,
-                        }
-                    )
-            return {
-                "course_id": course.course_id,
-                "title": course.title_ref,
-                "scenario": course.scenario,
-                "current_version_id": version.outline_version_id if version else None,
-                "version_no": version.version_no if version else None,
-                "outline_confirmed": version is not None,
-                # 教学门槛：未确认大纲 → 服务端禁止教学/TTS（切片 4 阈值的前置校验）
-                "teaching_unlocked": version is not None,
-                "source_route_version_id": course.source_route_version_id,
-                "source_route_node_id": course.source_route_node_id,
-                "units": units,
-                "progress": {
-                    "lesson_total": lesson_total,
-                    # 本切片 lesson_progress 全为 not_started → started=0（完成写入归切片 4）
-                    "lesson_started": self._started_count(sess, actor_id, course.course_id, version),
-                },
-            }
+            read_snapshot_session(sess)
+            library = LibrarySnapshot(sess, actor_id)
+            contexts = library.contexts(course_id)
+            context = None
+            outline_id = None
+            if route_id or route_version_id:
+                context = next((c for c in contexts if c["route_id"] == route_id and
+                    (not route_version_id or c["route_version_id"] == route_version_id)), None)
+                if context is None:
+                    raise error("course_not_found", status=404)
+                node = next(n for n in library.nodes[context["route_version_id"]] if n.course_id == course_id)
+                outline, _ = library.outline_for_node(node)
+                outline_id = outline.outline_version_id if outline else None
+            result = library.course(course_id, outline_id)
+            result.update(context=context, contexts=contexts)
+            if outline_id and outline_id != library.courses[course_id].current_outline_version_id:
+                result["teaching_unlocked"] = False
+                result["historical_outline"] = True
+            return result
 
-    def _started_count(self, sess, actor_id: str, course_id: str, version) -> int:
-        if version is None:
-            return 0
-        lesson_ids = set(
-            sess.execute(
-                select(LessonRow.lesson_id).where(
-                    LessonRow.outline_version_id == version.outline_version_id
-                )
-            ).scalars().all()
-        )
-        if not lesson_ids:
-            return 0
-        rows = (
-            sess.execute(
-                select(LessonProgressRow).where(
-                    LessonProgressRow.owner_user_id == actor_id,
-                    LessonProgressRow.lesson_id.in_(list(lesson_ids)),
-                    LessonProgressRow.learning_state != "not_started",
-                )
-            )
-            .scalars()
-            .all()
-        )
-        return len(rows)
+    def list_library(self, *, actor_id):
+        with self.db.session() as sess:
+            read_snapshot_session(sess)
+            return LibrarySnapshot(sess, actor_id).library()
 
-    def course_progress(self, sess, course_id: str) -> dict:
+    def list_course_summaries(self, *, actor_id):
+        with self.db.session() as sess:
+            read_snapshot_session(sess)
+            library = LibrarySnapshot(sess, actor_id)
+            return [library.course(cid) for cid in library.courses]
+
+    def course_progress(self, sess, course_id):
+        from .models import CourseRow
         course = sess.get(CourseRow, course_id)
-        if course is None or not course.current_outline_version_id:
-            return {"lesson_total": 0, "lesson_started": 0, "outline_confirmed": False}
-        version = sess.get(OutlineVersionRow, course.current_outline_version_id)
-        total = len(
-            sess.execute(
-                select(LessonRow.lesson_id).where(
-                    LessonRow.outline_version_id == version.outline_version_id
-                )
-            ).scalars().all()
-        )
-        return {"lesson_total": total, "lesson_started": 0, "outline_confirmed": True}
+        if course is None or course.deleted_at is not None:
+            return {"lesson_total": 0, "lesson_started": 0, "lesson_completed": 0, "outline_confirmed": False}
+        summary = LibrarySnapshot(sess, course.owner_user_id).course(course_id)
+        return summary["progress"] | {"outline_confirmed": summary["outline_confirmed"]}
 
-    # ------------------------------------------------------------------
-    def update_navigation(
-        self,
-        *,
-        actor_id: str,
-        route_id: str | None = None,
-        course_id: str | None = None,
-        unit_id: str | None = None,
-        lesson_id: str | None = None,
-    ) -> dict:
+    def input_matches(self, value, *, actor_id):
         with self.db.session() as sess:
+            read_snapshot_session(sess)
+            library = LibrarySnapshot(sess, actor_id)
+            routes = [{"kind": "route", "id": r.route_id, "title": r.title_ref}
+                    for r in library.routes.values()
+                    if r.current_route_version_id and normalize_text(r.input_ref or r.title_ref) == normalize_text(value)]
+            courses = [{"kind": "course", "id": c.course_id, "title": c.title_ref}
+                       for c in library.courses.values() if c.current_outline_version_id
+                       and not library.contexts(c.course_id) and normalize_text(c.title_ref) == normalize_text(value)]
+            return routes + courses
+
+    def update_navigation(self, *, actor_id, route_id=None, course_id=None, unit_id=None, lesson_id=None):
+        with self.db.session() as sess:
+            if sess.bind.dialect.name == "postgresql":
+                from sqlalchemy import text
+                sess.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:owner, 0))"),
+                             {"owner": "learning-navigation:" + actor_id})
+            library = LibrarySnapshot(sess, actor_id)
+            if route_id and route_id not in library.routes:
+                raise error("route_not_found", status=404)
+            if course_id and course_id not in library.courses:
+                raise error("course_not_found", status=404)
             row = sess.get(LearningNavigationStateRow, actor_id)
             if row is None:
                 row = LearningNavigationStateRow(owner_user_id=actor_id)
@@ -265,70 +95,19 @@ class OverviewService:
             if lesson_id is not None:
                 row.last_lesson_id = lesson_id
             row.updated_at = utcnow()
-            sess.commit()
-            return {
-                "last_route_id": row.last_route_id,
-                "last_course_id": row.last_course_id,
-                "last_unit_id": row.last_unit_id,
-                "last_lesson_id": row.last_lesson_id,
-            }
+            sess.flush()
+            return self._navigation(row)
 
-    def list_course_summaries(self, *, actor_id: str) -> list[dict]:
-        """课程列表（owned、未删除）：确认状态 + 讲次进度 + 下一讲提示。
+    @staticmethod
+    def _navigation(row):
+        return {"last_route_id": row.last_route_id if row else None,
+                "last_course_id": row.last_course_id if row else None,
+                "last_unit_id": row.last_unit_id if row else None,
+                "last_lesson_id": row.last_lesson_id if row else None}
 
-        复用 course_overview 的同版口径逐课程取数（邀请制下课程数很小）；
-        下一讲 = 第一个未完成且就绪的讲次，供列表页「接下来」栏展示。
-        """
+    def get_navigation(self, *, actor_id):
         with self.db.session() as sess:
-            course_rows = (
-                sess.execute(
-                    select(CourseRow)
-                    .where(CourseRow.owner_user_id == actor_id, CourseRow.deleted_at.is_(None))
-                    .order_by(CourseRow.created_at.desc())
-                )
-                .scalars()
-                .all()
-            )
-        items: list[dict] = []
-        for course in course_rows:
-            ov = self.course_overview(course.course_id, actor_id=actor_id)
-            lessons = [l for u in ov.get("units", []) for l in u.get("lessons", [])]
-            progress = ov.get("progress") or {}
-            nxt = next(
-                (
-                    l
-                    for l in lessons
-                    if l.get("learning_state") != "user_completed" and l.get("startable")
-                ),
-                None,
-            )
-            items.append(
-                {
-                    "course_id": course.course_id,
-                    "title": course.title_ref,
-                    "scenario": course.scenario,
-                    "outline_confirmed": bool(ov.get("outline_confirmed")),
-                    "unit_count": len(ov.get("units", [])),
-                    "lesson_total": int(progress.get("lesson_total", 0)),
-                    "lesson_started": int(progress.get("lesson_started", 0)),
-                    "next_lesson_id": nxt.get("lesson_id") if nxt else None,
-                    "next_lesson_title": (nxt.get("title") or None) if nxt else None,
-                }
-            )
-        return items
-
-    def get_navigation(self, *, actor_id: str) -> dict:
-        with self.db.session() as sess:
-            row = sess.get(LearningNavigationStateRow, actor_id)
-            if row is None:
-                return {"last_route_id": None, "last_course_id": None,
-                        "last_unit_id": None, "last_lesson_id": None}
-            return {
-                "last_route_id": row.last_route_id,
-                "last_course_id": row.last_course_id,
-                "last_unit_id": row.last_unit_id,
-                "last_lesson_id": row.last_lesson_id,
-            }
+            return self._navigation(sess.get(LearningNavigationStateRow, actor_id))
 
 
 __all__ = ["OverviewService", "PREREQ_NOT_MASTERY_HINT"]

@@ -131,3 +131,70 @@ class TestLaneClaim:
         with pytest.raises(Exception, match="no claimable task|capacity full"):
             tasks.claim_next("ocr", lease_owner="wexp", capacity=SMALL)
         assert tasks.get_task(tid)["status"] == "expired"
+
+
+class TestRequeueForRetry:
+    """用户显式重试失败/过期任务：只新 generation，不自动无限重试。"""
+
+    def test_expired_task_recovers_and_is_claimable(self, tasks: TaskService, database: Database) -> None:
+        owner = f"user_{uuid.uuid4().hex[:6]}"
+        tid = _mk(tasks, owner, "ocr", "retry-expired")
+        with database.session() as sess:
+            sess.execute(
+                update(LearningTaskRow)
+                .where(LearningTaskRow.task_id == tid)
+                .values(deadline_at=utcnow() - timedelta(seconds=1), status="expired")
+            )
+        before = tasks.get_task(tid)
+        result = tasks.requeue_for_retry(tid, actor_id=owner)
+        assert result["requeued"] is True
+        assert result["status"] == "queued"
+        after = tasks.get_task(tid)
+        assert after["generation"] == before["generation"] + 1
+        assert after["deadline_at"] is not None
+        lease = tasks.claim_next("ocr", lease_owner="wretry", capacity=SMALL)
+        assert lease.task_id == tid
+
+    def test_queued_task_with_passed_deadline_refreshes(self, tasks: TaskService, database: Database) -> None:
+        """截止已过但仍 queued：重试同样刷新截止，避免首次重试直接 TASK_EXPIRED。"""
+        owner = f"user_{uuid.uuid4().hex[:6]}"
+        tid = _mk(tasks, owner, "ocr", "retry-queued-stale")
+        with database.session() as sess:
+            sess.execute(
+                update(LearningTaskRow)
+                .where(LearningTaskRow.task_id == tid)
+                .values(deadline_at=utcnow() - timedelta(seconds=1))
+            )
+        result = tasks.requeue_for_retry(tid, actor_id=owner)
+        assert result["requeued"] is True
+        assert tasks.get_task(tid)["status"] == "queued"
+
+    def test_failed_task_recovers(self, tasks: TaskService, database: Database) -> None:
+        owner = f"user_{uuid.uuid4().hex[:6]}"
+        tid = _mk(tasks, owner, "ocr", "retry-failed")
+        with database.session() as sess:
+            sess.execute(
+                update(LearningTaskRow)
+                .where(LearningTaskRow.task_id == tid)
+                .values(status="failed")
+            )
+        result = tasks.requeue_for_retry(tid, actor_id=owner)
+        assert result["requeued"] is True and result["status"] == "queued"
+
+    def test_succeeded_task_not_requeued(self, tasks: TaskService, database: Database) -> None:
+        owner = f"user_{uuid.uuid4().hex[:6]}"
+        tid = _mk(tasks, owner, "ocr", "retry-done")
+        with database.session() as sess:
+            sess.execute(
+                update(LearningTaskRow)
+                .where(LearningTaskRow.task_id == tid)
+                .values(status="succeeded")
+            )
+        result = tasks.requeue_for_retry(tid, actor_id=owner)
+        assert result["requeued"] is False and result["status"] == "succeeded"
+
+    def test_cross_owner_rejected(self, tasks: TaskService) -> None:
+        owner = f"user_{uuid.uuid4().hex[:6]}"
+        tid = _mk(tasks, owner, "ocr", "retry-owner")
+        with pytest.raises(Exception, match="not_owner"):
+            tasks.requeue_for_retry(tid, actor_id="someone-else")

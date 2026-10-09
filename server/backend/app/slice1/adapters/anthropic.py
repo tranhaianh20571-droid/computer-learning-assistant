@@ -7,10 +7,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import CAPABILITIES, PROBE_TEXT, AdapterBase, image_data_url
+from .base import CAPABILITIES, PROBE_TEXT, AdapterBase, AdapterError, image_data_url
 
 
 class AnthropicAdapter(AdapterBase):
+    supports_text_stream = True
     kind = "content_model"
     protocol = "anthropic"
     capabilities = CAPABILITIES
@@ -24,7 +25,8 @@ class AnthropicAdapter(AdapterBase):
         return headers
 
     def _messages_url(self) -> str:
-        return f"{self.endpoint}/v1/messages"
+        endpoint = self.endpoint.rstrip("/").removesuffix("/v1")
+        return f"{endpoint}/v1/messages"
 
     def _probe(self, capability: str) -> None:
         if capability == "streaming":
@@ -91,19 +93,94 @@ class AnthropicAdapter(AdapterBase):
             "messages": [{"role": "user", "content": PROBE_TEXT}],
             "stream": True,
         }
-        client = self._client_or_new()
         try:
-            with client.stream(
+            with self._stream_request(
                 "POST",
                 self._messages_url(),
                 json=payload,
                 headers={**self.headers, "Accept": "text/event-stream"},
-            ) as response:
-                if not (200 <= response.status_code < 300):
-                    self._map_status(response.status_code, {"raw": response.read()[:256]})
-                for _ in response.iter_lines():
+            ) as lines:
+                for _ in lines:
                     return
+        except AdapterError:
+            raise
         except Exception as exc:  # noqa: BLE001
-            from .base import AdapterError
-
             raise AdapterError("connection_error", status=502) from exc
+
+    def generate(self, messages: list[dict], **options: Any) -> dict:
+        payload = self._generation_payload(messages, **options)
+        status, body, _ = self._request("POST", self._messages_url(), json_body=payload)
+        self._map_status(status, body)
+        calls = [{"id": b["id"], "type": "function", "function": {"name": b["name"], "arguments": b.get("input", {})}}
+                 for b in body.get("content", []) if b.get("type") == "tool_use"]
+        text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")
+        return {"content": text, "tool_arguments": calls[0]["function"]["arguments"] if calls else None, "tool_calls": calls}
+
+    def stream(self, messages: list[dict], **options: Any):
+        import json
+        payload = self._generation_payload(messages, **options)
+        payload["stream"] = True
+        with self._stream_request("POST", self._messages_url(), json=payload,
+                headers={**self.headers, "Accept": "text/event-stream"}) as lines:
+            for line in lines:
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    chunk = json.loads(line[5:].strip())
+                except ValueError:
+                    continue
+                if chunk.get("type") == "error":
+                    from .base import AdapterError
+                    kind = (chunk.get("error") or {}).get("type")
+                    raise AdapterError("rate_limited" if kind == "rate_limit_error" else "capability_test_failed", status=502)
+                delta = chunk.get("delta") or {}
+                if delta.get("type") == "text_delta" and delta.get("text"):
+                    yield delta["text"]
+
+    def _generation_payload(self, messages: list[dict], **options: Any) -> dict:
+        import json
+        systems, converted = [], []
+        for message in messages:
+            content = message.get("content", "") or ""
+            role = message.get("role", "user")
+            if role == "system":
+                systems.append(str(content))
+                continue
+            blocks = []
+            if role == "tool":
+                blocks.append({"type": "tool_result", "tool_use_id": message["tool_call_id"], "content": str(content)})
+                role = "user"
+            elif isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "text":
+                        blocks.append({"type": "text", "text": item["text"]})
+                    elif item.get("type") == "image_url":
+                        url = item["image_url"]["url"]
+                        if not url.startswith("data:"):
+                            from .base import AdapterError
+                            raise AdapterError("unsupported_capability", status=422)
+                        header, data = url.split(",", 1)
+                        blocks.append({"type": "image", "source": {"type": "base64",
+                            "media_type": header[5:].split(";")[0], "data": data}})
+            elif content:
+                blocks.append({"type": "text", "text": str(content)})
+            for call in message.get("tool_calls", []):
+                fn = call["function"]; args = fn.get("arguments", {})
+                blocks.append({"type": "tool_use", "id": call["id"], "name": fn["name"],
+                               "input": json.loads(args) if isinstance(args, str) else args})
+            if blocks:
+                if converted and converted[-1]["role"] == role:
+                    converted[-1]["content"].extend(blocks)
+                else:
+                    converted.append({"role": role, "content": blocks})
+        payload = {"model": self.model_name, "max_tokens": 16000, "messages": converted}
+        if systems:
+            payload["system"] = "\n".join(systems)
+        if options.get("tools"):
+            payload["tools"] = [{"name": t["function"]["name"],
+                "description": t["function"].get("description", ""),
+                "input_schema": t["function"]["parameters"]} for t in options["tools"]]
+            choice = options.get("tool_choice", "auto")
+            payload["tool_choice"] = ({"type": "tool", "name": choice["function"]["name"]}
+                                      if isinstance(choice, dict) else {"type": "auto" if choice == "auto" else "any"})
+        return payload

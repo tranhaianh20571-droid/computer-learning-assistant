@@ -135,12 +135,13 @@ class PromptService:
             sess.commit()
         return {"binding_id": binding_id, "template_sha256": sha, "source": source}
 
-    def resolve_for_task(self, task_id: str) -> dict:
+    def resolve_for_task(self, task_id: str, prompt_name: str | None = None) -> dict:
         """已有任务从快照恢复；无绑定 → prompt_unavailable。"""
         with self.db.session() as sess:
-            row = sess.execute(
-                select(PromptBindingRow).where(PromptBindingRow.task_id == task_id)
-            ).scalars().first()
+            query = select(PromptBindingRow).where(PromptBindingRow.task_id == task_id)
+            if prompt_name:
+                query = query.where(PromptBindingRow.prompt_name == prompt_name)
+            row = sess.execute(query.order_by(PromptBindingRow.created_at)).scalars().first()
             if row is None:
                 raise PromptUnavailable(f"no binding for task {task_id}")
             if self._sha256(row.template_snapshot) != row.template_sha256:
@@ -153,3 +154,17 @@ class PromptService:
                 "template_sha256": row.template_sha256,
                 "langfuse_version": row.langfuse_version,
             }
+
+    def clone_for_task(self, task_id: str, source_task_id: str, prompt_name: str) -> None:
+        """Continue a lesson with the original prompt snapshot, not a new live label."""
+        self.resolve_for_task(source_task_id, prompt_name)
+        with self.db.session() as sess:
+            if sess.execute(select(PromptBindingRow).where(PromptBindingRow.task_id == task_id,
+                PromptBindingRow.prompt_name == prompt_name)).first(): return
+            source = sess.execute(select(PromptBindingRow).where(PromptBindingRow.task_id == source_task_id,
+                PromptBindingRow.prompt_name == prompt_name).order_by(PromptBindingRow.created_at)).scalars().first()
+            sess.add(PromptBindingRow(binding_id=f"pbind_{uuid.uuid4().hex[:12]}", task_id=task_id,
+                prompt_name=prompt_name,source=source.source,langfuse_version=source.langfuse_version,
+                template_snapshot=source.template_snapshot,template_sha256=source.template_sha256,
+                model_config_version=source.model_config_version,output_schema_version=source.output_schema_version,
+                tools_version=source.tools_version,agent_code_version=source.agent_code_version))

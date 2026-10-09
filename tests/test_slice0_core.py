@@ -256,6 +256,7 @@ class TestPromptBinding:
 
 class TestSlice0HTTP:
     def test_full_chain_register_to_task(self, database: Database):
+        """AC-12：注册、验证、审批、任务/SSE、跨账户拒绝与停用撤销的统一链路。"""
         audit = PgAuditLog(database)
         events = PgTaskEventStore(database)
         state = Slice0State(database, audit)

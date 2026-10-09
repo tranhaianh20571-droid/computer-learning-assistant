@@ -129,9 +129,22 @@ class TestUpload:
         assert r.status_code == 415
         assert r.json()["error_code"] == "unsupported_media_type"
 
-    def test_upload_requires_session(self, client):
+    def test_upload_without_session_uses_guest(self, client):
+        # 访客模式：无会话上传以访客身份继续，并签发访客 Cookie
+        try:
+            r = client.post(
+                "/api/materials",
+                files=[("files", ("a.txt", b"x", "text/plain"))],
+            )
+            assert r.status_code == 201, r.text
+            assert r.cookies.get("guest_id")
+        finally:
+            client.cookies.clear()  # 模块级 client：不把访客 Cookie 带给后续用例
+
+    def test_upload_rejects_invalid_bearer(self, client):
         r = client.post(
             "/api/materials",
+            headers={"Authorization": "Bearer not-a-real-token"},
             files=[("files", ("a.txt", b"x", "text/plain"))],
         )
         assert r.status_code in (401, 403)

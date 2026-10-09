@@ -1,188 +1,264 @@
-"""AgentRunner（方案 S1a/S1b）：统一生成入口。
-
-- 门控复用 model_runner 的 ModelCapabilityGate 与 6h 失败缓存
-  （ADR-023：Agent 路径输出模式为 tool→prompted 两档；native 仅适用于
-  直连 provider，经 FunctionModel 桥无收益，不参与降级链）；
-- 内容捕获在桥内（bridge 出口 emit model.call.content）；
-- 聚合指标与 model_runner 同形（stage/mode/outcome/duration/error_code）；
-- 同步形态（R3 冻结）：run_sync 仅在无事件循环的 worker/请求线程调用；
-  禁止在 async 上下文直接调用（上游 #3899 run_sync+子代理死锁未修）。
-"""
-
+"""Native PydanticAI execution; application services retain authorization and commit."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, List, Optional, Type
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any
 
-from pydantic import BaseModel
+from pydantic_ai import Agent, UsageLimits
+from pydantic_ai.capabilities import AbstractCapability, Capability
+from pydantic_ai.messages import (
+    ModelRequest, ModelResponse, PartDeltaEvent, PartStartEvent,
+    TextPart, TextPartDelta, UserPromptPart,
+)
+from pydantic_ai.output import NativeOutput, PromptedOutput, ToolOutput
+from pydantic_ai.run import AgentRunResultEvent
 
+from ..logging_audit.instrumentation import native_instrumentation
 from ..logging_audit.logger import monotonic_ms
 from ..logging_audit.metrics import get_model_call_metrics
-from ..planning.errors import PlanningError, error
-from ..planning.model_runner import ModelCapabilityGate, mark_mode_failure
-from .bridge import AdapterBridgeError, make_bridge_model
-from .limits import agent_usage_limits, to_controlled_error
+from ..logging_audit.trace import business_span, task_context
+from ..planning.errors import error
+from .contracts import AgentDeps, GenerationInput, RunBudget
+from .limits import to_controlled_error
+from .native import ModelCapabilityError, native_model_session
+from .schema import generation_model
 
-BRIDGE_MODES = ("tool", "prompted")
-OUTPUT_RETRIES = 2  # 与 model_runner prompted 档重试上限对齐
-
-_turn_logger = None
-
-
-def _emit_turn(stage: str, status: str, duration_ms: int, *, mode: str = None,
-               requests: int = None, degraded: bool = False, error_code: str = None) -> None:
-    """S4：agent 轮次低基数事件（无内容字段；发射失败不影响业务）。"""
-    global _turn_logger
-    from ..logging_audit.logger import StructuredLogger
-
-    if _turn_logger is None:
-        _turn_logger = StructuredLogger(service="api")
-    try:
-        _turn_logger.log(
-            "agent.turn.completed" if status == "succeeded" else "agent.turn.failed",
-            level="INFO" if status == "succeeded" else "WARN",
-            stage=stage, status=status, duration_ms=duration_ms,
-            mode=mode, requests=requests, degraded=degraded or None,
-            error_code=error_code,
-        )
-    except Exception:  # noqa: BLE001
-        pass
+OUTPUT_RETRIES = 2
+OUTPUT_MODES = ("native", "tool", "prompted")
+# Compatibility for callers that import the constant, not a protocol bridge.
+BRIDGE_MODES = OUTPUT_MODES
 
 
 @dataclass
 class AgentRunResult:
-    """结构化生成结果（对齐 model_runner.ModelRunResult 的消费字段）。
-
-    payload 为模型类实例；mode 为成功档位；degraded_from 为已降级档位列表。
-    """
-
     payload: Any
     mode: str
-    degraded_from: List[str]
+    degraded_from: list[str]
+    messages_json: str = "[]"
+    messages: list = field(default_factory=list)
+    requests: int = 0
+    wire_requests: int = 0
 
 
-def _split_messages(messages: List[dict]) -> tuple[str, str]:
-    """适配器形 messages → (instructions, user_prompt)。"""
-    system_parts = [str(m["content"]) for m in messages if m.get("role") == "system"]
-    user_parts = [str(m["content"]) for m in messages if m.get("role") == "user"]
-    return "\n".join(system_parts), "\n\n".join(user_parts)
+class RunGuard(AbstractCapability[AgentDeps]):
+    """Always-loaded state and budget guard; output tools have a separate validator."""
+    id = "run_guard"
+
+    def __init__(self, on_delta=None, logical_limit=None):
+        self.on_delta = on_delta
+        self.logical_limit = logical_limit
+
+    async def before_run(self, ctx):
+        ctx.deps.check()
+
+    async def before_model_request(self, ctx, request_context):
+        ctx.deps.check()
+        if self.logical_limit is not None and ctx.deps.budget.logical_requests >= self.logical_limit:
+            raise error("AGENT_LOOP_LIMIT")
+        ctx.deps.budget.consume("logical")
+        if self.on_delta:
+            self.on_delta("", reset=True)
+        return request_context
+
+    async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
+        ctx.deps.check()
+        ctx.deps.budget.consume("tool")
+        result = await handler(args)
+        ctx.deps.check()
+        return result
+
+    async def after_run(self, ctx, *, result):
+        ctx.deps.check()
+        return result
 
 
-def _build_agent(adapter: Any, output_type, instructions: str, *, stream: bool = False,
-                 output_validator=None, tools=None):
-    from pydantic_ai import Agent
+def _prepare_input(input: GenerationInput):
+    """Keep complete SDK history and translate only legacy text conversation turns."""
+    instructions = []
+    history = list(input.message_history)
+    pending = []
+    for message in input.messages:
+        role, content = message.get("role"), str(message.get("content", ""))
+        if role == "system":
+            instructions.append(content)
+        elif role == "user":
+            pending.append(content)
+        elif role == "assistant":
+            if pending:
+                history.append(ModelRequest(parts=[UserPromptPart(content="\n\n".join(pending))]))
+                pending.clear()
+            history.append(ModelResponse(parts=[TextPart(content=content)]))
+        else:
+            raise error("OUTPUT_INVALID", "use native message history for tool turns")
+    return "\n".join(instructions), "\n\n".join(pending), history
 
-    agent = Agent(
-        model=make_bridge_model(adapter, stream=stream),
-        output_type=output_type,
-        instructions=instructions,
-        retries=OUTPUT_RETRIES,
-    )
+
+def _allowed_modes(source, model, *, text=False, streaming=False):
+    if text:
+        return ["text"]
+    status = getattr(source, "capability_status", {}) or {}
+    profile = model.profile
+    def available(capability, supported):
+        saved = status.get(capability)
+        state = saved.get("state") if isinstance(saved, dict) else saved
+        return supported and state != "unavailable"
+    modes = []
+    # Teaching previews are JSON text, not tool argument bytes. This still uses
+    # the same complete SDK loop, validators, deps and business tools.
+    if not streaming:
+        if available("json_schema", profile.get("supports_json_schema_output", False)):
+            modes.append("native")
+        if available("tool_call", profile.get("supports_tools", True)):
+            modes.append("tool")
+    if available("text", profile.get("supports_text_output", True)):
+        modes.append("prompted")
+    if not modes:
+        raise error("MODEL_CAPABILITY_UNAVAILABLE")
+    return modes
+
+
+def _build_agent(model, output_type, instructions, *, name, output_validator=None,
+                 tools=None, on_delta=None, logical_limit=None):
+    context = Capability(id="bound_context", instructions=instructions)
+    business_tools = Capability(id="business_tools")
+    for tool in tools or ():
+        business_tools.tool_plain(tool)
+    agent = Agent(model, deps_type=AgentDeps, output_type=output_type,
+        retries=OUTPUT_RETRIES, name=name or "learning_agent",
+        capabilities=[RunGuard(on_delta, logical_limit), context, business_tools, native_instrumentation()])
     if output_validator is not None:
-        agent.output_validator(output_validator)
-    for tool in tools or []:
-        agent.tool_plain(tool)
+        def validate_candidate(ctx, output):
+            with business_span("domain_validate", task_id=ctx.deps.task_id, attempt=ctx.deps.attempt):
+                return output_validator(ctx, output)
+        agent.output_validator(validate_candidate)
     return agent
 
 
-def _is_bridge_failure(exc: BaseException) -> bool:
-    """供应商级失败（桥错误码）立即终止，不进模式降级。"""
-    node: Optional[BaseException] = exc
-    seen = 0
-    while node is not None and seen < 6:
-        if isinstance(node, AdapterBridgeError):
-            return True
-        node = getattr(node, "__cause__", None)
-        seen += 1
-    return False
-
-
-def run_structured_agent(
-    adapter: Any,
-    model_cls: Type[BaseModel],
-    messages: List[dict],
-    *,
-    tool_name: str = "submit_candidate",
-    stage: str = "generate",
-    max_requests: Optional[int] = None,
-    output_validator=None,
-    tools=None,
-) -> Any:
-    """按 tool→prompted 降级跑结构化生成；返回 AgentRunResult。
-
-    output_validator：业务校验钩子（Agent.output_validator），失败抛
-    ModelRetry 时框架带错误清单重试（S2 字段级回喂）。
-    tools：受控工具函数列表（S3 检索等，tool_plain 注册）。
-    """
-    from pydantic_ai.output import PromptedOutput, ToolOutput
-
-    gate = ModelCapabilityGate(adapter, tool_name=tool_name)
-    candidate_modes = [m for m in gate.choose_modes() if m in BRIDGE_MODES]
-    instructions, prompt = _split_messages(messages)
-    degraded: List[str] = []
-    for mode in candidate_modes:
-        output_type = ToolOutput(model_cls) if mode == "tool" else PromptedOutput(model_cls)
-        agent = _build_agent(adapter, output_type, instructions,
-                             output_validator=output_validator, tools=tools)
-        started = monotonic_ms()
-        try:
-            result = agent.run_sync(prompt, usage_limits=agent_usage_limits(max_requests))
-        except Exception as exc:  # noqa: BLE001 — 全部受控化
-            get_model_call_metrics().record(
-                stage=stage, outcome="failed", mode=mode,
-                error_code="AGENT_LOOP_LIMIT" if "limit" in type(exc).__name__.lower() else "MODEL_CAPABILITY_UNAVAILABLE",
-                duration_ms=monotonic_ms() - started,
-            )
-            _emit_turn(stage, "failed", monotonic_ms() - started, mode=mode, degraded=True)
-            if _is_bridge_failure(exc):
-                raise to_controlled_error(exc) from exc
-            # 校验/循环耗尽 → 记失败缓存，降下一档（与 run_structured 同语义；
-            # prompted=text 不入缓存，防连锁杀死最终兜底）
-            mark_mode_failure(adapter, mode, tool_name)
-            degraded.append(mode)
-            continue
-        requests = getattr(result.usage, "requests", None) or 1
-        get_model_call_metrics().record(
-            stage=stage, outcome="succeeded", mode=mode,
-            duration_ms=monotonic_ms() - started, attempts=requests,
-        )
-        _emit_turn(stage, "succeeded", monotonic_ms() - started, mode=mode,
-                   requests=requests, degraded=bool(degraded))
-        return AgentRunResult(payload=result.output, mode=mode, degraded_from=list(degraded))
-    raise error("MODEL_CAPABILITY_UNAVAILABLE", "all agent modes failed")
-
-
-def run_chat_agent(
-    adapter: Any,
-    messages: List[dict],
-    *,
-    max_len: int,
-    stage: str = "generate",
-) -> str:
-    """即时文字（output_type=str 单档；流式增量由桥 stream_function 承载）。"""
-    instructions, prompt = _split_messages(messages)
-    agent = _build_agent(adapter, str, instructions, stream=True)
+async def execute_agent(source, output_cls, input: GenerationInput, deps: AgentDeps, *,
+        tool_name="submit_candidate", stage="generate", output_validator=None,
+        tools=None, agent_name=None, on_delta=None):
+    """No application output-repair loop: SDK owns all content and tool retries."""
+    instructions, prompt, history = _prepare_input(input)
+    generated_cls = str if output_cls is str else generation_model(output_cls)
     started = monotonic_ms()
+    degraded = []
+    mode = "text" if output_cls is str else "prompted"
+    budget = deps.budget
+    logical_limit = min(budget.request_limit, budget.logical_requests + deps.run_request_limit)
+    limits = UsageLimits(request_limit=min(budget.request_limit,
+        budget.usage.requests + deps.run_request_limit), tool_calls_limit=budget.tool_limit)
     try:
-        result = agent.run_sync(prompt)
-    except Exception as exc:  # noqa: BLE001
-        get_model_call_metrics().record(
-            stage=stage, outcome="failed", mode="prompted",
-            error_code="MODEL_CAPABILITY_UNAVAILABLE",
-            duration_ms=monotonic_ms() - started,
-        )
-        raise to_controlled_error(exc) from exc
-    get_model_call_metrics().record(
-        stage=stage, outcome="succeeded", mode="prompted",
-        duration_ms=monotonic_ms() - started,
-    )
-    text = str(result.output or "").strip()
+        with task_context(task_id=deps.task_id, attempt=deps.attempt), business_span(
+                "generate", parent_traceparent=deps.parent_traceparent):
+            async with native_model_session(source, deps) as model:
+                for mode in _allowed_modes(source, model, text=output_cls is str, streaming=on_delta is not None):
+                    output_type = (str if output_cls is str else
+                        NativeOutput(generated_cls) if mode == "native" else
+                        ToolOutput(generated_cls, name=tool_name) if mode == "tool" else
+                        PromptedOutput(generated_cls))
+                    # A text-only profile cannot execute function tools. Context
+                    # remains available; services may apply validated recipes.
+                    enabled_tools = tools if model.profile.get("supports_tools", True) else None
+                    agent = _build_agent(model, output_type, instructions, name=agent_name,
+                        output_validator=output_validator, tools=enabled_tools, on_delta=on_delta,
+                        logical_limit=logical_limit)
+                    try:
+                        kwargs = dict(deps=deps, message_history=history,
+                            usage_limits=limits, usage=budget.usage)
+                        if on_delta is None:
+                            result = await agent.run(prompt, **kwargs)
+                        else:
+                            result = None
+                            async with agent.run_stream_events(prompt, **kwargs) as events:
+                                async for event in events:
+                                    deps.check()
+                                    if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+                                        on_delta(event.part.content)
+                                    elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+                                        on_delta(event.delta.content_delta)
+                                    elif isinstance(event, AgentRunResultEvent):
+                                        result = event.result
+                            if result is None:
+                                raise error("OUTPUT_INVALID", "agent run did not finish")
+                        deps.check()
+                    except ModelCapabilityError:
+                        # Same model/destination; only proven protocol incompatibility
+                        # may change output mode. Shared usage/wire budgets survive.
+                        degraded.append(mode)
+                        if on_delta:
+                            on_delta("", reset=True)
+                        continue
+                    if not deps.omit_content_trace:
+                        from ..logging_audit.content_trace import get_content_trace
+                        answer = result.output.model_dump(mode="json") if hasattr(result.output, "model_dump") else result.output
+                        get_content_trace().emit(stage, "succeeded", mode=mode, task_id=deps.task_id,
+                            attempt=deps.attempt, config_id=deps.config_id,
+                            prompt_messages=list(input.messages), answer=answer)
+                    get_model_call_metrics().record(stage=stage, outcome="succeeded", mode=mode,
+                        duration_ms=monotonic_ms()-started, attempts=budget.usage.requests)
+                    return AgentRunResult(result.output, mode, degraded,
+                        result.all_messages_json().decode("utf8"), result.all_messages(),
+                        budget.usage.requests, budget.wire_requests)
+                raise error("MODEL_CAPABILITY_UNAVAILABLE", "approved output modes unavailable")
+    except Exception as exc:
+        from ..tasks.service import LeaseError
+        if isinstance(exc, LeaseError):
+            raise
+        controlled = to_controlled_error(exc)
+        get_model_call_metrics().record(stage=stage, outcome="failed", mode=mode,
+            duration_ms=monotonic_ms()-started, error_code=controlled.code)
+        raise controlled from exc
+
+
+def _run_sync(coroutine):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    coroutine.close()
+    raise RuntimeError("native agent sync entry requires a worker thread; use execute_agent in async code")
+
+
+def deps_for_source(source, deps=None, max_requests=None):
+    bound = deps or getattr(source, "agent_deps", None)
+    if bound is None:
+        limit = max_requests or 8
+        bound = AgentDeps(config_id=getattr(source, "config_id", None),
+            config_version=getattr(source, "config_version", None),
+            task_id=getattr(source, "task_id", ""),
+            budget=RunBudget(request_limit=limit, wire_limit=limit),
+            omit_content_trace=bool(getattr(source, "omit_prompt_trace", False)))
+    elif max_requests:
+        from dataclasses import replace
+        bound = replace(bound, run_request_limit=min(bound.run_request_limit, max_requests))
+    return bound
+
+
+def run_structured_agent(adapter, model_cls, messages, *, tool_name="submit_candidate",
+        stage="generate", max_requests=None, output_validator=None, tools=None,
+        message_history=None, agent_name=None, deps=None):
+    return _run_sync(execute_agent(adapter, model_cls,
+        GenerationInput.from_messages(messages, message_history),
+        deps_for_source(adapter, deps, max_requests), tool_name=tool_name, stage=stage,
+        output_validator=output_validator, tools=tools, agent_name=agent_name))
+
+
+def run_streaming_structured_agent(adapter, model_cls, messages, *, on_delta,
+        output_validator=None, agent_name=None, stage="generate", tools=None,
+        message_history=None, max_requests=None, deps=None, tool_name="submit_candidate"):
+    return _run_sync(execute_agent(adapter, model_cls,
+        GenerationInput.from_messages(messages, message_history),
+        deps_for_source(adapter, deps, max_requests), tool_name=tool_name, stage=stage,
+        output_validator=output_validator, tools=tools, agent_name=agent_name, on_delta=on_delta))
+
+
+def run_chat_agent(adapter, messages, *, max_len, stage="generate", deps=None,
+        message_history=None, on_delta=None):
+    result = _run_sync(execute_agent(adapter, str,
+        GenerationInput.from_messages(messages, message_history), deps_for_source(adapter, deps),
+        agent_name="chat_agent", stage=stage, on_delta=on_delta))
+    text = str(result.payload or "").strip()
     if not text:
-        raise error("MODEL_CAPABILITY_UNAVAILABLE", "empty chat answer")
+        raise error("OUTPUT_INVALID", "empty chat answer")
     return text[:max_len]
-
-
-__all__ = [
-    "run_structured_agent", "run_chat_agent",
-    "BRIDGE_MODES", "OUTPUT_RETRIES",
-]

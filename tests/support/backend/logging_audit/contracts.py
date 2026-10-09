@@ -144,6 +144,7 @@ ALLOWED_FIELDS: FrozenSet[str] = frozenset(
         "platform",
         # Agent 轮次低基数计数（方案 S4：模型请求次数）
         "requests",
+        "first_chunk_ms",
         # 内容 trace 通道（ADR-022：仅内容事件可用；其余通道出现即被 sanitize 拒绝）
         "model_prompt",
         "model_answer",
@@ -353,6 +354,15 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "提示词绑定不可用，禁止调用模型",
         ),
         # 切片 3：规划、草稿、即时对话（受控错误码；等待态不计为失败）
+        ErrorCodeSpec("PLANNING_LOCKED", TaskStage.SAVE, False, False, AlertLevel.NONE, "课程已确认，结构只读"),
+        ErrorCodeSpec("ASSESSMENT_NOT_READY", TaskStage.GENERATE, False, True, AlertLevel.NONE, "单元未完成或教学未生成完整"),
+        ErrorCodeSpec("PLANNING_DUPLICATE", TaskStage.SAVE, False, True, AlertLevel.NONE,
+            "已有同名同结构课程，等待用户选择",
+        ),
+        ErrorCodeSpec(
+            "DUPLICATE_ACK_STALE", TaskStage.SAVE, False, True, AlertLevel.NONE,
+            "副本确认与当前草稿不匹配",
+        ),
         ErrorCodeSpec(
             "DRAFT_CONFLICT", TaskStage.SAVE, False, True, AlertLevel.NONE,
             "草稿并发冲突，拒绝后到写入",
@@ -393,6 +403,13 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "AWAITING_SEARCH_DECISION", TaskStage.SEARCH, False, True, AlertLevel.NONE,
             "搜索失败，等待用户选择重试或离线继续",
         ),
+        ErrorCodeSpec("TASK_CANCELLED", TaskStage.SAVE, False, False, AlertLevel.NONE, "任务取消，禁止提交新结果"),
+        ErrorCodeSpec("OUTPUT_INVALID", TaskStage.GENERATE, True, True, AlertLevel.WARNING, "模型输出校验失败"),
+        ErrorCodeSpec("MODEL_CONNECTION_ERROR", TaskStage.GENERATE, True, True, AlertLevel.WARNING, "模型连接失败"),
+        ErrorCodeSpec("MODEL_RATE_LIMITED", TaskStage.GENERATE, True, True, AlertLevel.WARNING, "模型服务限流"),
+        ErrorCodeSpec("MODEL_CREDENTIAL_INVALID", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "模型凭据无效"),
+        ErrorCodeSpec("MODEL_PROVIDER_ERROR", TaskStage.GENERATE, True, True, AlertLevel.WARNING, "模型供应商请求失败"),
+        ErrorCodeSpec("MODEL_RESPONSE_TOO_LARGE", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "模型响应超限"),
         ErrorCodeSpec(
             "MODEL_CAPABILITY_UNAVAILABLE", TaskStage.GENERATE, False, True, AlertLevel.WARNING,
             "模型不支持所需能力，已停止调用",
@@ -409,12 +426,53 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "CHECKPOINT_STALE", TaskStage.SAVE, False, True, AlertLevel.NONE,
             "播放位置保存的 client_seq 已过期（单调校验拒绝旧请求）",
         ),
+        ErrorCodeSpec("TASK_EXPIRED", TaskStage.SAVE, True, True, AlertLevel.WARNING, "任务总截止已过"),
+        ErrorCodeSpec("TASK_DEADLINE_EXCEEDED", TaskStage.SAVE, True, True, AlertLevel.WARNING, "原生执行期限围栏拒绝"),
+        ErrorCodeSpec("WORKER_RECOVERY_FAILED", TaskStage.SAVE, False, True, AlertLevel.CRITICAL, "有界终态恢复写入失败"),
+        ErrorCodeSpec("WORKER_RECOVERY_EXHAUSTED", TaskStage.SAVE, False, True, AlertLevel.CRITICAL, "终态恢复上限耗尽"),
+        ErrorCodeSpec("DISCLOSURE_REQUIRED", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "外发授权缺失或范围不匹配"),
+        ErrorCodeSpec("DISCLOSURE_REVOKED", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "外发授权已撤销"),
+        ErrorCodeSpec("DISCLOSURE_EXPIRED", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "外发授权过期或配置版本已变更"),
+        ErrorCodeSpec("CONFIG_NOT_FOUND", TaskStage.GENERATE, False, True, AlertLevel.NONE, "能力配置不存在"),
+        ErrorCodeSpec("CREDENTIAL_INVALID", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "能力凭据无效"),
+        ErrorCodeSpec("CAPABILITY_TEST_FAILED", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "能力检查未通过"),
+        ErrorCodeSpec("CONNECTOR_OFFLINE", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "连接器离线"),
+        ErrorCodeSpec("NONCE_REPLAY", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "请求重放被拒绝"),
+        ErrorCodeSpec("CONNECTOR_REVOKED", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "连接器授权撤销"),
+        ErrorCodeSpec("REQUEST_EXPIRED", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "授权请求过期"),
+        ErrorCodeSpec("INVALID_TARGET", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "外发目标无效"),
+        ErrorCodeSpec("ADMIN_ONLY", TaskStage.SAVE, False, False, AlertLevel.WARNING, "管理员权限要求"),
+        ErrorCodeSpec("PROTOCOL_MISMATCH", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "能力协议不匹配"),
+        ErrorCodeSpec("PAIRING_CODE_INVALID", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "配对凭据无效"),
+        ErrorCodeSpec("BINDING_NOT_FOUND", TaskStage.GENERATE, False, True, AlertLevel.NONE, "能力绑定不存在"),
+        ErrorCodeSpec("CAPABILITY_UNAVAILABLE", TaskStage.GENERATE, False, True, AlertLevel.WARNING, "能力未授权或不可用"),
+        ErrorCodeSpec("INVALID_FIELD", TaskStage.SAVE, False, True, AlertLevel.NONE, "请求字段无效"),
         ErrorCodeSpec(
             "INTERNAL_ERROR", TaskStage.SAVE, False, False, AlertLevel.CRITICAL,
             "内部错误，已映射为受控错误码",
         ),
     )
 }
+
+# Slice1 API codes stay lowercase at their own boundary; task/agent codes are registered.
+SLICE1_ERROR_MAP: Mapping[str, str] = {
+    code: code.upper() for code in (
+        "config_not_found", "credential_invalid", "capability_test_failed", "connector_offline",
+        "nonce_replay", "disclosure_expired", "disclosure_revoked", "disclosure_required",
+        "connector_revoked", "request_expired", "invalid_target", "admin_only", "protocol_mismatch",
+        "pairing_code_invalid", "binding_not_found", "capability_unavailable", "invalid_field", "access_denied",
+    )
+}
+
+
+def normalize_error_code(code: Any) -> str:
+    """Normalize known boundary aliases; arbitrary values never enter diagnostics."""
+    if isinstance(code, str):
+        candidate = SLICE1_ERROR_MAP.get(code, code)
+        if candidate in ERROR_CODES:
+            return candidate
+    return "INTERNAL_ERROR"
+
 
 # 供应商原始错误 → 受控错误码（示例映射；不把原始异常写入日志）
 VENDOR_ERROR_MAP: Mapping[str, str] = {
@@ -450,6 +508,10 @@ _COMMON_REQUIRED = REQUIRED_COMMON_FIELDS
 EVENT_REGISTRY: Mapping[str, EventSpec] = {
     spec.name: spec
     for spec in (
+        EventSpec("task.convergence.diagnostic", (LogEventType.RUNTIME, LogEventType.METRIC),
+            _COMMON_REQUIRED | frozenset({"error_code", "reason"}),
+            frozenset({"task_id", "attempt"}), user_visible=False,
+            description="受控任务错误归一化与恢复诊断，无原始错误内容"),
         EventSpec(
             "task.accepted",
             (LogEventType.RUNTIME, LogEventType.TASK),
@@ -711,6 +773,14 @@ EVENT_REGISTRY: Mapping[str, EventSpec] = {
             user_visible=False,
             description="观测导出失败",
         ),
+        EventSpec("model.request.completed", (LogEventType.RUNTIME, LogEventType.METRIC),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms"}),
+            frozenset({"trace_id", "task_id", "config_id", "config_version", "first_chunk_ms"}),
+            user_visible=False, description="逐次供应商 HTTP 请求耗时，无内容字段"),
+        EventSpec("model.request.failed", (LogEventType.RUNTIME, LogEventType.METRIC),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms", "error_code"}),
+            frozenset({"trace_id", "task_id", "config_id", "config_version", "first_chunk_ms"}),
+            user_visible=False, description="逐次供应商 HTTP 请求耗时，无内容字段"),
         EventSpec(
             "model.call.completed",
             (LogEventType.RUNTIME, LogEventType.METRIC),

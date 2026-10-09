@@ -108,8 +108,11 @@ class TestCredentialEncryption:
             credentials={"api_key": FAKE_KEY},
         )
         other = ConfigService(database, encryption_key="different-key")
-        with pytest.raises(Exception):
+        with pytest.raises(Slice1Error) as exc:
             other.resolve_credentials(view["config_id"])
+        assert exc.value.code == "credential_invalid"
+        assert exc.value.status == 400
+        assert "重新填写" in exc.value.message
 
     def test_encryption_key_from_env(self, database: Database, monkeypatch):
         monkeypatch.setenv("APP_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY)

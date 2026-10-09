@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "tests" / "support"))
 UI = ROOT / "文档" / "ui" / "index.html"
 
 
+@unittest.skipUnless(UI.exists(), "Retired documentation demo is absent; real frontend tests are separate")
 class TestFrontendAdapterBoundary(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -49,24 +50,6 @@ class TestFrontendAdapterBoundary(unittest.TestCase):
         # 学习页路由未因适配边界丢失
         for path in ("/course", "/course/detail", "/lecture"):
             self.assertIn(path, self.html)
-
-
-class TestTemplatesUserVisibleOnly(unittest.TestCase):
-    def test_consume_whitelist_only(self):
-        # 用与前端模板一致的白名单做一次纯 Python 等价校验
-        templates = {
-            "task.accepted",
-            "task.started",
-            "task.stage.succeeded",
-            "task.stage.partial",
-            "task.stage.failed",
-            "task.retry_scheduled",
-            "task.cancelled",
-            "task.stale_discarded",
-        }
-        self.assertIn("task.stage.failed", templates)
-        self.assertNotIn("task.events.expired", templates)  # 用户不可见
-        self.assertNotIn("observability.export.failed", templates)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,8 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+from .board_blocks import BoardBlock, TeachingBeat, merge_beats, presentation_blocks
 
 from ..planning.errors import error
 from ..planning.outputs import BOARD_ELEMENT_WHITELIST
@@ -47,7 +48,9 @@ class BoardDeclaration(BaseModel):
     """板书声明（受限 JSON）。元素种类白名单：rect/ellipse/text/arrow/line。"""
 
     kind: str = Field(default="board")
+    format_version: int = Field(default=1, ge=1, le=2)
     title: str = Field(min_length=1, max_length=80)
+    blocks: list[BoardBlock] = Field(default_factory=list,max_length=12)
     points: list[str] = Field(default_factory=list, max_length=BOARD_MAX_POINTS)
     code: str | None = Field(default=None, max_length=600)
     formula: str | None = Field(default=None, max_length=200)
@@ -55,6 +58,12 @@ class BoardDeclaration(BaseModel):
     edges: list[BoardEdge] = Field(default_factory=list, max_length=BOARD_MAX_EDGES)
     original_refs: list[OriginalRef] = Field(default_factory=list, max_length=ORIGINAL_REF_LIMIT)
     reveal_ms: list[int] = Field(default_factory=list)  # 与 points 对齐的呈现时标
+
+    @model_validator(mode="after")
+    def valid_blocks(self):
+        if len({b.id for b in self.blocks})!=len(self.blocks):
+            raise ValueError("duplicate board block ID")
+        return self
 
     @field_validator("kind")
     @classmethod
@@ -67,9 +76,28 @@ class BoardDeclaration(BaseModel):
 class StepCandidate(BaseModel):
     """单步候选：讲解文字 + 板书声明（同版本绑定）。"""
 
-    title: str = Field(min_length=1, max_length=80)
+    beats: list[TeachingBeat] = Field(default_factory=list,max_length=6)
     text: str = Field(min_length=STEP_MIN_CHARS, max_length=STEP_HARD_MAX_CHARS)
+    title: str = Field(min_length=1, max_length=80)
     board: BoardDeclaration
+    phase: str = Field(default="", max_length=24)
+    covered_goal_ids: list[str] = Field(default_factory=list, max_length=4)
+    lesson_finished: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_text(cls, value):
+        if isinstance(value,dict) and value.get("beats") and not value.get("text"):
+            value = dict(value)
+            value["text"] = "".join(b.get("text","") for b in value["beats"] if isinstance(b,dict))
+        return value
+
+    @model_validator(mode="after")
+    def synchronized(self):
+        if self.beats and self.text != "".join(b.text for b in self.beats):
+            raise ValueError("text must equal concatenated teaching beat text")
+        merge_beats(self.board,self.beats)
+        return self
 
     @field_validator("text")
     @classmethod
@@ -89,8 +117,25 @@ class LessonPlanCandidate(BaseModel):
 class FollowupCandidate(BaseModel):
     """追问回答：纯文字 + 可选板书。"""
 
+    beats: list[TeachingBeat] = Field(default_factory=list,max_length=6)
     answer: str = Field(min_length=1, max_length=2000)
     board: BoardDeclaration | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_answer(cls,value):
+        if isinstance(value,dict) and value.get("beats") and not value.get("answer"):
+            value=dict(value);value["answer"]="".join(b.get("text","") for b in value["beats"] if isinstance(b,dict))
+        return value
+
+    @model_validator(mode="after")
+    def synchronized(self):
+        if self.beats and self.answer != "".join(b.text for b in self.beats):
+            raise ValueError("answer must equal concatenated teaching beat text")
+        if self.beats and any(b.blocks for b in self.beats) and self.board is None:
+            self.board=BoardDeclaration(title="追问板书")
+        merge_beats(self.board,self.beats)
+        return self
 
 
 def validate_step_duration(text: str) -> int:
@@ -197,6 +242,7 @@ def declaration_to_scene(declaration: BoardDeclaration, *, layout: dict | None =
         if el["type"] not in BOARD_ELEMENT_WHITELIST:
             raise error("BOARD_SCHEMA_INVALID", f"element type {el['type']} not allowed")
     return {
+        "presentation": {"version":2,"title":declaration.title,"blocks":presentation_blocks(declaration)},
         "elements": elements,
         "reveal_ms": declaration.reveal_ms,
         "original_refs": [r.model_dump() for r in declaration.original_refs],

@@ -94,8 +94,14 @@ class TestCourseList:
         data = client.get("/api/planning/courses", headers=auth_headers(t2)).json()["data"]
         assert all(c["title"] != "A 独有的课程" for c in data)
 
-    def test_requires_login(self, env) -> None:
+    def test_guest_gets_own_empty_list(self, env) -> None:
+        # 访客模式：无会话返回访客自己的（空）课程列表，不泄露他人课程
         r = env["client"].get("/api/planning/courses")
+        assert r.status_code == 200, r.text
+        assert r.json()["data"] == []
+
+    def test_invalid_bearer_rejected(self, env) -> None:
+        r = env["client"].get("/api/planning/courses", headers=auth_headers("not-a-real-token"))
         assert r.status_code == 401, r.text
 
 

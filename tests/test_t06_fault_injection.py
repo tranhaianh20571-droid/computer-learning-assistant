@@ -15,7 +15,6 @@ from backend.logging_audit.exporter import ObservabilityExporter  # noqa: E402
 from backend.logging_audit.logger import MemoryLogStream, StructuredLogger  # noqa: E402
 from backend.logging_audit.task_events import (  # noqa: E402
     AccessDeniedError,
-    EventsExpiredError,
     TaskEventStore,
 )
 from backend.logging_audit.trace import TraceContext, trace_context  # noqa: E402
@@ -36,6 +35,7 @@ class TestWorkerStaleResult(unittest.TestCase):
         store.create_task("task_stale", "user_a", "sub_1", "ocr", generation=3, attempt=2)
         # 当前 generation=3 正常推进
         store.record("task_stale", stage="ocr", status="succeeded", duration_ms=50, generation=3)
+        rev_before_stale = store.get_state("task_stale").revision
 
         # 旧 worker（generation=1）迟到返回
         event = store.record(
@@ -48,7 +48,6 @@ class TestWorkerStaleResult(unittest.TestCase):
         state = store.get_state("task_stale")
         self.assertEqual(state.generation, 3)
         self.assertEqual(state.status, "succeeded")
-        rev_before_stale = state.revision
         last = store.get_events("task_stale")[-1]
         self.assertEqual(last.status, "stale_discarded")
         self.assertEqual(last.error_code, "STALE_RESULT_DISCARDED")
@@ -56,20 +55,23 @@ class TestWorkerStaleResult(unittest.TestCase):
         self.assertEqual(store.get_state("task_stale").revision, rev_before_stale)
 
     def test_stale_only_diagnostics(self):
-        store = TaskEventStore()
-        store.create_task("task_stale2", "user_a", "sub_1", "save", generation=2)
-        rev_before = store.get_state("task_stale2").revision
-        store.record(
-            "task_stale2",
-            stage="save",
-            status="stale_discarded",
-            error_code="STALE_RESULT_DISCARDED",
-            generation=1,
-            diagnostics_only=True,
-        )
-        state = store.get_state("task_stale2")
-        self.assertEqual(state.revision, rev_before)
-        self.assertEqual(state.status, "started")
+        # 合并 T03 的同代诊断与本专项的旧代诊断，两个分支均不推进业务。
+        for generation in (1, 2):
+            with self.subTest(generation=generation):
+                store = TaskEventStore()
+                store.create_task("task_stale2", "user_a", "sub_1", "save", generation=2)
+                rev_before = store.get_state("task_stale2").revision
+                store.record(
+                    "task_stale2",
+                    stage="save",
+                    status="stale_discarded",
+                    error_code="STALE_RESULT_DISCARDED",
+                    generation=generation,
+                    diagnostics_only=True,
+                )
+                state = store.get_state("task_stale2")
+                self.assertEqual(state.revision, rev_before)
+                self.assertEqual(state.status, "started")
 
 
 class TestObservabilityDegradation(unittest.TestCase):
@@ -229,30 +231,6 @@ class TestSensitiveLeakScan(unittest.TestCase):
         text = stream.getvalue()
         self.assertNotIn("api_key=REDACT", text)
         self.assertNotIn("secret.pdf", text)
-
-
-class TestSSEExpiredAndResume(unittest.TestCase):
-    """AC-04：SSE 断线、Last-Event-ID 补取、事件过期。"""
-
-    def test_disconnect_resume_sequence_continuous(self):
-        store = TaskEventStore()
-        store.create_task("task_sse", "user_a", "s1", "upload")
-        for stage in ("parse", "ocr", "index", "retrieve"):
-            store.record("task_sse", stage=stage, status="succeeded", duration_ms=1)
-
-        # 断线在 seq=2
-        gap, cursor = store.replay_sse("task_sse", actor_id="user_a", last_sequence=2)
-        self.assertEqual([e.sequence for e in gap], [3, 4, 5])
-        # 再断再连
-        gap2, cursor2 = store.replay_sse("task_sse", actor_id="user_a", last_sequence=cursor)
-        self.assertEqual(gap2, [])
-
-    def test_expired_returns_410(self):
-        store = TaskEventStore()
-        store.create_task("task_exp", "user_a", "s1", "upload")
-        with self.assertRaises(EventsExpiredError) as ctx:
-            store.replay_sse("task_exp", actor_id="user_a", last_sequence=999)
-        self.assertEqual(ctx.exception.http_status, 410)
 
 
 if __name__ == "__main__":

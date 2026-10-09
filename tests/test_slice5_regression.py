@@ -31,6 +31,7 @@ from backend.slice3_app import Slice3State, create_slice3_app  # noqa: E402
 from backend.slice0_app import Slice0State  # noqa: E402
 
 from fastapi.testclient import TestClient  # noqa: E402
+from native_model_support import synthetic_function_model  # noqa: E402
 
 from common_fixtures import (  # noqa: E402
     OUTLINE_OK_PAYLOAD,
@@ -56,7 +57,7 @@ def env(database: Database):
     container = {"model": None, "search": None, "tts": None, "ocr": None}
     state = Slice3State(
         database, PgAuditLog(database),
-        model_adapter_factory=lambda o, t: container["model"],
+        model_adapter_factory=lambda o, t: synthetic_function_model(container["model"]),
         search_adapter_factory=lambda o, t: container["search"],
         tts_adapter_factory=lambda o, t: container["tts"],
         ocr_adapter_factory=lambda o, t: container["ocr"],

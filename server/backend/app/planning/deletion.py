@@ -33,6 +33,7 @@ from .models import (
     RoutePrerequisiteEdgeRow,
     RouteStageRow,
     RouteVersionRow,
+    RouteDetachedCourseRow,
     utcnow,
 )
 
@@ -90,10 +91,48 @@ def _audit(audit: Optional[PgAuditLog], *, actor_id: str, object_type: str,
         raise
 
 
+def delete_feature_data(sess, kind, target_id):
+    from .feature_models import PlanningDialogueRow, CoverAssetRow, CoverStateRow
+    if kind == "course":
+        from ..teaching.learning_models import LessonBlueprintRow, UnitAssessmentRow, AssessmentAttemptRow, PreparedLessonPlanRow, TeachingPreviewRow
+        assessments = select(UnitAssessmentRow.assessment_id).where(UnitAssessmentRow.course_id == target_id)
+        sess.execute(sa_delete(AssessmentAttemptRow).where(AssessmentAttemptRow.assessment_id.in_(assessments)))
+        sess.execute(sa_delete(UnitAssessmentRow).where(UnitAssessmentRow.course_id == target_id))
+        conversations = select(ConversationRow.conversation_id).where(ConversationRow.course_id == target_id)
+        sess.execute(sa_delete(LessonBlueprintRow).where(LessonBlueprintRow.conversation_id.in_(conversations)))
+        sess.execute(sa_delete(TeachingPreviewRow).where(TeachingPreviewRow.conversation_id.in_(conversations)))
+        sess.execute(sa_delete(PreparedLessonPlanRow).where(PreparedLessonPlanRow.course_id == target_id))
+    draft_ids = select(PlanningDraftRow.draft_id).where(PlanningDraftRow.target_id == target_id)
+    sess.execute(sa_delete(PlanningDialogueRow).where(PlanningDialogueRow.draft_id.in_(draft_ids)))
+    sess.execute(sa_delete(CoverAssetRow).where(CoverAssetRow.target_kind == kind, CoverAssetRow.target_id == target_id))
+    sess.execute(sa_delete(CoverStateRow).where(CoverStateRow.target_kind == kind, CoverStateRow.target_id == target_id))
+
+
 class PlanningDeletionService:
     def __init__(self, db: Database, audit: Optional[PgAuditLog] = None) -> None:
         self.db = db
         self.audit = audit
+
+    def detach_course(self, route_id: str, course_id: str, *, actor_id: str) -> dict:
+        with self.db.session() as sess:
+            route = sess.get(LearningRouteRow, route_id, with_for_update=True)
+            course = sess.get(CourseRow, course_id)
+            if (route is None or course is None or route.owner_user_id != actor_id
+                or course.owner_user_id != actor_id or route.deleted_at or course.deleted_at):
+                raise error("course_not_found", status=404)
+            from .locking import planning_target
+            planning_target(sess, "route", route_id, actor_id, mutable=True)
+            member = sess.execute(select(RouteCourseNodeRow).where(
+                RouteCourseNodeRow.route_version_id == route.current_route_version_id,
+                RouteCourseNodeRow.course_id == course_id)).scalars().first()
+            if member is None:
+                raise error("course_not_found", status=404)
+            if sess.get(RouteDetachedCourseRow, (route_id, course_id)) is None:
+                sess.add(RouteDetachedCourseRow(route_id=route_id, course_id=course_id))
+            if self.audit:
+                self.audit.append("config.changed", actor_id=actor_id, object_type="course",
+                                  object_id=course_id, result="route_detached")
+        return {"route_id": route_id, "course_id": course_id, "detached": True, "course_kept": True}
 
     def delete_route(self, route_id: str, *, actor_id: str) -> dict:
         """删除路线：课程保留，只解除编排。"""
@@ -101,6 +140,7 @@ class PlanningDeletionService:
             route = sess.get(LearningRouteRow, route_id)
             if route is None or route.owner_user_id != actor_id or route.deleted_at is not None:
                 raise error("route_not_found", status=404)
+            delete_feature_data(sess, "route", route_id)
             route.deleted_at = _now()
             tombstone_id = _tombstone(sess, object_type="route", object_id=route_id, owner=actor_id)
             # 课程保留：来源引用保持，但版本不可再展开新大纲
@@ -117,6 +157,7 @@ class PlanningDeletionService:
             course = sess.get(CourseRow, course_id)
             if course is None or course.owner_user_id != actor_id or course.deleted_at is not None:
                 raise error("course_not_found", status=404)
+            delete_feature_data(sess, "course", course_id)
             course.deleted_at = _now()
             tombstone_id = _tombstone(sess, object_type="course", object_id=course_id, owner=actor_id)
 
@@ -126,7 +167,11 @@ class PlanningDeletionService:
                     .where(OutlineVersionRow.course_id == course_id)
                 ).scalars().all()
             ]
+            from .models import LessonContentVersionRow, LessonProgressRow
             for ov_id in outline_ids:
+                lesson_ids = select(LessonRow.lesson_id).where(LessonRow.outline_version_id == ov_id)
+                sess.execute(sa_delete(LessonProgressRow).where(LessonProgressRow.lesson_id.in_(lesson_ids)))
+                sess.execute(sa_delete(LessonContentVersionRow).where(LessonContentVersionRow.lesson_id.in_(lesson_ids)))
                 # 派生产物：讲次、单元、先修边、版本（硬删；课程墓碑已记录删除事实）
                 sess.execute(
                     sa_delete(LessonRow).where(LessonRow.outline_version_id == ov_id)

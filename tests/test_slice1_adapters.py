@@ -134,7 +134,7 @@ class TestOpenAIAdapter:
             client=client,
         )
         status = adapter.probe_all()
-        assert status["text"]["state"] == "unavailable"
+        assert status["text"]["state"] == "unknown"
         assert status["text"]["detail"] == "timeout"
 
 

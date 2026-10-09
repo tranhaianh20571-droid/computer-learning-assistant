@@ -27,7 +27,7 @@ from .contracts import ContractError
 from .logger import MemoryLogStream, StructuredLogger
 from .storage import SqliteAuditLog, SqliteTaskEventStore
 from .task_events import AccessDeniedError, EventsExpiredError
-from .trace import ensure_trace, trace_context
+from .trace import ensure_trace, trace_context, business_span
 
 _TASK_RE = re.compile(r"^/tasks/([A-Za-z0-9_\-]+)(?:/(status|events(?:\.json)?))?$")
 
@@ -93,7 +93,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _with_trace(self, fn: Callable[[], None]) -> None:
         ctx = ensure_trace(self._header("traceparent") or None)
-        with trace_context(ctx):
+        with trace_context(ctx), business_span("receive"):
             self._current_trace_id = ctx.trace_id
             fn()
 

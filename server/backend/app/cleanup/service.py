@@ -74,6 +74,10 @@ class CleanupService:
     # ------------------------------------------------------------------
     def run_online_cleanup(self, *, now: Optional[datetime] = None) -> dict:
         now = now or utcnow()
+        from ..teaching.learning_models import TeachingPreviewRow
+        from sqlalchemy import delete
+        with self.db.session() as sess:
+            sess.execute(delete(TeachingPreviewRow).where(TeachingPreviewRow.updated_at < now-timedelta(minutes=10)))
         cutoff = now - timedelta(seconds=ONLINE_CLEANUP_DELAY_SECONDS)
         cleaned = 0
         skipped = 0
@@ -129,6 +133,9 @@ class CleanupService:
                 row = sess.get(ConversationRow, object_id)
                 if row is not None and row.deleted_at is None:
                     row.deleted_at = now
+            if object_type in ("route", "course"):
+                from ..planning.deletion import delete_feature_data
+                delete_feature_data(sess, object_type, object_id)
             sess.commit()
         if object_type == "material":
             try:

@@ -245,6 +245,7 @@ class OcrPipelineService:
                 self.disclosures.verify(
                     task_id=task_id, config_id=getattr(adapter, "config_id", ""),
                     content_category="material", actor_id=owner_user_id,
+                    scope_snapshot={"material_ids":[material_id]},
                 )
             submitted = adapter.submit(material_id=material_id, page_no=page_no)
         except Exception as exc:  # noqa: BLE001 - 供应商异常映射受控错误码

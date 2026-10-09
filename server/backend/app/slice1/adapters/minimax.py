@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from typing import Any, Optional
 
 from .base import AdapterBase
@@ -49,7 +50,64 @@ class MiniMaxTTSAdapter(AdapterBase):
         return headers
 
     def _tts_url(self) -> str:
-        return f"{self.endpoint}/v1/t2a_v2"
+        return f"{self.endpoint.removesuffix('/v1')}/v1/t2a_v2"
+
+    def list_voices(self) -> list[dict]:
+        """Read only the account catalog; never synthesize or return vendor payloads."""
+        from .base import AdapterError
+
+        base = self.endpoint.removesuffix("/v1")
+        status, body, _ = self._request("POST", f"{base}/v1/get_voice", json_body={"voice_type": "all"})
+        self._map_status(status, body)
+        if not isinstance(body, dict):
+            raise AdapterError("capability_test_failed")
+        result = body.get("base_resp")
+        if result is not None:
+            if not isinstance(result, dict) or "status_code" not in result:
+                raise AdapterError("capability_test_failed")
+            code = str(result["status_code"])
+            if code != "0":
+                if code in ("1004", "2049"):
+                    raise AdapterError("credential_invalid", status=401)
+                if code == "1002":
+                    raise AdapterError("rate_limited", status=429)
+                raise AdapterError("capability_test_failed")
+        groups = ("system_voice", "voice_cloning", "voice_generation")
+        if not any(isinstance(body.get(group), list) for group in groups):
+            raise AdapterError("capability_test_failed")
+
+        def clean(value, limit):
+            if not isinstance(value, str):
+                return ""
+            return "".join(c for c in value[:limit] if unicodedata.category(c) not in ("Cc", "Cf")).strip()
+
+        voices, seen = [], set()
+        for group in groups:
+            entries = body.get(group, [])
+            if entries is None:
+                entries = []
+            if not isinstance(entries, list):
+                raise AdapterError("capability_test_failed")
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise AdapterError("capability_test_failed")
+                raw_id = entry.get("voice_id")
+                if not isinstance(raw_id, str) or not raw_id.strip() or len(raw_id) > 200:
+                    raise AdapterError("capability_test_failed")
+                identifier = raw_id.strip()
+                if not identifier or any(unicodedata.category(c) in ("Cc", "Cf") for c in raw_id):
+                    raise AdapterError("capability_test_failed")
+                if identifier in seen:
+                    continue
+                seen.add(identifier)
+                if len(seen) > 2000:
+                    raise AdapterError("response_too_large")
+                description = entry.get("description", [])
+                if isinstance(description, list):
+                    description = "；".join(clean(part, 160) for part in description[:4] if isinstance(part, str))
+                voices.append({"voice_id": identifier, "name": clean(entry.get("voice_name"), 120) or identifier,
+                    "category": group, "description": clean(description, 400)})
+        return voices
 
     def _probe(self, capability: str) -> None:
         # 文本能力探测：用固定非私人样例请求一条极短音频。
@@ -85,6 +143,10 @@ class MiniMaxTTSAdapter(AdapterBase):
         payload = self.build_request(text, voice_id=voice_id)
         status, body, headers = self._request("POST", self._tts_url(), json_body=payload)
         self._map_status(status, body)
+        if isinstance(body,dict) and isinstance(body.get("base_resp"),dict) and str(body["base_resp"].get("status_code",0))!="0":
+            from .base import AdapterError
+            code=str(body["base_resp"]["status_code"])
+            raise AdapterError("credential_invalid" if code in ("1004","2049") else "rate_limited" if code=="1002" else "capability_test_failed")
         data = body.get("data") if isinstance(body, dict) else None
         audio_hex = ""
         if isinstance(data, dict):
@@ -120,7 +182,11 @@ def _fetch_subtitle_file(url: str) -> Optional[list[dict]]:
     import httpx
 
     try:
-        r = httpx.get(url, timeout=20.0, follow_redirects=False)
+        from .base import validate_endpoint
+        validate_endpoint(url,require_https=True,allow_private=False)
+        r = httpx.get(url, timeout=20.0, follow_redirects=False,trust_env=False)
+        r.raise_for_status()
+        if len(r.content)>1024*1024:return None
         entries = r.json()
     except Exception:  # noqa: BLE001 - 抓取失败按无字幕处理（无音频模式）
         return None

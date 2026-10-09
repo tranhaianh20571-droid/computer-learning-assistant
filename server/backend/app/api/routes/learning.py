@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.api.deps import CurrentUser
-from app.core.db import engine
+from app.infrastructure.db import engine
 from app.models import User
 
 from app.logging_audit.repositories import PgAuditLog, PgTaskEventStore
@@ -23,7 +23,7 @@ from app.tasks.service import Lease, LeaseError, TaskService
 router = APIRouter(prefix="/learning", tags=["learning"])
 
 # 共享仓储（复用模板 DATABASE_URL）
-_db = Database(str(__import__("app.core.config", fromlist=["settings"]).settings.DATABASE_URL))
+_db = Database(str(__import__("app.infrastructure.config", fromlist=["settings"]).settings.DATABASE_URL))
 _events = PgTaskEventStore(_db)
 _audit = PgAuditLog(_db)
 _tasks = TaskService(_db, _events)

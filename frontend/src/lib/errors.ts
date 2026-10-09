@@ -4,6 +4,12 @@
  */
 
 export const ERROR_TEXT: Record<string, string> = {
+  MODEL_TIMEOUT: "模型响应超时，可重试。",
+  MODEL_CONNECTION_ERROR: "模型服务连接失败，可重试。",
+  MODEL_RATE_LIMITED: "模型服务暂时限流，请稍后重试。",
+  MODEL_CREDENTIAL_INVALID: "模型凭据无效，请在能力设置中更新。",
+  MODEL_PROVIDER_ERROR: "模型服务请求失败，可重试。",
+  MODEL_RESPONSE_TOO_LARGE: "模型输出超出限制，请重试。",
   AUTH_FAILED: "邮箱或密码不正确。",
   AUTH_LOCKED: "尝试过于频繁，请稍后再试。",
   AUTH_REJECTED: "无法完成注册，请检查邮箱格式或更换邮箱。",
@@ -17,6 +23,14 @@ export const ERROR_TEXT: Record<string, string> = {
   PROMPT_UNAVAILABLE: "提示词暂不可用，已跳过模型调用。",
   EVENTS_EXPIRED: "进度已过期，正在重新加载。",
   TASK_NOT_FOUND: "找不到该任务。",
+  TASK_EXPIRED: "生成超时未完成，可重试生成。",
+  TASK_DEADLINE_EXCEEDED: "任务超过截止时间，可重试。",
+  WORKER_RECOVERY_FAILED: "后台恢复失败，请稍后重试。",
+  WORKER_RECOVERY_EXHAUSTED: "后台恢复次数已用完，请重新开始。",
+  TASK_LEASE_EXPIRED: "后台处理已超时，可重试。",
+  CONSENT_CANCELLED: "已取消外发确认，未启动生成。",
+  TASK_NOT_CLAIMABLE: "任务已结束，不能再重试；请新建学习任务。",
+  TASK_CANCELLED: "任务已取消。",
   LEASE_LOST: "任务租约已过期，结果已忽略。",
   config_not_found: "找不到该配置。",
   credential_invalid: "凭据无效，请检查后重试。",
@@ -39,10 +53,14 @@ export const ERROR_TEXT: Record<string, string> = {
 
 export function errText(e: unknown): string {
   const code = (e as { code?: string })?.code;
-  return (code && ERROR_TEXT[code]) || (e as Error)?.message || "操作失败";
+  return (code && (ERROR_TEXT[code] || ERROR_TEXT[code.toLowerCase()])) || (e as Error)?.message || "操作失败";
 }
 
-export type Me = { user_id: string; email: string; is_admin: boolean; status: string; display_name: string };
+export type Me = {
+  user_id: string; email: string; is_admin: boolean; status: string; display_name: string;
+  /** 访客主体（/api/auth/guest）：可使用全部学习功能，但仍显示登录入口 */
+  is_guest?: boolean;
+};
 
 export const STATUS_LABEL: Record<string, string> = {
   queued: "排队中", leased: "处理中", running: "处理中", succeeded: "已完成", partial: "部分可用",

@@ -58,12 +58,18 @@ class ModelCallMetrics:
         task_id: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> None:
+        from .instrumentation import safe_attributes
+        dimensions = safe_attributes({"stage": stage, "mode": mode, "outcome": outcome, "error_code": error_code}, metrics=True)
+        stage = dimensions.get("stage", "other")
+        mode = dimensions.get("mode")
+        error_code = dimensions.get("error_code")
         outcome = "succeeded" if outcome == "succeeded" else "failed"
         key: _Key = (stage, mode, outcome, error_code)
         positive = max(0, int(duration_ms))
         with self._lock:
             self._counters[key] = self._counters.get(key, 0) + 1
             self._duration_ms[key] = self._duration_ms.get(key, 0) + positive
+        record_operational_measurement("model.call", positive, {"stage": stage, "mode": mode, "outcome": outcome, "error_code": error_code})
         self._emit(
             stage=stage, outcome=outcome, duration_ms=positive, mode=mode,
             error_code=error_code, attempts=attempts, config_id=config_id,
@@ -124,6 +130,52 @@ class ModelCallMetrics:
         except Exception:  # noqa: BLE001 - 指标发射绝不影响业务
             with self._lock:
                 self.emit_errors += 1
+
+
+def record_operational_measurement(prefix, duration_ms, attributes, *, runtime=None):
+    from .otel_setup import get_runtime
+    from .exporter import HEALTH
+    runtime = runtime or get_runtime()
+    if runtime is None:
+        return
+    try:
+        meter = runtime.meter_provider.get_meter("learning-assistant.business")
+        meter.create_counter(prefix + (".calls" if prefix == "business.stage" else ".count")).add(1, attributes)
+        meter.create_histogram(prefix + ".duration", unit="ms").record(duration_ms, attributes)
+    except Exception:
+        HEALTH.add("measurement_failures")
+
+
+def record_business_stage(stage, outcome, duration_ms, *, error_code=None, runtime=None):
+    record_operational_measurement("business.stage", duration_ms, {"stage": stage, "outcome": outcome, "error_code": error_code}, runtime=runtime)
+
+
+_TASK_DIAGNOSTICS_LOCK = threading.Lock()
+_TASK_DIAGNOSTICS: Dict[Tuple[str, str], int] = {}
+
+
+def record_task_diagnostic(*, reason: str, error_code: str, task_id=None, attempt=None) -> None:
+    """Runtime diagnostics are best-effort, independent of terminal transactions."""
+    from .contracts import normalize_error_code
+    reason = reason if reason in ("unknown_error_code", "worker_recovery_retry", "worker_recovery_failed") else "other"
+    error_code = normalize_error_code(error_code)
+    with _TASK_DIAGNOSTICS_LOCK:
+        key = (reason, error_code)
+        _TASK_DIAGNOSTICS[key] = _TASK_DIAGNOSTICS.get(key, 0) + 1
+    try:
+        StructuredLogger("worker", _default_environment()).log("task.convergence.diagnostic",
+            level="ERROR" if reason == "worker_recovery_failed" else "WARN",
+            reason=reason, error_code=error_code, task_id=task_id, attempt=attempt)
+    except Exception:
+        with _TASK_DIAGNOSTICS_LOCK:
+            key = ("emit_failed", "INTERNAL_ERROR")
+            _TASK_DIAGNOSTICS[key] = _TASK_DIAGNOSTICS.get(key, 0) + 1
+
+
+def task_diagnostics_snapshot() -> dict:
+    with _TASK_DIAGNOSTICS_LOCK:
+        return {"diagnostics": [{"reason": reason, "error_code": code, "count": count}
+            for (reason, code), count in sorted(_TASK_DIAGNOSTICS.items())]}
 
 
 _MODEL_METRICS = ModelCallMetrics()

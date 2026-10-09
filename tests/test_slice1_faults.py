@@ -131,6 +131,17 @@ def _create_config(client: TestClient, headers: dict, **overrides) -> dict:
     return r.json()
 
 
+def _task(client: TestClient, owner: str) -> str:
+    from backend.logging_audit.repositories import PgTaskEventStore
+    from backend.tasks.service import TaskService
+
+    db = client.slice1_state.db
+    return TaskService(db, PgTaskEventStore(db)).create_task(
+        owner_user_id=owner, kind="route_generate", subject_id="synthetic-disclosure-scope",
+        idempotency_key=f"fault-disclosure-{uuid.uuid4().hex}", stage="generate",
+    )["task_id"]
+
+
 class TestCredentialLeakScan:
     def test_api_and_db_never_expose_plaintext(self, client: TestClient):
         user = _make_user(client)
@@ -179,13 +190,15 @@ class TestCrossAccountAccess:
         user_a = _make_user(client)
         user_b = _make_user(client)
         view = _create_config(client, user_a["headers"])
+        task_id = _task(client, user_a["user_id"])
+        scope = {"material_ids": ["synthetic-material"]}
         grant = client.post(
             "/api/disclosures",
-            json={"task_id": "task_1", "config_id": view["config_id"], "content_category": "material"},
+            json={"task_id": task_id, "config_id": view["config_id"], "content_category": "material", "scope_snapshot": scope},
             headers=user_a["headers"],
         )
-        assert grant.status_code == 201
-        r = client.get("/api/disclosures?task_id=task_1", headers=user_b["headers"])
+        assert grant.status_code == 201, grant.text
+        r = client.get("/api/disclosures", params={"task_id": task_id}, headers=user_b["headers"])
         assert r.json()["data"] == []
         r = client.post(f"/api/disclosures/{grant.json()['grant_id']}/revoke", headers=user_b["headers"])
         assert r.status_code == 404
@@ -205,37 +218,50 @@ class TestDisclosureFaults:
     def test_revoked_disclosure_blocks_worker(self, client: TestClient):
         user = _make_user(client)
         view = _create_config(client, user["headers"])
-        grant = client.post(
+        task_id = _task(client, user["user_id"])
+        scope = {"purpose": "synthetic-query"}
+        response = client.post(
             "/api/disclosures",
-            json={"task_id": "task_f1", "config_id": view["config_id"], "content_category": "query"},
+            json={"task_id": task_id, "config_id": view["config_id"], "content_category": "query", "scope_snapshot": scope},
             headers=user["headers"],
-        ).json()
-        client.post(f"/api/disclosures/{grant['grant_id']}/revoke", headers=user["headers"])
+        )
+        assert response.status_code == 201, response.text
+        grant = response.json()
+        assert client.post(f"/api/disclosures/{grant['grant_id']}/revoke", headers=user["headers"]).status_code == 200
         disclosures = client.slice1_state.disclosures  # type: ignore[attr-defined]
         from backend.slice1.errors import Slice1Error
 
         with pytest.raises(Slice1Error) as exc:
-            disclosures.verify(task_id="task_f1", config_id=view["config_id"], content_category="query")
+            disclosures.verify(task_id=task_id, config_id=view["config_id"], content_category="query",
+                               actor_id=user["user_id"], scope_snapshot=scope)
         assert exc.value.code == "disclosure_revoked"
 
     def test_config_change_invalidates_grant(self, client: TestClient):
         user = _make_user(client)
         view = _create_config(client, user["headers"])
-        client.post(
+        task_id = _task(client, user["user_id"])
+        scope = {"material_ids": ["synthetic-material"]}
+        response = client.post(
             "/api/disclosures",
-            json={"task_id": "task_f2", "config_id": view["config_id"], "content_category": "material"},
+            json={"task_id": task_id, "config_id": view["config_id"], "content_category": "material", "scope_snapshot": scope},
             headers=user["headers"],
         )
-        client.patch(
+        assert response.status_code == 201, response.text
+        disclosures = client.slice1_state.disclosures
+        disclosures.verify(task_id=task_id, config_id=view["config_id"], content_category="material",
+                           actor_id=user["user_id"], scope_snapshot=scope)
+        changed = client.patch(
             f"/api/capabilities/configs/{view['config_id']}",
             json={"endpoint": "https://api2.example.test/v1"},
             headers=user["headers"],
         )
-        disclosures = client.slice1_state.disclosures  # type: ignore[attr-defined]
+        assert changed.status_code == 200, changed.text
         from backend.slice1.errors import Slice1Error
 
-        with pytest.raises(Slice1Error):
-            disclosures.verify(task_id="task_f2", config_id=view["config_id"], content_category="material")
+        with pytest.raises(Slice1Error) as exc:
+            disclosures.verify(task_id=task_id, config_id=view["config_id"], content_category="material",
+                               actor_id=user["user_id"], scope_snapshot=scope)
+        assert exc.value.code == "disclosure_revoked"
 
 
 class TestConnectorFaults:

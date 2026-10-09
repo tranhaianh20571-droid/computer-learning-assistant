@@ -65,6 +65,8 @@ class PlanningRetrievalService:
         if not material_ids:
             result.truncation_reasons.append("no_material_selected")
             return result
+        if self.text_resolver is None:
+            result.truncation_reasons.append("text_resolver_unavailable")
         hits = self.index.search(
             owner_user_id=owner_user_id, query=query, material_ids=list(material_ids)
         )
@@ -78,10 +80,16 @@ class PlanningRetrievalService:
             if kept >= int(b["max_retrieval_chunks"]):
                 result.truncation_reasons.append("max_retrieval_chunks")
                 break
-            excerpt = self._excerpt(hit, owner_user_id, max_chars=int(b["max_retrieval_chars"]) - chars)
+            remaining = max(0, int(b["max_retrieval_chars"]) - chars)
+            excerpt = self._excerpt(hit, owner_user_id, max_chars=remaining)
             if excerpt is not None:
-                result.excerpts.append(excerpt)
-                chars += len(excerpt["text"])
+                if excerpt.pop("truncated") and "max_retrieval_chars" not in result.truncation_reasons:
+                    result.truncation_reasons.append("max_retrieval_chars")
+                if excerpt["text"]:
+                    result.excerpts.append(excerpt)
+                    chars += len(excerpt["text"])
+            elif self.text_resolver is not None and "excerpt_unavailable" not in result.truncation_reasons:
+                result.truncation_reasons.append("excerpt_unavailable")
             result.refs.append({
                 "chunk_id": hit["chunk_id"],
                 "material_id": hit["material_id"],
@@ -100,7 +108,8 @@ class PlanningRetrievalService:
         text = self.text_resolver(hit)
         if text is None:
             return None
-        return {"chunk_id": hit["chunk_id"], "text": text[:max(0, max_chars)]}
+        limit = max(0, max_chars)
+        return {"chunk_id": hit["chunk_id"], "text": text[:limit], "truncated": len(text) > limit}
 
     def save_manifest(
         self,

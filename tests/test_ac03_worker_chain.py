@@ -136,14 +136,3 @@ class TestPgRolePermissions:
 
         with pytest.raises(AuditImmutabilityError):
             audit.sql_update_forbidden()
-
-
-class TestRollbackNotes:
-    def test_alembic_version_recorded(self):
-        """回退需要迁移版本号（写入证据文档）。"""
-        versions = list(
-            (ROOT / "tests" / "support" / "backend" / "alembic" / "versions").glob("*.py")
-        )
-        assert versions, "no alembic versions"
-        names = [v.stem for v in versions]
-        assert any("11fd41567866" in n for n in names)

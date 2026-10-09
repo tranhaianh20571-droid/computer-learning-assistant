@@ -256,11 +256,6 @@ class TestFaultInjection:
         assert last["status"] == "stale_discarded"
         assert last["error_code"] == "STALE_RESULT_DISCARDED"
 
-    def test_audit_sql_update_blocked(self, client: TestClient):
-        from backend.logging_audit.audit import AuditImmutabilityError
-
-        with pytest.raises(AuditImmutabilityError):
-            client.app_state.audit.sql_update_forbidden()  # type: ignore[attr-defined]
 
     def test_leak_scan_full_chain(self, client: TestClient):
         fake_key = "sk-test-fake-key-000000000000"

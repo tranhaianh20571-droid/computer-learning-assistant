@@ -78,6 +78,9 @@ class TeachingModelAdapter(SyntheticModelAdapter):
         for m in messages:
             if m.get("role") == "user":
                 last = str(m.get("content", ""))
+        if "独立的讲次教学规划" in "\n".join(str(m.get("content", "")) for m in messages):
+            from common_fixtures import synthetic_lesson_blueprint
+            return {"content": json.dumps(synthetic_lesson_blueprint(), ensure_ascii=False)}
         if "follow-up question" in last:
             return {"content": json.dumps(FOLLOWUP_PAYLOAD, ensure_ascii=False)}
         return {"content": json.dumps(STEP_PAYLOAD, ensure_ascii=False)}
@@ -128,51 +131,21 @@ def env(database: Database):
 
 
 def _user_with_ready_lesson(env):
-    """注册用户 → 生成并确认路线 → 确认大纲 → 讲次置 ready。返回 (user_id, token, course_id, lesson_id)。"""
-    from backend.auth.models import UserRow
-
-    client = env["client"]
-    email = f"synthetic.{uuid.uuid4().hex[:8]}@example.com"
-    auth = client.app.state.slice0.auth
-    user_id = auth.register(email, "synthetic-password-12345", "s4")["user_id"]
+    from common_fixtures import make_user, auth_headers
+    from copy import deepcopy
+    client=env["client"];state=env["state"]
+    user_id,token=make_user(client,env["database"])
+    h=auth_headers(token)
+    course_id=client.post("/api/planning/courses",headers=h,json={"title":"合成教学课程"}).json()["course_id"]
+    od=state.drafts.find_or_create_draft(owner_user_id=user_id,draft_kind="course_outline",target_id=course_id,
+        base_version_id=None,initial_content=deepcopy(OUTLINE_OK_PAYLOAD))
+    assert client.post(f"/api/planning/drafts/{od['draft_id']}/confirm",headers=h,
+        json={"revision":1,"idempotency_key":uuid.uuid4().hex}).status_code==200
+    cov=client.get(f"/api/courses/{course_id}/overview",headers=h).json()
+    lesson_id=cov["units"][0]["lessons"][0]["lesson_id"]
     with env["database"].session() as sess:
-        row = sess.get(UserRow, user_id)
-        row.status = "approved"
-    _, token = auth.login(email, "synthetic-password-12345")
-
-    env["container"]["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
-    env["container"]["search"] = SyntheticSearchAdapter()
-    route_id = client.post("/api/planning/routes", headers={"Authorization": f"Bearer {token}"},
-                           json={"title": "教学路线", "scenario": "self_study"}).json()["route_id"]
-    t = client.post("/api/planning/tasks", headers={"Authorization": f"Bearer {token}"},
-                    json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
-                          "planning_scope": "route", "target_route_id": route_id}).json()["task_id"]
-    body = run_route_generate(client, token, t, headers={"Authorization": f"Bearer {token}"})
-    draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
-    client.post(f"/api/planning/drafts/{body['draft']['draft_id']}/confirm",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"revision": draft["revision"], "idempotency_key": f"c{uuid.uuid4().hex[:8]}"})
-    overview = client.get(f"/api/routes/{route_id}/overview", headers={"Authorization": f"Bearer {token}"}).json()
-    course_id = overview["stages"][0]["courses"][0]["course_id"]
-
-    env["container"]["model"] = SyntheticModelAdapter(payload=OUTLINE_OK_PAYLOAD)
-    t2 = client.post("/api/planning/tasks", headers={"Authorization": f"Bearer {token}"},
-                     json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "outline_generate",
-                           "planning_scope": "course", "target_course_id": course_id}).json()["task_id"]
-    body2 = client.post(f"/api/planning/tasks/{t2}/run", headers={"Authorization": f"Bearer {token}"}).json()
-    od = env["state"].drafts.get_draft(body2["draft"]["draft_id"], actor_id=user_id)
-    client.post(f"/api/planning/drafts/{body2['draft']['draft_id']}/confirm",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"revision": od["revision"], "idempotency_key": f"c{uuid.uuid4().hex[:8]}"})
-    cov = client.get(f"/api/courses/{course_id}/overview", headers={"Authorization": f"Bearer {token}"}).json()
-    lesson_id = cov["units"][0]["lessons"][0]["lesson_id"]
-    # 讲次置 ready（内容生成属切片 4 之前的占位：教学门槛要求 ready）
-    with env["database"].session() as sess:
-        sess.execute(
-            update(LessonRow).where(LessonRow.lesson_id == lesson_id)
-            .values(status_preparation="ready")
-        )
-    return user_id, token, course_id, lesson_id
+        sess.execute(update(LessonRow).where(LessonRow.lesson_id==lesson_id).values(status_preparation="ready"))
+    return user_id,token,course_id,lesson_id
 
 
 class TestStartGate:
@@ -186,7 +159,7 @@ class TestStartGate:
         )
         assert r.status_code == 404
 
-    def test_not_ready_lesson_blocked(self, env) -> None:
+    def test_not_generated_lesson_starts_on_demand(self, env) -> None:
         user_id, token, course_id, lesson_id = _user_with_ready_lesson(env)
         # 把讲次改回 not_generated
         with env["database"].session() as sess:
@@ -196,8 +169,8 @@ class TestStartGate:
             f"/api/courses/{course_id}/lessons/{lesson_id}/start",
             headers={"Authorization": f"Bearer {token}"},
         )
-        assert r.status_code == 409
-        assert r.json()["error_code"] == "lesson_not_ready"
+        assert r.status_code == 201
+        assert r.json()["task_id"]
 
     def test_start_creates_teaching_conversation(self, env) -> None:
         user_id, token, course_id, lesson_id = _user_with_ready_lesson(env)

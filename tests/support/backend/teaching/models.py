@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Boolean,
     String,
     Text,
     UniqueConstraint,
@@ -49,6 +50,9 @@ class TeachingStepRow(Base):
     text_version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    phase: Mapped[str] = mapped_column(String(24), nullable=False, default="")
+    covered_goal_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    lesson_finished: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="generating")
     board_scene_id: Mapped[str | None] = mapped_column(String(64))
     audio_id: Mapped[str | None] = mapped_column(String(64))

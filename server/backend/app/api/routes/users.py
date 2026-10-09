@@ -10,8 +10,8 @@ from app.api.deps import (
     SessionDep,
     get_current_active_superuser,
 )
-from app.core.config import settings
-from app.core.security import get_password_hash, verify_password
+from app.infrastructure.config import settings
+from app.infrastructure.security import get_password_hash, verify_password
 from app.models import (
     Message,
     UpdatePassword,

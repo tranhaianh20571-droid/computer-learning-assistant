@@ -58,13 +58,20 @@ def planning_title_issues(candidate) -> List[str]:
     from ..planning.outputs import internal_id_residue
 
     issues: List[str] = []
+    import re
+    def requested(value):
+        return bool(re.match(r"^(我想|我希望|帮我|请帮|我需要|希望学)", str(value)))
+    if not getattr(candidate, "title", "") or requested(candidate.title):
+        issues.append("根标题必须非空且概括知识主题，不能照搬用户学习诉求")
     stages = getattr(candidate, "stages", None) or getattr(candidate, "units", None) or []
     child_label = "courses" if hasattr(candidate, "stages") else "lessons"
     for si, stage in enumerate(stages):
+        if requested(stage.title): issues.append("分组标题应使用知识主题")
         if internal_id_residue(stage.title):
             issues.append(f"{type(candidate).__name__}.stages[{si}].title 含内部标识符，请改为纯自然语言标题")
         children = getattr(stage, "courses", None) or getattr(stage, "lessons", None) or []
         for ci, child in enumerate(children):
+            if requested(child.title): issues.append("课程或讲次标题应使用知识主题")
             if internal_id_residue(child.title):
                 issues.append(f"{child_label}[{ci}].title 含内部标识符，请改为纯自然语言标题")
             goal = getattr(child, "goal", "")
@@ -73,7 +80,7 @@ def planning_title_issues(candidate) -> List[str]:
     return issues
 
 
-def planning_title_output_validator():
+def planning_title_output_validator(fallback_title=""):
     """挂到路线/大纲 Agent.output_validator：标题残留 ID → 有界 ModelRetry。
 
     首次检出回喂字段级清单让模型自纠；再犯直接放行——剥除兜底
@@ -84,6 +91,15 @@ def planning_title_output_validator():
 
     def validator(ctx, output):
         if fed_back["done"]:
+            import re
+            root = str(getattr(output, "title", ""))
+            if not root or re.match(r"^(我想|我希望|帮我|请帮|我需要|希望学)", root):
+                groups = getattr(output, "stages", None) or getattr(output, "units", None) or []
+                topics = [x.title for g in groups for x in (getattr(g, "courses", None) or [])]
+                if fallback_title and not re.match(r"^(我想|我希望|帮我|请帮|我需要|希望学)", fallback_title):
+                    output.title = fallback_title[:120]
+                else:
+                    output.title = "与".join(topics[:2])[:20] or (groups[0].title[:20] if groups else "课程知识概览")
             return output
         issues = planning_title_issues(output)
         if issues:
@@ -119,7 +135,10 @@ def make_search_materials_tool(retrieval_service, *, owner_user_id: str, materia
             result = retrieval_service.assemble(
                 owner_user_id=owner_user_id, material_ids=list(material_ids), query=query,
             )
-        except Exception:  # noqa: BLE001 — 检索失败降级为提示，不终止
+        except Exception as exc:
+            from .limits import allows_content_fallback
+            if not allows_content_fallback(exc):
+                raise
             raise ModelRetry("检索暂不可用，请基于已有信息继续") from None
         items = [
             {
@@ -129,7 +148,8 @@ def make_search_materials_tool(retrieval_service, *, owner_user_id: str, materia
             for e in result.excerpts[: max(1, min(limit, 5))]
         ]
         payload = {"items": items, "chars_total": result.chars_total,
-                   "truncated": bool(result.truncation_reasons)}
+                   "truncated": bool(result.truncation_reasons),
+                   "unavailable_reasons": list(result.truncation_reasons)}
         return _json.dumps(payload, ensure_ascii=False)
 
     return search_materials

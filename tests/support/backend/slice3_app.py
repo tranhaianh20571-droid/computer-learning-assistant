@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from .logging_audit.repositories import PgAuditLog, PgTaskEventStore
 from .planning.chat import ChatService
+from .planning.features import PlanningFeatureService
 from .planning.drafts import DraftService
 from .planning.errors import PlanningError, WaitStateSignal
 from .planning.overview import OverviewService
@@ -56,6 +57,7 @@ class Slice3State:
             search_adapter_factory=search_adapter_factory,
         )
         self.overview = OverviewService(db)
+        self.features = PlanningFeatureService(self.planning, self.drafts)
         # 切片 4：讲次教学（步骤生成/板书/TTS/检查点/追问/恢复）
         from .teaching.service import TeachingService
 
@@ -64,6 +66,8 @@ class Slice3State:
             model_adapter_factory=model_adapter_factory,
             tts_adapter_factory=tts_adapter_factory,
         )
+        from .teaching.assessment import AssessmentService
+        self.assessments = AssessmentService(self.teaching)
         # 切片 5：在线清理、备份轮换与恢复锁
         from .cleanup.service import CleanupService
         from .planning.deletion import PlanningDeletionService
@@ -282,37 +286,50 @@ def _dev_synthetic_factories() -> tuple[Optional[Any], Optional[Any]]:
     )
 
 
+def _configured_model_descriptor(view, credentials):
+    """Build connection metadata; production factories must bind task authority."""
+    from .slice1.adapters import ADAPTERS
+    protocol = (view["protocol"] or "").lower()
+    cls = ADAPTERS.get(protocol)
+    if cls is None:
+        return None
+    adapter = cls(endpoint=view["endpoint"], model_name=view["model_name"], credentials=credentials)
+    adapter.config_id = view["config_id"]
+    adapter.config_version = view["config_version"]
+    adapter.http_pool_key = (adapter.config_id, adapter.config_version)
+    adapter.capability_status = view["capability_status"]
+    adapter.defer_capability_probe = True
+    return adapter
+
+
 def _config_model_factory(configs) -> Optional[Any]:
     """按用户已存能力配置构建模型适配器（设置页为真相源）。
 
     取属主最新一条活跃 content_model 配置，按协议映射适配器；
-    gemini/anthropic 端点剥掉 /v1 后缀（适配器自带路径），openai 保留。
+    端点由适配器统一规范化，能力测试与实际生成使用同一路径。
     """
+    from .slice1.capability_refresh import CapabilityRefresher
+    refresher = CapabilityRefresher(configs)
+
+    build = _configured_model_descriptor
+
     def factory(owner_user_id: str, task_id: str):
         view = configs.latest_active_for_owner(owner_user_id, "content_model")
         if view is None:
             return None
-        credentials = configs.resolve_credentials(view["config_id"])
-        endpoint = view["endpoint"]
-        model_name = view["model_name"]
-        protocol = (view["protocol"] or "").lower()
-        if protocol == "gemini":
-            from .slice1.adapters.gemini import GeminiAdapter
+        adapter = build(view, configs.resolve_credentials(view["config_id"]))
+        if adapter is not None:
+            adapter.task_id = task_id
+            from .agents.task_binding import bind_task_deps
+            from .slice1.disclosure_service import DisclosureService
+            adapter.agent_deps = bind_task_deps(configs.db, adapter, actor_id=owner_user_id,
+                task_id=task_id, disclosures=DisclosureService(configs.db, PgAuditLog(configs.db)))
+            refresher.register(view, owner_user_id, build)
+        return adapter
 
-            return GeminiAdapter(
-                endpoint=endpoint.removesuffix("/v1").rstrip("/"),
-                model_name=model_name, credentials=credentials,
-            )
-        if protocol == "anthropic":
-            from .slice1.adapters.anthropic import AnthropicAdapter
-
-            return AnthropicAdapter(
-                endpoint=endpoint.removesuffix("/v1").rstrip("/"),
-                model_name=model_name, credentials=credentials,
-            )
-        from .slice1.adapters.openai import OpenAIAdapter
-
-        return OpenAIAdapter(endpoint=endpoint, model_name=model_name, credentials=credentials)
+    refresher.builder = build
+    configs.capability_refresher = refresher
+    factory.refresher = refresher
 
     return factory
 
@@ -322,7 +339,7 @@ def _real_model_factory() -> Optional[Any]:
 
     协议由 LEARNING_REAL_MODEL_PROTOCOL 选择：openai（默认，/v1 兼容端点）
     或 gemini（原生 /v1beta generateContent + 原生 responseSchema；
-    endpoint 会自动去掉 /v1 后缀并追加 /v1beta/models/...）。
+    endpoint 由适配器统一规范化后追加 /v1beta/models/...）。
     """
     key = os.environ.get("LEARNING_REAL_MODEL_KEY")
     endpoint = os.environ.get("LEARNING_REAL_MODEL_ENDPOINT")
@@ -332,9 +349,8 @@ def _real_model_factory() -> Optional[Any]:
     if os.environ.get("LEARNING_REAL_MODEL_PROTOCOL", "").lower() == "gemini":
         from .slice1.adapters.gemini import GeminiAdapter
 
-        gemini_endpoint = endpoint.removesuffix("/v1").rstrip("/")
         return lambda owner, task_id: GeminiAdapter(
-            endpoint=gemini_endpoint, model_name=model_name, credentials={"api_key": key}
+            endpoint=endpoint, model_name=model_name, credentials={"api_key": key}
         )
     from .slice1.adapters.openai import OpenAIAdapter
 
@@ -368,15 +384,18 @@ def create_slice3_app(
     ocr_adapter_factory: Optional[Any] = None,
     tts_adapter_factory: Optional[Any] = None,
 ) -> FastAPI:
+    managed_teaching=state is None
     # 工厂优先级：显式传入 > 用户已存配置（设置页）> 真实凭据（env）> 本地合成走查；
     # 模型工厂在 slice1 状态就绪后解析（配置工厂需要 ConfigService）。
-    if tts_adapter_factory is None:
-        tts_adapter_factory = _real_tts_factory()
+    explicit_tts_factory=tts_adapter_factory
     storage = state.storage if state is not None else None
     holder = state.pipeline_holder if state is not None else {"pipeline": None}
     app = create_slice2_app(state=slice2_state, storage=storage, pipeline_holder=holder)
     if state is None:
         base = app.state.slice1
+        if explicit_tts_factory is None:
+            from .teaching.tts_config import configured_tts_factory
+            tts_adapter_factory=configured_tts_factory(base.configs,base.disclosures,_real_tts_factory())
         if model_adapter_factory is None:
             config_factory = _config_model_factory(base.configs)
             env_factory = _real_model_factory()
@@ -385,6 +404,11 @@ def create_slice3_app(
                     adapter = config_factory(owner_user_id, task_id) if config_factory else None
                     if adapter is None:
                         adapter = env_factory(owner_user_id, task_id) if env_factory else None
+                        if adapter is not None:
+                            from .agents.task_binding import bind_task_deps
+                            adapter.agent_deps = bind_task_deps(base.db, adapter,
+                                actor_id=owner_user_id, task_id=task_id,
+                                disclosures=base.disclosures)
                     return adapter
 
                 model_adapter_factory = _model_factory_chain
@@ -408,23 +432,56 @@ def create_slice3_app(
             pipeline_holder=holder,
         )
     app.state.slice3 = state
+    if managed_teaching:
+        state.teaching.disclosures = app.state.slice1.disclosures
+        state.teaching.configs=app.state.slice1.configs
+        state.teaching.authorization.automatic_enabled = os.environ.get("TEACHING_AUTOMATIC_AUTHORIZATION", "1") == "1"
+        if state.teaching.tts_adapter_factory:
+            state.teaching.tts_adapter_factory.authorize_task = state.teaching._check_authorization
+        from .teaching.background import TeachingBackground
+        state.teaching.background=TeachingBackground(state.teaching)
+        @app.on_event("startup")
+        def start_teaching_background():state.teaching.background.start()
+        @app.on_event("shutdown")
+        def stop_teaching_background():state.teaching.background.close()
+    state.features.cover_configs = app.state.slice1.configs
+    state.features.cover_disclosures = app.state.slice1.disclosures
+    @app.on_event("startup")
+    def start_cover_background():
+        state.features.cover_background.start()
+    @app.on_event("shutdown")
+    def stop_cover_background():
+        state.features.cover_background.close()
+    if state.features.image_adapter_factory is None:
+        def image_factory(owner, task_id):
+            import json
+            from sqlalchemy import select
+            configs = app.state.slice1.configs
+            from .planning.feature_models import CoverAssetRow
+            with state.db.session() as sess:
+                asset = sess.scalar(select(CoverAssetRow).where(CoverAssetRow.task_id == task_id))
+                metadata = json.loads(asset.recipe_json or "{}") if asset else {}
+            config_id = metadata.get("config_id")
+            if not config_id or not asset or asset.owner_user_id != owner:
+                from .slice1.errors import error
+                raise error("disclosure_required", "cover authorization missing")
+            view = configs.get(config_id, actor_id=owner, is_admin=False)
+            if (not view.get("is_active") or view["config_version"] != metadata.get("config_version")
+                    or view["kind"] != "image_generation"):
+                from .slice1.errors import error
+                raise error("disclosure_revoked", "cover configuration changed")
+            app.state.slice1.disclosures.verify_or_audit(task_id=task_id, config_id=view["config_id"],
+                content_category="generated_text", actor_id=owner, scope_snapshot=metadata.get("scope_snapshot"))
+            from .slice1.adapters.imagegen import ImageGenerationAdapter
+            return ImageGenerationAdapter(endpoint=view["endpoint"], model_name=view["model_name"],
+                credentials=configs.resolve_credentials(view["config_id"]), max_response_bytes=16_000_000)
+        state.features.image_adapter_factory = image_factory
 
     def _resolve_user(request: Request):
-        raw = request.headers.get("Authorization", "")
-        token = raw[7:] if raw.startswith("Bearer ") else ""
-        if not token:
-            for part in request.headers.get("Cookie", "").split(";"):
-                k, _, v = part.strip().partition("=")
-                if k == "session_token":
-                    token = v
-        from .auth.service import AuthError
+        # 登录态优先；无有效会话时以访客身份继续（auth/guest.py）
+        from .auth.guest import resolve_user_or_guest
 
-        try:
-            return app.state.slice0.auth.resolve_session(token)
-        except AuthError as exc:
-            raise HTTPException(
-                status_code=exc.status, detail={"error_code": exc.code, "message": exc.message}
-            )
+        return resolve_user_or_guest(request, app.state.slice0.auth)
 
     app.include_router(
         create_planning_router(
@@ -438,13 +495,21 @@ def create_slice3_app(
             overview=state.overview,
             deletion=state.deletion,
             resolve_user=_resolve_user,
+            features=state.features,
+            teaching=state.teaching,
         )
     )
+    from .planning.feature_router import create_feature_router
+    app.include_router(create_feature_router(state.features, _resolve_user))
+
     from .teaching.router import create_teaching_router
 
     app.include_router(
         create_teaching_router(teaching=state.teaching, resolve_user=_resolve_user)
     )
+    from .teaching.assessment_router import create_assessment_router
+    app.include_router(create_assessment_router(state.assessments, _resolve_user))
+
     from .cleanup.router import create_cleanup_router
 
     app.include_router(
@@ -472,7 +537,7 @@ def create_slice3_app(
     @app.exception_handler(PlanningError)
     async def planning_error(_: Request, exc: PlanningError) -> JSONResponse:
         return JSONResponse(
-            status_code=exc.status, content={"error_code": exc.code, "message": exc.message}
+            status_code=exc.status, content={"error_code": exc.code, "message": exc.message, **getattr(exc, "detail", {})}
         )
 
     from .teaching.errors import TeachingError

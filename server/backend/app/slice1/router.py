@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from ..logging_audit.models import Base  # noqa: F401 - ensure metadata import order
 from .adapters import CapabilityTestService
@@ -32,6 +32,11 @@ class ConfigTestIn(BaseModel):
     """能力测试请求：只允许探测能力集合，不接受用户自由文本。"""
 
     capabilities: Optional[list[str]] = None
+
+
+class TtsVoicesIn(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=500)
+    api_key: SecretStr
 
 
 class ConfigUpdateIn(BaseModel):
@@ -97,6 +102,13 @@ def create_slice1_router(
     def list_configs(request: Request, kind: Optional[str] = None) -> dict:
         user = _user(request)
         return {"data": configs.list(actor_id=user.user_id, is_admin=bool(user.is_admin), kind=kind)}
+
+    @router.post("/capabilities/tts/voices")
+    def tts_voices(body: TtsVoicesIn, request: Request) -> dict:
+        _user(request)
+        from .voice_catalog import list_tts_voices
+
+        return list_tts_voices(endpoint=body.endpoint, api_key=body.api_key.get_secret_value())
 
     @router.post("/capabilities/configs", status_code=201)
     def create_config(body: ConfigCreateIn, request: Request) -> dict:

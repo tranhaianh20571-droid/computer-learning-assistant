@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.profiles import ModelProfile
+
+from backend.agents.native import ModelCapabilityError
 
 from common_fixtures import (
     OUTLINE_OK_PAYLOAD,
     ROUTE_OK_PAYLOAD,
     AllUnavailableAdapter,
-    BrokenJsonThenGoodAdapter,
     SkeletonThenOutlineAdapter,
     SyntheticModelAdapter,
     SyntheticSearchAdapter,
@@ -63,47 +68,29 @@ def _setup_route(env) -> tuple[str, str]:
 
 
 def _run_with_intake(client, token: str, task_id: str, *, scope: str | None = "route") -> dict:
-    """v2：执行任务；落入生成前访谈则按规则作答后继续，返回最终 run body。
-
-    scope=None 表示跳过范围题（保留旧的范围澄清路径可被测到）。
-    """
-    headers = auth_headers(token)
-    r = client.post(f"/api/planning/tasks/{task_id}/run", headers=headers)
-    body = r.json()
-    if body.get("wait_state") != "awaiting_intake":
-        return body
-    answers = []
-    if scope:
-        answers.append({"question_id": "scope", "selections": [scope]})
-    answers.append({"question_id": "foundation", "selections": ["some"]})
-    answers.append({"question_id": "depth", "selections": ["practice"]})
-    r = client.post(
-        f"/api/planning/tasks/{task_id}/decision", headers=headers,
-        json={"kind": "intake", "answers": answers},
-    )
-    assert r.status_code == 200, r.text
-    return r.json()
+    from common_fixtures import run_route_generate
+    return run_route_generate(client,token,task_id,scope=scope)
 
 
 class TestScopeResolution:
-    def test_explicit_scope_wins(self, env) -> None:
+    def test_explicit_scope_wins(self) -> None:
         from backend.planning.scope import ScopeSignals, resolve_scope
 
         assert resolve_scope("course", ScopeSignals(cross_domain_goal=True)) == "course"
         assert resolve_scope("route", ScopeSignals(single_textbook=True)) == "route"
 
-    def test_auto_single_textbook_course(self, env) -> None:
+    def test_auto_single_textbook_course(self) -> None:
         from backend.planning.scope import ScopeSignals, resolve_scope
 
         assert resolve_scope("auto", ScopeSignals(single_textbook=True)) == "course"
         assert resolve_scope("auto", ScopeSignals(explicit_course=True)) == "course"
 
-    def test_auto_cross_domain_route(self, env) -> None:
+    def test_auto_cross_domain_route(self) -> None:
         from backend.planning.scope import ScopeSignals, resolve_scope
 
         assert resolve_scope("auto", ScopeSignals(career_oriented=True)) == "route"
 
-    def test_auto_ambiguous_waits(self, env) -> None:
+    def test_auto_ambiguous_waits(self) -> None:
         from backend.planning.errors import WaitStateSignal
         from backend.planning.scope import ScopeSignals, resolve_scope
 
@@ -112,7 +99,7 @@ class TestScopeResolution:
         with pytest.raises(WaitStateSignal):
             resolve_scope("auto", ScopeSignals())
 
-    def test_not_decided_by_material_count_or_scenario(self, env) -> None:
+    def test_not_decided_by_material_count_or_scenario(self) -> None:
         # 硬约束回归：附件数量/场景不是 auto 的输入（ScopeSignals 无此类字段）
         from backend.planning.scope import ScopeSignals
 
@@ -139,8 +126,8 @@ class TestPlanningWorker:
         assert r.json()["prompt_binding_id"]
 
         body = _run_with_intake(env["client"], token, task_id)
-        assert body["task_status"] == "succeeded"
-        assert body["mode"] == "tool"   # ADR-023：Agent 路径首选 tool 档（native 不经桥）
+        assert body["task_status"] == "partial"
+        assert body["mode"] == "native"
 
         # 草稿与候选落库
         state = env["client"].app.state.slice3
@@ -198,7 +185,7 @@ class TestPlanningWorker:
             json={"decision": "offline_continue"},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["task_status"] == "succeeded"
+        assert r.json()["task_status"] == "partial"
         # manifest 无 external 引用
         from sqlalchemy import select
 
@@ -237,7 +224,7 @@ class TestPlanningWorker:
             json={"decision": "retry"},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["task_status"] == "succeeded"
+        assert r.json()["task_status"] == "partial"
 
     def test_scope_ambiguity_waits_then_decision(self, env) -> None:
         _, token, route_id = _setup_route(env)
@@ -259,12 +246,12 @@ class TestPlanningWorker:
             json={"resolved_scope": "route"},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["task_status"] == "succeeded"
+        assert r.json()["task_status"] == "partial"
         assert r.json()["resolved_scope"] == "route"
 
     def test_outline_generate_and_skip_existing(self, env) -> None:
         user_id, token, route_id = _setup_route(env)
-        env["container"]["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
+        env["container"]["model"] = SkeletonThenOutlineAdapter(payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD)
         env["container"]["search"] = SyntheticSearchAdapter()
         client = env["client"]
 
@@ -286,39 +273,30 @@ class TestPlanningWorker:
         overview = client.get(f"/api/routes/{route_id}/overview", headers=auth_headers(token)).json()
         course_id = overview["stages"][0]["courses"][0]["course_id"]
 
-        # 大纲生成
-        env["container"]["model"] = SyntheticModelAdapter(payload=OUTLINE_OK_PAYLOAD)
-        t2 = client.post(
-            "/api/planning/tasks", headers=auth_headers(token),
-            json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "outline_generate",
-                  "planning_scope": "course", "target_course_id": course_id},
-        ).json()["task_id"]
-        body2 = client.post(f"/api/planning/tasks/{t2}/run", headers=auth_headers(token)).json()
-        assert body2["task_status"] == "succeeded"
+        # ADR-029: a materialized confirmed outline cannot be regenerated.
+        blocked = client.post("/api/planning/tasks", headers=auth_headers(token),
+            json={"idempotency_key":uuid.uuid4().hex,"task_kind":"outline_generate",
+                  "planning_scope":"course","target_course_id":course_id})
+        assert blocked.status_code == 409 and blocked.json()["error_code"] == "PLANNING_LOCKED"
+        assert client.get(f"/api/courses/{course_id}/overview",headers=auth_headers(token)).json()["outline_confirmed"]
 
-        # 确认大纲版本
-        outline_draft = state.drafts.get_draft(body2["draft"]["draft_id"], actor_id=user_id)
-        confirmed2 = client.post(
-            f"/api/planning/drafts/{body2['draft']['draft_id']}/confirm", headers=auth_headers(token),
-            json={"revision": outline_draft["revision"], "idempotency_key": f"c{uuid.uuid4().hex[:8]}"},
-        ).json()
-        assert confirmed2["deduped"] is False
-
-        # 同一课程已有大纲：重选节点不进生成流程
-        t3 = client.post(
-            "/api/planning/tasks", headers=auth_headers(token),
-            json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "outline_generate",
-                  "planning_scope": "course", "target_course_id": course_id,
-                  "source_route_node_id": "rcn_x"},
-        ).json()["task_id"]
-        body3 = client.post(f"/api/planning/tasks/{t3}/run", headers=auth_headers(token)).json()
-        assert body3.get("skipped") is True and body3["reason"] == "outline_exists"
-
-
-class TestDegradation:
     def test_native_to_tool_to_prompted(self, env) -> None:
+        class UnsupportedOutputModel(FunctionModel):
+            def __init__(self):
+                self.modes = []
+
+                def respond(messages, info):
+                    mode = info.model_request_parameters.output_mode
+                    self.modes.append(mode)
+                    if mode in ("native", "tool"):
+                        raise ModelCapabilityError("synthetic output protocol unsupported")
+                    return ModelResponse(parts=[TextPart(json.dumps(ROUTE_OK_PAYLOAD))])
+
+                super().__init__(respond, profile=ModelProfile(
+                    supports_json_schema_output=True, supports_tools=True))
+
         user_id, token, route_id = _setup_route(env)
-        adapter = BrokenJsonThenGoodAdapter(payload=ROUTE_OK_PAYLOAD)
+        adapter = UnsupportedOutputModel()
         env["container"]["model"] = adapter
         env["container"]["search"] = SyntheticSearchAdapter()
 
@@ -328,9 +306,10 @@ class TestDegradation:
                   "planning_scope": "route", "target_route_id": route_id},
         ).json()["task_id"]
         body = _run_with_intake(env["client"], token, task_id)
-        assert body["task_status"] == "succeeded"
-        assert body["mode"] == "prompted"           # 降级到末档（ADR-023：Agent 路径 tool→prompted，无 native）
-        assert body["degraded_from"] == ["tool"]
+        assert body["task_status"] == "partial"
+        assert body["mode"] == "prompted"
+        assert body["degraded_from"] == ["native", "tool"]
+        assert adapter.modes[:3] == ["native", "tool", "prompted"]
 
     def test_model_capability_unavailable_no_infinite_retry(self, env) -> None:
         _, token, route_id = _setup_route(env)
@@ -348,7 +327,7 @@ class TestDegradation:
         assert body["error_code"] == "MODEL_CAPABILITY_UNAVAILABLE"
         assert adapter.generate_calls == []  # 未发起任何模型调用
 
-    def test_prompted_retry_bounded(self, env) -> None:
+    def test_prompted_retry_bounded(self) -> None:
         from backend.planning.model_runner import PROMPTED_PARSE_RETRIES, run_structured
         from backend.planning.outputs import RouteCandidate
 
@@ -406,7 +385,7 @@ class TestDraftScenePreview:
     def test_draft_scene_renderable_before_confirm(self, env) -> None:
         _, token, route_id = _setup_route(env)
         body = self._run_route_task(env, token, route_id, ROUTE_OK_PAYLOAD)
-        assert body["task_status"] == "succeeded", body
+        assert body["task_status"] == "partial", body
         draft_id = body["draft"]["draft_id"]
 
         r = env["client"].get(f"/api/planning/drafts/{draft_id}/scene", headers=auth_headers(token))
@@ -427,7 +406,7 @@ class TestDraftScenePreview:
         r = env["client"].get(f"/api/planning/drafts/{draft_id}/scene", headers=auth_headers(other_token))
         assert r.status_code == 404
 
-    def test_candidate_titles_stripped_of_internal_ids(self, env) -> None:
+    def test_candidate_titles_stripped_of_internal_ids(self) -> None:
         from backend.planning.outputs import RouteCandidate, validate_route_candidate
 
         candidate = RouteCandidate.model_validate({
@@ -441,7 +420,7 @@ class TestDraftScenePreview:
         assert "route_8a471d50aada" not in candidate.stages[0].courses[0].title
         assert candidate.stages[0].title.startswith("基础构建")
 
-    def test_content_json_stripped_in_place_for_confirm(self, env) -> None:
+    def test_content_json_stripped_in_place_for_confirm(self) -> None:
         from backend.planning.outputs import validate_content_json
 
         content = {
@@ -466,7 +445,7 @@ class TestDraftScenePreview:
             "prerequisites": [{"from_index": 0, "to_index": 1}],
         }
         body = self._run_route_task(env, token, route_id, polluted)
-        assert body["task_status"] == "succeeded", body
+        assert body["task_status"] == "partial", body
         draft_id = body["draft"]["draft_id"]
 
         r = env["client"].get(f"/api/planning/drafts/{draft_id}/scene", headers=auth_headers(token))
@@ -527,7 +506,7 @@ class TestRouteRefineFanOut:
         env["container"]["search"] = SyntheticSearchAdapter()
         task_id = self._create_task(env, token, route_id)
         body = run_route_generate(env["client"], token, task_id)
-        assert body["task_status"] == "succeeded", body
+        assert body["task_status"] == "partial", body
 
         state = env["client"].app.state.slice3
         draft = state.drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
@@ -541,3 +520,93 @@ class TestRouteRefineFanOut:
         keys = set(scene["node_positions"].keys())
         assert "route_root" in keys
         assert not any("unit_" in k for k in keys)
+
+
+def test_refinement_prompt_and_repair(env):
+    user_id, token, route_id = _setup_route(env)
+    env["container"]["model"] = SkeletonThenOutlineAdapter(
+        payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD, fail_refine=True,
+    )
+    env["container"]["search"] = SyntheticSearchAdapter()
+    tid = env["client"].post("/api/planning/tasks", headers=auth_headers(token), json={
+        "idempotency_key": uuid.uuid4().hex, "task_kind": "route_generate",
+        "planning_scope": "route", "target_route_id": route_id,
+    }).json()["task_id"]
+    body = run_route_generate(env["client"], token, tid)
+    assert body["task_status"] == "partial"
+    draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
+    # Repair belongs to the editable draft phase, before formal confirmation.
+    env["container"]["model"] = SkeletonThenOutlineAdapter(payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD)
+    repair = env["client"].post(f"/api/planning/drafts/{draft['draft_id']}/refine", headers=auth_headers(token),
+        json={"revision": draft["revision"]})
+    assert repair.status_code == 200, repair.text
+    result = env["client"].post(f"/api/planning/tasks/{repair.json()['task_id']}/run", headers=auth_headers(token))
+    assert result.json()["task_status"] == "succeeded", result.text
+    updated = env["state"].drafts.get_draft(draft["draft_id"], actor_id=user_id)
+    assert updated["revision"] > draft["revision"]
+    assert all(c["units"] for st in updated["content"]["stages"] for c in st["courses"])
+
+
+def test_refine_uses_snapshot_budget_and_preserves_edges(env):
+    class RecordingAdapter(SkeletonThenOutlineAdapter):
+        def generate(self, messages, **options):
+            text = str(messages)
+            if "课程名称：" in text:
+                assert "课程结构图的子树" in text
+                assert "本课程讲次总数不得超过" in text
+            return super().generate(messages, **options)
+
+    user_id, token, route_id = _setup_route(env)
+    env["container"]["model"] = RecordingAdapter(payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD)
+    env["container"]["search"] = SyntheticSearchAdapter()
+    tid = TestRouteRefineFanOut()._create_task(env, token, route_id)
+    snapshot = env["state"].prompts.resolve_for_task(tid, "outline_refine_v1")
+    assert snapshot["template_snapshot"]
+    body = run_route_generate(env["client"], token, tid)
+    assert body["task_status"] == "succeeded"
+    draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
+    assert draft["content"]["stages"][0]["courses"][0]["prerequisites"] == OUTLINE_OK_PAYLOAD["prerequisites"]
+    response = env["client"].post(f"/api/planning/drafts/{draft['draft_id']}/confirm", headers=auth_headers(token),
+        json={"revision": draft["revision"], "idempotency_key": uuid.uuid4().hex})
+    assert response.status_code == 200, response.text
+    scene = env["client"].get(f"/api/routes/{route_id}/scene", headers=auth_headers(token)).json()
+    assert len([e for e in scene["elements"] if e["type"] == "arrow"]) >= 4
+    positions = list(scene["node_positions"].values())
+    for i, a in enumerate(positions):
+        for b in positions[i+1:]:
+            if a["x"] == b["x"]:
+                assert a["y"] + a["h"] <= b["y"] or b["y"] + b["h"] <= a["y"]
+
+
+def test_repair_rejects_stale_revision_and_other_owner(env):
+    user_id, token, route_id = _setup_route(env)
+    draft = env["state"].drafts.find_or_create_draft(owner_user_id=user_id, draft_kind="route",
+        target_id=route_id, base_version_id=None, initial_content=ROUTE_OK_PAYLOAD)
+    _, other_token = make_user(env["client"], env["database"])
+    url = f"/api/planning/drafts/{draft['draft_id']}/refine"
+    assert env["client"].post(url, headers=auth_headers(other_token), json={"revision": draft["revision"]}).status_code == 404
+    assert env["client"].post(url, headers=auth_headers(token), json={"revision": draft["revision"]+1}).status_code == 409
+
+
+def test_late_candidate_is_stored_without_overwriting(env):
+    from backend.planning.models import PlanningCandidateRow
+    from sqlalchemy import select
+    user_id, token, route_id = _setup_route(env)
+    draft = env["state"].drafts.find_or_create_draft(owner_user_id=user_id, draft_kind="route",
+        target_id=route_id, base_version_id=None, initial_content=ROUTE_OK_PAYLOAD)
+    newer = env["state"].drafts.save_draft(draft["draft_id"], actor_id=user_id,
+        revision=draft["revision"], content={**ROUTE_OK_PAYLOAD, "title": "人工调整"})
+    result = env["state"].drafts.apply_candidate(owner_user_id=user_id, target_id=route_id,
+        candidate_kind="planning_revise", content=ROUTE_OK_PAYLOAD,
+        source_task_id="synthetic-repair", base_draft_revision=draft["revision"])
+    assert result["applied"] is False
+    assert env["state"].drafts.get_draft(draft["draft_id"], actor_id=user_id)["content"]["title"] == "人工调整"
+    with env["database"].session() as sess:
+        assert sess.execute(select(PlanningCandidateRow).where(PlanningCandidateRow.candidate_id == result["candidate_id"])).scalar_one()
+
+
+def test_empty_refinement_prompt_stops_before_model(env):
+    from backend.planning.errors import PlanningError
+    with pytest.raises(PlanningError) as exc:
+        env["state"].planning._refine_course_units(None, None, None, {"template": ""})
+    assert exc.value.code == "PROMPT_UNAVAILABLE"

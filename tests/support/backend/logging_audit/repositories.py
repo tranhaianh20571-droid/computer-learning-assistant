@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 
@@ -97,9 +98,11 @@ class PgTaskEventStore:
         progress_total: int = 0,
         template_id: Optional[str] = None,
         template_params: Optional[Mapping[str, Any]] = None,
+        session: Optional[Session] = None,
     ) -> TaskEvent:
+        """Append acceptance; a caller session owns commit/rollback when supplied."""
         validate_stage(stage)
-        with self.db.session() as sess:
+        with (nullcontext(session) if session is not None else self.db.session()) as sess:
             exists = sess.get(TaskStateRow, task_id)
             if exists:
                 raise ContractError("DUPLICATE_TASK", f"任务已存在: {task_id}")
@@ -128,7 +131,8 @@ class PgTaskEventStore:
                 template_params=dict(template_params or {}),
                 progress_total=progress_total,
             )
-            sess.commit()
+            if session is None:
+                sess.commit()
             return event
 
     def record(
@@ -147,6 +151,7 @@ class PgTaskEventStore:
         attempt: Optional[int] = None,
         actor_id: Optional[str] = None,
         diagnostics_only: bool = False,
+        session: Optional[Session] = None,
     ) -> TaskEvent:
         validate_stage(stage)
         validate_status(status)
@@ -163,10 +168,15 @@ class PgTaskEventStore:
             "stale_discarded": "task.stale_discarded",
         }.get(status, "task.stage.failed")
 
-        with self.db.session() as sess:
-            state = sess.get(TaskStateRow, task_id)
+        with (nullcontext(session) if session is not None else self.db.session()) as sess:
+            state = sess.execute(
+                select(TaskStateRow).where(TaskStateRow.task_id == task_id)
+                .with_for_update().execution_options(populate_existing=True)
+            ).scalar_one_or_none()
             if state is None:
                 raise ContractError("UNKNOWN_TASK", f"未知任务: {task_id}")
+            if actor_id is not None and actor_id != state.owner_user_id:
+                raise AccessDeniedError("not_owner")
 
             if generation is not None and generation < state.generation and not diagnostics_only:
                 diagnostics_only = True
@@ -174,6 +184,19 @@ class PgTaskEventStore:
                 error_code = "STALE_RESULT_DISCARDED"
                 event_name = "task.stale_discarded"
 
+            if not diagnostics_only:
+                state.stage = stage
+                state.status = status
+                state.error_code = error_code
+                state.revision += 1
+                if progress_current is not None:
+                    state.progress_current = progress_current
+                if progress_total is not None:
+                    state.progress_total = progress_total
+                if attempt is not None:
+                    state.attempt = attempt
+                if generation is not None:
+                    state.generation = generation
             event = self._append(
                 sess,
                 state,
@@ -189,20 +212,8 @@ class PgTaskEventStore:
                 generation=generation if generation is not None else state.generation,
                 attempt=attempt if attempt is not None else state.attempt,
             )
-            if not diagnostics_only:
-                state.stage = stage
-                state.status = status
-                state.error_code = error_code
-                state.revision += 1
-                if progress_current is not None:
-                    state.progress_current = progress_current
-                if progress_total is not None:
-                    state.progress_total = progress_total
-                if attempt is not None:
-                    state.attempt = attempt
-                if generation is not None:
-                    state.generation = generation
-            sess.commit()
+            if session is None:
+                sess.commit()
             return event
 
     def _next_sequence(self, sess: Session, task_id: str) -> int:
@@ -451,6 +462,7 @@ class PgAuditLog:
         target_actor_id: Optional[str] = None,
         resource_type: Optional[str] = None,
         resource_id: Optional[str] = None,
+        session: Optional[Session] = None,
         **extra: Any,
     ) -> AuditRecord:
         if event not in _AUDIT_EVENTS:
@@ -489,7 +501,9 @@ class PgAuditLog:
             content_hash=content_hash,
             target_actor_id=target_actor_id,
         )
-        with self.db.session() as sess:
+        owns_session = session is None
+        context = self.db.session() if owns_session else nullcontext(session)
+        with context as sess:
             try:
                 sess.add(
                     AuditLogRow(
@@ -508,10 +522,13 @@ class PgAuditLog:
                         content_hash=content_hash,
                     )
                 )
-                sess.commit()
+                if owns_session:
+                    sess.commit()
+                else:
+                    sess.flush()
             except Exception as exc:  # noqa: BLE001
                 self.write_failures += 1
-                raise AuditWriteError(str(exc)) from exc
+                raise AuditWriteError("storage_failure") from exc
         return record
 
     def update(self, *args: Any, **kwargs: Any) -> None:
@@ -553,18 +570,15 @@ class PgAuditLog:
             rows = sess.execute(stmt).scalars().all()
             snapshot = [self._row_to_record(r) for r in rows]
 
-        try:
-            self.append(
-                "audit.query.executed",
-                actor_id=actor_id,
-                result="success",
-                object_type=object_type,
-                object_id=object_id,
-                role=role,
-                reason=f"query_id={uuid.uuid4().hex[:8]}",
-            )
-        except AuditWriteError:
-            self.write_failures += 1
+        self.append(
+            "audit.query.executed",
+            actor_id=actor_id,
+            result="success",
+            object_type=object_type,
+            object_id=object_id,
+            role=role,
+            reason=f"query_id={uuid.uuid4().hex[:8]}",
+        )
         return snapshot
 
     def list_all_for_test(self) -> List[AuditRecord]:

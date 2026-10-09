@@ -86,20 +86,26 @@ export function VerifyView({ onDone, onErr }: any) {
 export function LoginView({ onDone, onErr }: any) {
   const [email, setEmail] = useState(() => localStorage.getItem("slice3.rememberEmail") || "");
   const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(() => localStorage.getItem("slice3.rememberLogin") === "1");
   return (
     <form className="od-stack" style={{ ["--od-gap" as any]: "18px" }} onSubmit={(e) => e.preventDefault()}>
       <span className="kicker">登录</span>
       <h2 className="h1">回到你的学习空间</h2>
       <Field label="邮箱" type="email" value={email} onChange={setEmail} autoComplete="email" />
       <Field label="密码" type="password" value={password} onChange={setPassword} autoComplete="current-password" />
+      <label className="checkline">
+        <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} />
+        <span>记住登录状态（本设备保留 14 天）</span>
+      </label>
       <div className="row" style={{ justifyContent: "flex-end", gap: "var(--s4)" }}>
         <button className="linkbtn" type="button" onClick={() => (location.hash = "/reset")}>找回密码</button>
         <button className="btn btn-pri" type="submit"
           onClick={async () => {
             try {
-              await api.login(email, password);
-              // 只记住邮箱字符串；密码永不落浏览器
+              await api.login(email, password, rememberMe);
+              // 只记住邮箱和偏好；密码与会话令牌永不落浏览器
               localStorage.setItem("slice3.rememberEmail", email);
+              localStorage.setItem("slice3.rememberLogin", rememberMe ? "1" : "0");
               onDone("已登录");
             } catch (e) { onErr(errText(e)); }
           }}

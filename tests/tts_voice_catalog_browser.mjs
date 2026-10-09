@@ -1,0 +1,64 @@
+import assert from "node:assert/strict";
+import {createRequire} from "node:module";
+import {mkdirSync,writeFileSync} from "node:fs";
+const require=createRequire(import.meta.url),{chromium}=require(process.env.PW_ROOT+"/playwright");
+const backend=process.env.TEST_BACKEND,base=process.env.TEST_FRONTEND||"http://127.0.0.1:5173",output=process.env.TEST_OUTPUT;
+assert.equal(new URL(backend).hostname,"127.0.0.1");assert.notEqual(new URL(backend).port,"8000");
+mkdirSync(output,{recursive:true});
+const browser=await chromium.launch({headless:true,executablePath:process.env.TEST_BROWSER});
+const context=await browser.newContext({viewport:{width:1440,height:1000}});
+await context.request.get(backend+"/api/auth/guest");
+await context.addInitScript(({backend})=>{
+  const original=window.fetch.bind(window);window.fetch=(input,init)=>original(typeof input==="string"&&input.startsWith("/api/")?backend+input:input,init);
+},{backend});
+const page=await context.newPage(),checks=[],errors=[],responses=[];let queries=0;
+page.on("pageerror",error=>errors.push(error.message));
+page.on("request",request=>{if(request.url().endsWith("/tts/voices"))queries++;});
+page.on("response",response=>{responses.push({path:new URL(response.url()).pathname,status:response.status(),method:response.request().method()});});
+try{
+  await page.goto(base+"/#/capabilities");
+  const form=page.locator('.card').filter({has:page.getByRole('heading',{name:'个人语音（MiniMax）',exact:true})});
+  const dropdown=form.getByLabel('音色',{exact:true}),key=form.getByLabel('API Key',{exact:true}),address=form.getByLabel('服务地址',{exact:true});
+  await form.waitFor();assert(await dropdown.isDisabled());assert.equal(queries,0);
+  checks.push('query_is_explicit_and_dropdown_starts_disabled');
+  await key.fill('synthetic-key');
+  await form.getByRole('button',{name:'获取可用音色',exact:true}).click();
+  await form.getByText('已获取 3 个音色',{exact:true}).waitFor();
+  assert.equal(await dropdown.locator('optgroup').count(),3);
+  await dropdown.selectOption('synthetic-plain');await form.getByText('平静清晰的合成音色。',{exact:true}).waitFor();
+  checks.push('all_three_categories_and_selected_description');
+  const saving=page.waitForResponse(response=>response.url().endsWith('/capabilities/configs')&&response.request().method()==='POST');
+  await form.getByRole('button',{name:'保存 TTS 配置',exact:true}).click();
+  const savedResponse=await saving;
+  assert.equal(savedResponse.status(),201);
+  const saved=await savedResponse.json();
+  await page.getByRole('heading',{name:'已保存的配置',exact:true}).waitFor();
+  await page.waitForFunction(async backend=>{
+    const data=await (await fetch(backend+'/api/capabilities/configs',{credentials:'include'})).json();
+    return data.data.some(config=>config.kind==='tts');
+  },backend);
+  assert(saved&&saved.protocol==='minimax'&&saved.model_name==='speech-2.8-hd');
+  assert(!JSON.stringify(saved).includes('synthetic-key'));checks.push('configuration_persisted_without_returning_key');
+  await address.fill('https://voice.example.test');assert(await dropdown.isDisabled());assert.equal(await dropdown.inputValue(),'');
+  checks.push('endpoint_change_invalidates_previous_catalog');
+  await key.fill('synthetic-failure-key');await form.getByRole('button',{name:'获取可用音色',exact:true}).click();
+  await form.getByText('获取失败，请检查服务地址与 API Key 后重试。',{exact:true}).waitFor();
+  assert(await dropdown.isDisabled());checks.push('controlled_failure_without_stale_selection');
+  await page.getByRole('alertdialog').getByRole('button',{name:'关闭',exact:true}).click();
+  await key.fill('synthetic-key');await form.getByRole('button',{name:'获取可用音色',exact:true}).click();
+  await form.getByText('已获取 3 个音色',{exact:true}).waitFor();await dropdown.selectOption('synthetic-clone');
+  await key.fill('synthetic-changed-key');assert(await dropdown.isDisabled());assert.equal(await dropdown.inputValue(),'');
+  checks.push('key_change_invalidates_previous_account_catalog');
+  await page.reload();await form.waitFor();assert.equal(await key.inputValue(),'');
+  checks.push('key_draft_is_not_persisted_after_refresh');
+  await page.setViewportSize({width:390,height:844});await form.scrollIntoViewIfNeeded();
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  checks.push('mobile_width_has_no_horizontal_overflow');
+  assert.deepEqual(errors,[]);
+  writeFileSync(output+'/voice-browser-result.json',JSON.stringify({checks,pageErrors:errors,synthetic:true,queries},null,2));
+  console.log(JSON.stringify({checks,pageErrors:errors}));
+}catch(error){
+  console.log(JSON.stringify({checks,pageErrors:errors,responses:responses.filter(response=>response.path.startsWith('/api/')).slice(-15)}));
+  await page.screenshot({path:output+'/synthetic-failure.png',fullPage:true});
+  throw error;
+}finally{await browser.close();}

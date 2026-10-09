@@ -54,6 +54,26 @@ def capability_status(**overrides) -> dict:
     return base
 
 
+def synthetic_output_schema(options: dict) -> dict:
+    native = options.get("response_format", {}).get("json_schema", {})
+    if native:
+        return native.get("schema", {})
+    definitions = options.get("tools", [])
+    return definitions[-1]["function"].get("parameters", {}) if definitions else {}
+
+
+def synthetic_output_response(payload: dict, options: dict) -> dict:
+    import json
+
+    if "response_format" in options:
+        return {"content": json.dumps(payload, ensure_ascii=False)}
+    if "tools" in options:
+        name = options["tools"][-1]["function"]["name"]
+        return {"tool_calls": [{"id": "synthetic-output", "type": "function",
+            "function": {"name": name, "arguments": payload}}]}
+    return {"content": json.dumps(payload, ensure_ascii=False)}
+
+
 class SyntheticModelAdapter:
     """合成内容模型适配器：按 capability_status 决定探测，按脚本决定输出。"""
 
@@ -82,14 +102,14 @@ class SyntheticModelAdapter:
                 raise action
             return action
         # 默认按模式给出可解析输出
-        if "tools" in options:
-            import json
-
-            return {"content": "", "tool_arguments": json.dumps(self.payload, ensure_ascii=False)}
         if "response_format" in options:
             import json
 
             return {"content": json.dumps(self.payload, ensure_ascii=False)}
+        if "tools" in options:
+            import json
+
+            return {"content": "", "tool_arguments": json.dumps(self.payload, ensure_ascii=False)}
         import json
 
         return {"content": f"```json\n{json.dumps(self.payload, ensure_ascii=False)}\n```"}
@@ -125,10 +145,10 @@ class SkeletonThenOutlineAdapter(SyntheticModelAdapter):
         if is_refine and self.fail_refine:
             raise RuntimeError("refine unavailable")
         payload = self.outline_payload if is_refine else self.payload
-        if "tools" in options:
-            return {"content": "", "tool_arguments": json.dumps(payload, ensure_ascii=False)}
         if "response_format" in options:
             return {"content": json.dumps(payload, ensure_ascii=False)}
+        if "tools" in options:
+            return {"content": "", "tool_arguments": json.dumps(payload, ensure_ascii=False)}
         return {"content": f"```json\n{json.dumps(payload, ensure_ascii=False)}\n```"}
 
 
@@ -169,20 +189,19 @@ class SyntheticSearchAdapter:
 
 def run_route_generate(client, token: str, task_id: str, *, scope: str = "route",
                        headers: dict | None = None) -> dict:
-    """执行 route_generate 任务；落入 v2 生成前访谈则按默认画像作答后继续。"""
-    H = headers or auth_headers(token)
-    body = client.post(f"/api/planning/tasks/{task_id}/run", headers=H).json()
-    if body.get("wait_state") != "awaiting_intake":
-        return body
-    answers = []
-    if scope:
-        answers.append({"question_id": "scope", "selections": [scope]})
-    answers.append({"question_id": "foundation", "selections": ["some"]})
-    answers.append({"question_id": "depth", "selections": ["practice"]})
-    return client.post(
-        f"/api/planning/tasks/{task_id}/decision", headers=H,
-        json={"kind": "intake", "answers": answers},
-    ).json()
+    """Non-interview synthetic suites start with an already collected profile.
+
+    Real PydanticAI interview behavior is tested in test_v2_intake, not replaced
+    by this fixture shortcut in production.
+    """
+    from backend.planning.models import PlanningTaskStateRow
+    with client.app.state.slice3.db.session() as session:
+        state=session.get(PlanningTaskStateRow,task_id)
+        if state:
+            state.intake_json='{"done":true,"answers":[]}'
+            if scope:state.resolved_scope=scope
+    return client.post(f"/api/planning/tasks/{task_id}/run",headers=headers or auth_headers(token)).json()
+
 
 
 def make_user(client, database) -> str:
@@ -220,6 +239,9 @@ class TeachingModelAdapter(SyntheticModelAdapter):
         for m in messages:
             if m.get("role") == "user":
                 last = str(m.get("content", ""))
+        all_text = "\n".join(str(m.get("content", "")) for m in messages)
+        if "独立的讲次教学规划" in all_text:
+            return {"content": _json.dumps(synthetic_lesson_blueprint(), ensure_ascii=False)}
         if "follow-up question" in last:
             return {"content": _json.dumps({
                 "answer": "这是追问的合成回答，按定义、例子、误用三段展开。",
@@ -240,3 +262,10 @@ class TeachingModelAdapter(SyntheticModelAdapter):
                 },
             }],
         }, ensure_ascii=False)}
+
+
+def synthetic_lesson_blueprint():
+    return {"goals":[{"id":"g1","label":"理解本讲知识"}], "stages":[
+        {"phase":phase,"goal_ids":["g1"],"purpose":purpose} for phase,purpose in [
+            ("intuition","先从熟悉情境建立直觉"),("concept","讲解准确概念"),
+            ("example","示范应用"),("summary","总结本讲")]]}

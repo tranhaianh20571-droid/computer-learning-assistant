@@ -10,19 +10,20 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..logging_audit.models import Base
 
-CONFIG_KINDS = ("content_model", "tts", "ocr", "search")
-PROTOCOLS = ("openai", "anthropic", "gemini", "minimax", "paddleocr", "tavily_hikari")
+CONFIG_KINDS = ("content_model", "tts", "ocr", "search", "image_generation")
+PROTOCOLS = ("openai_image", "openai", "anthropic", "gemini", "minimax", "paddleocr", "tavily_hikari")
 CAPABILITIES = ("text", "image", "tool_call", "json_schema", "streaming", "cancel")
 CAPABILITY_STATES = ("unknown", "available", "unavailable")
 CONTENT_CATEGORIES = ("material", "query", "generated_text", "image", "audio_text")
 
 # 协议 → 允许的配置类型
 PROTOCOL_KIND = {
+    "openai_image": "image_generation",
     "openai": "content_model",
     "anthropic": "content_model",
     "gemini": "content_model",
@@ -33,6 +34,7 @@ PROTOCOL_KIND = {
 
 # 各协议默认探测能力集
 PROTOCOL_CAPABILITIES = {
+    "openai_image": ("image_generate",),
     "openai": CAPABILITIES,
     "anthropic": CAPABILITIES,
     "gemini": CAPABILITIES,
@@ -42,7 +44,7 @@ PROTOCOL_CAPABILITIES = {
 }
 
 ADMIN_KINDS = ("ocr", "search")
-USER_KINDS = ("content_model", "tts")
+USER_KINDS = ("content_model", "tts", "image_generation")
 
 
 def utcnow() -> datetime:
@@ -123,6 +125,8 @@ class DisclosureGrantRow(Base):
     scope_snapshot: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    parent_grant_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("disclosure_grants.grant_id", ondelete="CASCADE"), index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

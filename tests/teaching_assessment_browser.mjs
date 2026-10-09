@@ -1,0 +1,72 @@
+import {createRequire} from "node:module";
+import {spawnSync} from "node:child_process";
+import {mkdirSync,writeFileSync} from "node:fs";
+import assert from "node:assert/strict";
+const require=createRequire(import.meta.url);
+const {chromium}=require(process.env.PW_ROOT+"/playwright");
+const backend=process.env.TEST_BACKEND||"http://127.0.0.1:8013",base=process.env.TEST_FRONTEND||"http://127.0.0.1:5173";
+assert.equal(new URL(backend).hostname,"127.0.0.1");assert.notEqual(new URL(backend).port,"8000");
+const output=process.env.TEST_OUTPUT||".backup/teaching-browser";mkdirSync(output,{recursive:true});
+const browser=await chromium.launch({headless:true,...(process.env.TEST_BROWSER?{executablePath:process.env.TEST_BROWSER}:{})});
+const context=await browser.newContext({viewport:{width:1440,height:1000}});
+const guest=await context.request.get(backend+"/api/auth/guest");assert.equal(guest.status(),200);
+const owner=(await guest.json()).user_id;
+const fixture=spawnSync(process.env.TEST_PYTHON||"server/.venv/Scripts/python.exe",["tests/teaching_browser_fixture.py",owner],{encoding:"utf8",env:process.env});
+assert.equal(fixture.status,0,fixture.stderr);const course=JSON.parse(fixture.stdout);
+const page=await context.newPage(),errors=[],checks=[];
+page.on("pageerror",e=>errors.push(e.message));
+page.on("console",message=>{
+ if(message.type()==="error"&&message.text().includes("Attempted to synchronously unmount"))errors.push(message.text());
+});
+await page.route("**/*",async route=>{
+ const url=new URL(route.request().url());
+ if(!["127.0.0.1","localhost"].includes(url.hostname))return route.abort();
+ if(url.pathname.startsWith("/api/"))return route.fulfill({response:await route.fetch({url:backend+url.pathname+url.search})});
+ return route.continue();
+});
+try{
+ await page.goto(base+"/#/course/"+course.course_id);
+ await page.getByRole("button",{name:"开始学习",exact:true}).waitFor();
+ assert.equal(await page.getByRole("button",{name:"与学伴调整规划"}).count(),0);
+ assert(await page.getByRole("button",{name:"开始单元测验"}).isDisabled());checks.push("confirmed_course_locked_and_assessment_gated");
+ await page.getByRole("button",{name:"开始学习",exact:true}).click();
+ await page.locator('[data-segment-no="1"][data-stage-no="1"]').waitFor({timeout:30000});
+ assert.equal(await page.locator(".lw-body").evaluate(n=>getComputedStyle(n).display),"grid");
+ await page.locator(".excalidraw canvas").first().waitFor({state:"visible",timeout:30000});
+ await page.screenshot({path:output+"/intuition.png",fullPage:true});
+ const conv=page.url().split("/").at(-1);
+ const planned=(await (await context.request.get(backend+"/api/teaching/"+conv)).json()).planned_steps;
+ for(let current=2;current<=planned;current++){
+  await page.waitForFunction(async ({backend,conv,current})=>(await (await fetch(backend+"/api/teaching/"+conv,{credentials:"include"})).json()).steps.some(s=>s.step_no===current),{backend,conv,current},{timeout:30000});
+  await page.getByRole("button",{name:"继续讲解",exact:true}).click();
+  await page.locator(`[data-segment-no="${current}"]`).waitFor({timeout:30000});
+ }
+ await page.getByRole("button",{name:"确认本讲已学完"}).waitFor();checks.push("intuition_concept_example_summary_and_finish");
+ await page.setViewportSize({width:390,height:844});
+ await page.getByRole("tab",{name:"文字",exact:true}).click();
+ assert(await page.locator(".tx-col").isVisible());
+ await page.getByRole("tab",{name:"板书",exact:true}).click();
+ assert(await page.locator(".bd-col").isVisible());
+ assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+ checks.push("classroom_mobile_pane_switch");
+ await page.setViewportSize({width:1440,height:1000});
+ await page.getByRole("button",{name:"确认本讲已学完"}).click();
+ await page.getByRole("button",{name:"开始单元测验"}).waitFor();
+ await page.getByRole("button",{name:"开始单元测验"}).click();
+ await page.locator(".assessment-question").nth(4).waitFor({timeout:30000});
+ assert.equal(await page.getByText("参考答案",{exact:true}).count(),0);
+ for(let i=0;i<3;i++)await page.locator(".assessment-question").nth(i).locator("input").first().check();
+ await page.getByLabel("第4题答案",{exact:true}).fill("用标签找到对应内容");
+ await page.getByLabel("第5题答案",{exact:true}).fill("通过键读取值");
+ await page.getByRole("button",{name:"提交答案",exact:true}).click();
+ await page.getByText("本次得分：80 / 100",{exact:true}).waitFor({timeout:30000});checks.push("private_questions_and_objective_open_grading");
+ await page.locator(".assessment-feedback").scrollIntoViewIfNeeded();
+ await page.screenshot({path:output+"/assessment.png",fullPage:true});
+ await page.reload();await page.getByRole("button",{name:"查看单元测验"}).click();
+ await page.getByText("本次得分：80 / 100",{exact:true}).waitFor();checks.push("assessment_result_refresh_restore");
+ await page.setViewportSize({width:390,height:844});await page.reload();
+ await page.getByRole("button",{name:"查看单元测验"}).click();await page.getByText("本次得分：80 / 100",{exact:true}).waitFor();
+ assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks.push("mobile_assessment_layout");
+ assert.deepEqual(errors,[]);writeFileSync(output+"/teaching-browser-result.json",JSON.stringify({checks,pageErrors:errors,synthetic:true},null,2));
+ console.log(JSON.stringify({checks,pageErrors:errors}));
+}finally{await page.unrouteAll({behavior:"ignoreErrors"});await browser.close();}

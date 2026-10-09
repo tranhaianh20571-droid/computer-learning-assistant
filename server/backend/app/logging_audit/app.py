@@ -18,7 +18,7 @@ from .db import Database, get_db, set_db
 from .logger import MemoryLogStream, StructuredLogger
 from .repositories import PgAuditLog, PgTaskEventStore
 from .task_events import AccessDeniedError, EventsExpiredError
-from .trace import ensure_trace, trace_context
+from .trace import ensure_trace, trace_context, business_span
 
 
 class AppState:
@@ -80,7 +80,7 @@ def create_app(state: Optional[AppState] = None) -> FastAPI:
     @app.middleware("http")
     async def trace_middleware(request: Request, call_next):  # noqa: ANN001
         ctx = ensure_trace(request.headers.get("traceparent"))
-        with trace_context(ctx):
+        with trace_context(ctx), business_span("receive"):
             request.state.trace_id = ctx.trace_id
             request.state.span_id = ctx.span_id
             response = await call_next(request)

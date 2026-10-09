@@ -10,6 +10,8 @@ from __future__ import annotations
 import base64
 import ipaddress
 import socket
+from contextlib import contextmanager
+from time import monotonic
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -126,7 +128,52 @@ class AdapterBase:
     def _client_or_new(self) -> httpx.Client:
         if self._client is not None:
             return self._client
-        return httpx.Client(timeout=self.timeout, follow_redirects=False)
+        self._client = httpx.Client(timeout=self.timeout, follow_redirects=False)
+        return self._client
+
+    @contextmanager
+    def _http_client(self):
+        key = getattr(self, "http_pool_key", None)
+        if key and self._client is None:
+            from .http_pool import HTTP_CLIENTS
+            with HTTP_CLIENTS.borrow(key) as client:
+                yield client
+        else:
+            yield self._client_or_new()
+
+    @contextmanager
+    def _stream_request(self, method, url, **kwargs):
+        from .request_metrics import observe
+        started = monotonic()
+        first = None
+        failure = None
+        try:
+            with self._http_client() as client:
+                with client.stream(method, url, timeout=self.timeout, **kwargs) as response:
+                    if not 200 <= response.status_code < 300:
+                        self._map_status(response.status_code, {"raw": response.read()[:256]})
+                    def lines():
+                        nonlocal first
+                        size = 0
+                        for line in response.iter_lines():
+                            size += len(line.encode("utf8"))
+                            if size > self.max_response_bytes:
+                                raise AdapterError("response_too_large", status=502)
+                            if first is None and line.startswith("data:"):
+                                first = max(0, int((monotonic()-started)*1000))
+                            yield line
+                    yield lines()
+        except httpx.TimeoutException as exc:
+            failure = AdapterError("timeout", status=504)
+            raise failure from exc
+        except httpx.HTTPError as exc:
+            failure = AdapterError("connection_error", status=502)
+            raise failure from exc
+        except Exception as exc:
+            failure = exc
+            raise
+        finally:
+            observe(self, started, first_chunk_ms=first, exc=failure)
 
     def close(self) -> None:
         if self._owns_client and self._client is not None:
@@ -141,27 +188,36 @@ class AdapterBase:
         json_body: Optional[dict] = None,
         params: Optional[dict] = None,
     ) -> tuple[int, Any, dict]:
-        client = self._client_or_new()
+        from .request_metrics import observe
+        started = monotonic()
+        failure = None
         try:
-            response = client.request(
-                method,
-                url,
-                json=json_body,
-                params=params,
-                headers={**self.headers, "Accept": "application/json"},
-            )
+            with self._http_client() as client:
+                response = client.request(method, url, json=json_body, params=params,
+                    headers={**self.headers, "Accept": "application/json"}, timeout=self.timeout)
+            if len(response.content) > self.max_response_bytes:
+                raise AdapterError("response_too_large", status=502)
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {"raw": response.content[:512].decode("utf8", errors="replace")}
+            # Keep the response contract for callers, but classify HTTP failures here too.
+            try:
+                self._map_status(response.status_code, payload)
+            except AdapterError as exc:
+                failure = exc
+            return response.status_code, payload, dict(response.headers)
         except httpx.TimeoutException as exc:
-            raise AdapterError("timeout", status=504) from exc
+            failure = AdapterError("timeout", status=504)
+            raise failure from exc
         except httpx.HTTPError as exc:
-            raise AdapterError("connection_error", status=502) from exc
-        content = response.content
-        if len(content) > self.max_response_bytes:
-            raise AdapterError("response_too_large", status=502)
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = {"raw": content[:512].decode("utf-8", errors="replace")}
-        return response.status_code, payload, dict(response.headers)
+            failure = AdapterError("connection_error", status=502)
+            raise failure from exc
+        except Exception as exc:
+            failure = exc
+            raise
+        finally:
+            observe(self, started, exc=failure)
 
     def _map_status(self, status: int, payload: Any) -> None:
         if 200 <= status < 300:
@@ -192,9 +248,9 @@ class AdapterBase:
                 return ProbeResult(capability, "unavailable", "unsupported")
             if exc.code in ("credential_invalid",):
                 return ProbeResult(capability, "unavailable", "credential_invalid")
-            return ProbeResult(capability, "unavailable", exc.code)
+            return ProbeResult(capability, "unknown", exc.code)
         except Exception:  # noqa: BLE001 - 供应商异常不外泄
-            return ProbeResult(capability, "unavailable", "error")
+            return ProbeResult(capability, "unknown", "error")
 
     def probe_all(self) -> dict[str, dict]:
         return {cap: self.probe(cap).as_dict() for cap in self.capabilities}

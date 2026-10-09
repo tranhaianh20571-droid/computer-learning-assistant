@@ -27,6 +27,9 @@ from ..prompts.service import PromptService, PromptUnavailable
 from ..slice1.models import ServiceConfigRow
 from ..tasks.service import Lease, LeaseError, TaskService
 from .drafts import DraftService
+from ..agents.contracts import RoutePlanningInput, OutlinePlanningInput
+from ..agents.runner import deps_for_source
+from pydantic_ai.exceptions import ModelRetry
 from .errors import PlanningError, WaitStateSignal, error
 from .models import (
     CourseRow,
@@ -40,6 +43,7 @@ from .model_runner import ModelCapabilityGate, run_structured
 from .outputs import (
     OutlineCandidate,
     RouteCandidate,
+    OUTLINE_LIMITS,
     validate_content_json,
     validate_outline_candidate,
     validate_route_candidate,
@@ -55,35 +59,7 @@ PLAN_PROMPTS = {
     "planning_revise": "planning_revise_v1",
 }
 
-# 生成前访谈：轮次硬上限 4（<5）；第一轮规则问卷（范围并入第一题，合并旧的范围澄清），
-# 后续轮次由模型按已答内容追问，失败/无必要 → 直接进入生成（降级不阻塞）。
-MAX_INTAKE_ROUNDS = 4
-
-INTAKE_ROUND1 = [
-    {
-        "question_id": "scope", "question": "这次想怎么规划？", "kind": "single", "skippable": False,
-        "options": [
-            {"key": "course", "label": "单门课程", "detail": "聚焦一个主题，一份大纲若干讲次"},
-            {"key": "route", "label": "多课程路线", "detail": "覆盖一个领域，分阶段与先修关系"},
-        ],
-    },
-    {
-        "question_id": "foundation", "question": "你在相关领域的基础如何？", "kind": "single", "skippable": True,
-        "options": [
-            {"key": "zero", "label": "零基础", "detail": "从概念讲起"},
-            {"key": "some", "label": "有一些概念", "detail": "需要系统梳理"},
-            {"key": "solid", "label": "较熟练", "detail": "查漏补缺、进阶为主"},
-        ],
-    },
-    {
-        "question_id": "depth", "question": "希望学到多细？", "kind": "single", "skippable": True,
-        "options": [
-            {"key": "concept", "label": "概念入门", "detail": "知道是什么、什么时候用"},
-            {"key": "practice", "label": "工程实战", "detail": "能上手做项目"},
-            {"key": "deep", "label": "原理深挖", "detail": "底层为什么这么设计"},
-        ],
-    },
-]
+# 访谈问题总数由planning.intake的4～6题协议管理。
 
 
 class PlanningService:
@@ -112,6 +88,10 @@ class PlanningService:
         self.audit = audit
         self.model_adapter_factory = model_adapter_factory
         self.search_adapter_factory = search_adapter_factory
+        from .workspace import PlanningWorkspace
+        from .background import PlanningBackground
+        self.workspace = PlanningWorkspace(self)
+        self.background = PlanningBackground(self)
 
     # ------------------------------------------------------------------
     # 任务创建（四入口）
@@ -135,6 +115,12 @@ class PlanningService:
             raise error("invalid_field", f"unknown task kind {task_kind}")
         if planning_scope not in ("auto", "course", "route"):
             raise error("invalid_field", f"unknown planning_scope {planning_scope}")
+        target_kind = "course" if task_kind == "outline_generate" or planning_scope == "course" else "route"
+        if target_id:
+            from .locking import planning_target
+            with self.db.session() as sess:
+                planning_target(sess, target_kind, target_id, owner_user_id,
+                                mutable=True, allow_abandoned=True)
         owned_materials = validate_material_ownership(self.db, owner_user_id, material_ids or [])
         signals_payload = {
             "cross_domain_goal": bool(signals and signals.cross_domain_goal),
@@ -167,6 +153,23 @@ class PlanningService:
                 "material_ids": owned_materials,
             }
         with self.db.session() as sess:
+            # A new explicit planning task starts a fresh draft. Keep the old
+            # task row as an audit record, then detach and remove only its
+            # unconfirmed draft so it cannot be reused by the new task.
+            if target_id:
+                from .models import PlanningDraftRow
+                abandoned = list(sess.scalars(select(PlanningTaskStateRow).where(
+                    PlanningTaskStateRow.owner_user_id == owner_user_id,
+                    PlanningTaskStateRow.target_kind == target_kind,
+                    PlanningTaskStateRow.target_id == target_id,
+                    PlanningTaskStateRow.abandoned_at.is_not(None),
+                    PlanningTaskStateRow.draft_id.is_not(None),
+                ).with_for_update()))
+                for old_state in abandoned:
+                    old_draft = sess.get(PlanningDraftRow, old_state.draft_id)
+                    if old_draft is not None:
+                        sess.delete(old_draft)
+                    old_state.draft_id = None
             sess.add(
                 PlanningTaskStateRow(
                     task_id=task_id,
@@ -190,6 +193,9 @@ class PlanningService:
                 allow_fallback=True,
                 source="local_fallback",
             )
+            if task_kind in ("route_generate", "planning_revise"):
+                self.prompts.bind_for_task(task_id, "outline_refine_v1")
+            if task_kind=="route_generate":self.prompts.bind_for_task(task_id,"learning_interview_v3")
         except PromptUnavailable as exc:
             self.events.record(
                 task_id, stage="generate", status="failed",
@@ -208,14 +214,27 @@ class PlanningService:
     # ------------------------------------------------------------------
     def run_task(self, task_id: str, *, lease_owner: str = "planning-worker") -> dict:
         """领取并执行规划任务；返回最终状态摘要（供 API/测试断言）。"""
-        lease = self.tasks.claim(task_id, lease_owner=lease_owner, lease_seconds=120)
         state = self._state(task_id)
-        prompt = self.prompts.resolve_for_task(task_id)
+        lease = self.tasks.claim(task_id, lease_owner=lease_owner, lease_seconds=120)
         try:
             kind = self.tasks.get_task(task_id)["kind"]
-            summary = self._pipeline(lease, task_id, kind, state, prompt)
-            self._submit(lease, "generate", "succeeded")
-            return summary | {"task_status": "succeeded"}
+            try:
+                prompt = self.prompts.resolve_for_task(task_id, PLAN_PROMPTS[kind])
+            except PromptUnavailable:
+                raise error("PROMPT_UNAVAILABLE")
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                from contextvars import copy_context
+                future = pool.submit(copy_context().run, self._pipeline, lease, task_id, kind, state, prompt)
+                while True:
+                    try:
+                        summary = future.result(timeout=30)
+                        break
+                    except FutureTimeout:
+                        self.tasks.heartbeat(lease, lease_seconds=120)
+            status = "partial" if summary.get("incomplete") else "succeeded"
+            self.tasks.submit_result(lease, stage="generate", status=status, duration_ms=0, preserve_partial=True)
+            return summary | {"task_status": status}
         except WaitStateSignal as wait:
             self._enter_wait(task_id, wait)
             self.events.record(
@@ -243,13 +262,15 @@ class PlanningService:
             row = sess.get(PlanningTaskStateRow, task_id)
             if row is None:
                 raise error("task_not_found", status=404)
+            if row.abandoned_at:
+                raise error("TASK_CANCELLED", status=409)
             sess.expunge(row)
             return row
 
     def _enter_wait(self, task_id: str, wait: WaitStateSignal) -> None:
         with self.db.session() as sess:
-            row = sess.get(PlanningTaskStateRow, task_id)
-            if row is not None:
+            row = sess.get(PlanningTaskStateRow, task_id, with_for_update=True)
+            if row is not None and not row.abandoned_at:
                 row.wait_state = wait.wait_state
                 row.clarification_question = (wait.question or "")[:300]
                 row.updated_at = utcnow()
@@ -258,7 +279,26 @@ class PlanningService:
     def _pipeline(self, lease: Lease, task_id: str, kind: str, state: PlanningTaskStateRow, prompt: dict) -> dict:
         material_ids = load_json_field(state.material_ids_json, [])
 
-        # 0. 生成前访谈（route_generate 入口；范围并入第一轮；上限 4 轮，失败降级直接生成）
+        repair = load_json_field(state.scope_signals_json, {}).get("refine_draft")
+        if repair:
+            draft = self.drafts.get_draft(repair["draft_id"], actor_id=state.owner_user_id)
+            if draft["revision"] != repair["revision"]:
+                raise error("DRAFT_REVISION_MISMATCH", status=409)
+            content = draft["content"]
+            self._fill_route_units(state, task_id, content, repair.get("course_index"), lease=lease)
+            summary = validate_content_json("route", content)
+            result = self.drafts.apply_candidate(
+                owner_user_id=state.owner_user_id, target_id=state.target_id,
+                candidate_kind="planning_revise", content=content, source_task_id=task_id, lease=lease,
+                base_draft_revision=repair["revision"],
+            )
+            with self.db.session() as sess:
+                sess.get(PlanningTaskStateRow, task_id).draft_id = draft["draft_id"]
+                sess.commit()
+            return {"draft": {**result, "draft_id": draft["draft_id"]}, "summary": summary,
+                    "incomplete": any(not c.get("units") for st in content["stages"] for c in st["courses"])}
+
+        # 0. AI访谈：累计4～6题，内部判断范围，失败保留历史等待重试。
         intake_profile = None
         if kind == "route_generate":
             intake_profile = self._intake_gate(lease, task_id, state)
@@ -298,9 +338,37 @@ class PlanningService:
 
         # 4-6. 模型候选 → 校验 → 草稿/候选落库
         target_id = state.target_id
-        if kind in ("route_generate", "planning_revise"):
+        if (kind == "route_generate" and state.resolved_scope != "course") or (kind == "planning_revise" and state.resolved_scope == "route"):
             return self._generate_route(lease, task_id, state, target_id, prompt, search_outcome, manifest)
+        if kind=="route_generate" and state.resolved_scope=="course":
+            target_id=self._course_for_interview(state,task_id)
+            prompt=self.prompts.resolve_for_task(task_id,"outline_refine_v1")
         return self._generate_outline(lease, task_id, state, target_id, prompt, search_outcome, manifest)
+
+    def _course_for_interview(self,state,task_id):
+        with self.db.session() as sess:
+            from .locking import planning_target
+            planning_target(sess,state.target_kind,state.target_id,state.owner_user_id,mutable=True)
+            row=sess.get(PlanningTaskStateRow,task_id,with_for_update=True)
+            if row.abandoned_at:raise error("TASK_CANCELLED",status=409)
+            if row.target_kind=="course":return row.target_id
+            route=sess.get(LearningRouteRow,row.target_id)
+            if not route or route.deleted_at or route.owner_user_id!=state.owner_user_id:raise error("route_not_found",status=404)
+            course_id="crs_"+uuid.uuid4().hex[:12]
+            sess.add(CourseRow(course_id=course_id,owner_user_id=state.owner_user_id,title_ref=route.title_ref,scenario=route.scenario))
+            row.target_kind="course";row.target_id=course_id
+            source_route_id = route.route_id
+            covers = getattr(self, "cover_service", None)
+            reused = covers.reuse_cover("route", source_route_id, "course", course_id,
+                state.owner_user_id, session=sess) if covers else None
+            if not route.current_route_version_id:route.deleted_at=utcnow()
+            state.target_kind="course";state.target_id=course_id
+        if covers:
+            if reused and reused.get("task_id"):
+                covers.kick(reused["task_id"])
+            elif reused is None:
+                covers.enqueue_cover("course", course_id, state.owner_user_id, "scope-local", automatic=True)
+        return course_id
 
     def _attempt_search(self, task_id: str, lease: Lease, state: PlanningTaskStateRow) -> Optional[SearchOutcome]:
         """真实尝试搜索；失败 → 等待决策（已决策 offline 时放行）。"""
@@ -329,66 +397,97 @@ class PlanningService:
                 raise error("route_not_found", status=404)
         adapter = self._require_model_adapter(state.owner_user_id, task_id)
         messages = self._compose_messages("route_generate", state, prompt, search_outcome)
-        from ..agents.runner import run_structured_agent
+        from ..agents.roles import planning_agent
         from ..agents.tools import make_search_materials_tool, planning_title_output_validator
 
         material_ids = load_json_field(state.material_ids_json, [])
         tools = [make_search_materials_tool(self.retrieval, owner_user_id=state.owner_user_id,
                                             material_ids=material_ids)] if material_ids else None
-        run = run_structured_agent(
-            adapter, RouteCandidate, messages,
-            tool_name="submit_route_candidate", tools=tools,
-            output_validator=planning_title_output_validator(),
+        title_validator = planning_title_output_validator(route.title_ref)
+        def validate(ctx, output):
+            output = title_validator(ctx, output)
+            try: validate_route_candidate(output)
+            except PlanningError as exc: raise ModelRetry(exc.code) from None
+            return output
+        run = planning_agent.generate_route(
+            adapter, RoutePlanningInput.from_messages(messages), deps_for_source(adapter),
+            tools=tools, output_validator=validate,
         )
         candidate = run.payload
         summary = validate_route_candidate(candidate)
         content = candidate.model_dump()
-        # 逐课细化（v2）：骨架课程 → 每课并行补齐单元/讲次；单课失败降级为课程粒度。
-        # 模板走本地后备快照（同 intake_followup_v1 口径，不入任务绑定）。
-        try:
-            refine_prompt = self.prompts.load_local_template("outline_refine_v1")
-        except Exception:  # noqa: BLE001 — 模板缺失时整图退化为课程粒度
-            refine_prompt = None
-        if refine_prompt is not None:
-            model_courses = [c for s in candidate.stages for c in s.courses]
-            content_courses = [c for s in content["stages"] for c in s["courses"]]
-            jobs = [(m, d) for m, d in zip(model_courses, content_courses) if not d.get("units")]
-            if jobs:
-                from concurrent.futures import ThreadPoolExecutor
-
-                with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
-                    futures = {
-                        pool.submit(self._refine_course_units, adapter, state, m, refine_prompt): d
-                        for m, d in jobs
-                    }
-                    for fut, d_course in futures.items():
-                        try:
-                            d_course["units"] = fut.result()
-                        except Exception:  # noqa: BLE001 — 该课降级为课程粒度，不阻塞整图
-                            pass
-            summary = validate_content_json("route", content)
+        self._fill_route_units(state, task_id, content, lease=lease)
+        summary = validate_content_json("route", content)
+        incomplete = any(not c.get("units") for st in content["stages"] for c in st["courses"])
         draft_result = self.drafts.apply_candidate(
             owner_user_id=state.owner_user_id,
             target_id=target_id,
             candidate_kind="route_generate",
             content=content,
-            source_task_id=task_id,
+            source_task_id=task_id, lease=lease,
         )
         self.events.record(
-            task_id, stage="generate", status="succeeded",
+            task_id, stage="generate", status="partial" if incomplete else "succeeded",
             template_params={"mode": run.mode},
-            progress_current=summary["course_count"],
+            progress_current=sum(bool(c.get("units")) for st in content["stages"] for c in st["courses"]),
             generation=lease.generation, attempt=lease.attempt,
         )
         with self.db.session() as sess:
             row = sess.get(PlanningTaskStateRow, task_id)
             row.draft_id = draft_result.get("draft_id")
             sess.commit()
-        return {"mode": run.mode, "degraded_from": run.degraded_from, "summary": summary, "draft": draft_result}
+        return {"mode": run.mode, "degraded_from": run.degraded_from, "summary": summary, "draft": draft_result, "incomplete": incomplete}
 
-    def _refine_course_units(self, adapter, state, course, prompt) -> list[dict]:
+    def _fill_route_units(self, state, task_id, content, course_index=None, lease=None):
+        courses = [c for st in content["stages"] for c in st["courses"]]
+        content["structure_version"] = 2
+        try:
+            prompt = self.prompts.resolve_for_task(task_id, "outline_refine_v1")
+        except PromptUnavailable:
+            # Legacy task: bind once on explicit execution, never on page reads.
+            try:
+                self.prompts.bind_for_task(task_id, "outline_refine_v1")
+                prompt = self.prompts.resolve_for_task(task_id, "outline_refine_v1")
+            except PromptUnavailable:
+                for c in courses:
+                    if not c.get("units"):
+                        c.update(refinement_status="failed", refinement_error="PROMPT_UNAVAILABLE")
+                return
+        adapter = self._require_model_adapter(state.owner_user_id, task_id)
+        used = sum(len(u["lessons"]) for c in courses for u in c.get("units", []))
+        pending = [i for i, c in enumerate(courses) if not c.get("units")]
+        for index in pending:
+            self._state(task_id)  # Do not issue further calls after abandonment.
+            c = courses[index]
+            if course_index is not None and index != course_index:
+                continue
+            budget = (OUTLINE_LIMITS["max_lessons"] - used) // len(pending)
+            try:
+                if budget < 1:
+                    raise error("INVALID_OUTLINE_STRUCTURE")
+                from .outputs import RouteCourseOut
+                result = self._refine_course_units(adapter, state, RouteCourseOut.model_validate(c), prompt, budget)
+                c["units"] = result["units"]
+                c["prerequisites"] = result["prerequisites"]
+                c["refinement_status"] = "ready"
+                c.pop("refinement_error", None)
+            except Exception as exc:
+                from ..agents.limits import allows_content_fallback
+                if not allows_content_fallback(exc):
+                    raise
+                c["refinement_status"] = "failed"
+                c["refinement_error"] = "INVALID_OUTLINE_STRUCTURE"
+            self.events.record(task_id, stage="generate", status="succeeded" if c.get("units") else "partial",
+                               progress_current=sum(bool(x.get("units")) for x in courses),
+                               error_code=None if c.get("units") else "INVALID_OUTLINE_STRUCTURE",
+                               generation=lease.generation if lease else None, attempt=lease.attempt if lease else None)
+
+    def _refine_course_units(self, adapter, state, course, prompt, budget=120) -> dict:
         """逐课细化：按课程名/目标产出单元/讲次（OutlineCandidate）；失败抛受控错误。"""
-        template = prompt.get("template_snapshot", "")
+        template = prompt.get("template_snapshot") or prompt.get("template", "")
+        if not template.strip():
+            raise error("PROMPT_UNAVAILABLE")
+        template += f"\n本课程讲次总数不得超过 {budget}，按范围调整单元和讲次数量，不得以省略内容满足预算。"
         user_content = (
             f"{template}\n课程名称：{course.title}\n课程学习目标：{course.goal or course.title}\n"
             "注意：所有 title/goal 字段只写自然语言，不得出现 course_、unit_ 等内部标识符，"
@@ -396,23 +495,39 @@ class PlanningService:
         )
         intake = load_json_field(state.intake_json, None)
         if intake and intake.get("answers"):
-            profile = self._profile_text(intake["answers"])
+            profile = self._profile_text(intake)
             if profile:
                 user_content += f"\n学习者画像（来自生成前访谈）：{profile}"
         messages = [
             {"role": "system", "content": "你是学习规划助手。只输出符合要求的 JSON。"},
             {"role": "user", "content": user_content},
         ]
-        from ..agents.runner import run_structured_agent
+        from ..agents.roles import planning_agent
         from ..agents.tools import planning_title_output_validator
 
-        run = run_structured_agent(
-            adapter, OutlineCandidate, messages,
-            tool_name="submit_outline_candidate", stage="refine",
-            output_validator=planning_title_output_validator(),
+        title_validator = planning_title_output_validator(course.title)
+        def validate(ctx, output):
+            output = title_validator(ctx, output)
+            try: validate_outline_candidate(output)
+            except PlanningError as exc: raise ModelRetry(exc.code) from None
+            lessons = [l for u in output.units for l in u.lessons]
+            if len(lessons) > budget or any(not l.goal.strip() for l in lessons):
+                raise ModelRetry("INVALID_OUTLINE_STRUCTURE")
+            if len({l.title.strip().casefold() for l in lessons}) != len(lessons):
+                raise ModelRetry("duplicate lesson titles")
+            return output
+        run = planning_agent.refine_outline(
+            adapter, OutlinePlanningInput.from_messages(messages), deps_for_source(adapter),
+            stage="refine", output_validator=validate,
         )
         validate_outline_candidate(run.payload)
-        return [u.model_dump() for u in run.payload.units]
+        lessons = [l for u in run.payload.units for l in u.lessons]
+        if len(lessons) > budget or any(not l.goal.strip() for l in lessons):
+            raise error("INVALID_OUTLINE_STRUCTURE")
+        titles = [l.title.strip().casefold() for l in lessons]
+        if len(set(titles)) != len(titles):
+            raise error("INVALID_OUTLINE_STRUCTURE")
+        return run.payload.model_dump()
 
     # ------------------------------------------------------------------
     # 生成：大纲（含由路线节点展开）
@@ -430,16 +545,21 @@ class PlanningService:
                         "outline_version_id": course.current_outline_version_id}
         adapter = self._require_model_adapter(state.owner_user_id, task_id)
         messages = self._compose_messages("outline_generate", state, prompt, search_outcome)
-        from ..agents.runner import run_structured_agent
+        from ..agents.roles import planning_agent
         from ..agents.tools import make_search_materials_tool, planning_title_output_validator
 
         material_ids = load_json_field(state.material_ids_json, [])
         tools = [make_search_materials_tool(self.retrieval, owner_user_id=state.owner_user_id,
                                             material_ids=material_ids)] if material_ids else None
-        run = run_structured_agent(
-            adapter, OutlineCandidate, messages,
-            tool_name="submit_outline_candidate", tools=tools,
-            output_validator=planning_title_output_validator(),
+        title_validator = planning_title_output_validator(course.title_ref)
+        def validate(ctx, output):
+            output = title_validator(ctx, output)
+            try: validate_outline_candidate(output)
+            except PlanningError as exc: raise ModelRetry(exc.code) from None
+            return output
+        run = planning_agent.generate_outline(
+            adapter, OutlinePlanningInput.from_messages(messages), deps_for_source(adapter),
+            tools=tools, output_validator=validate,
         )
         candidate = run.payload
         summary = validate_outline_candidate(candidate)
@@ -449,7 +569,7 @@ class PlanningService:
             target_id=target_id,
             candidate_kind="outline_generate",
             content=content,
-            source_task_id=task_id,
+            source_task_id=task_id, lease=lease,
             base_draft_revision=0,
         )
         self.events.record(
@@ -465,6 +585,11 @@ class PlanningService:
         return {"mode": run.mode, "degraded_from": run.degraded_from, "summary": summary, "draft": draft_result}
 
     def _require_model_adapter(self, owner_user_id: str, task_id: str) -> Any:
+        from ..tasks.service import LearningTaskRow
+        with self.db.session() as sess:
+            execution = sess.get(LearningTaskRow, task_id)
+            if execution is not None and execution.cancel_requested:
+                raise error("TASK_CANCELLED", status=409)
         if self.model_adapter_factory is None:
             raise error("MODEL_CAPABILITY_UNAVAILABLE", "no model adapter configured")
         adapter = self.model_adapter_factory(owner_user_id, task_id)
@@ -478,7 +603,7 @@ class PlanningService:
         if state.target_id:
             with self.db.session() as sess:
                 row = (sess.get(CourseRow, state.target_id)
-                       if state.planning_scope == "course"
+                       if state.target_kind == "course"
                        else sess.get(LearningRouteRow, state.target_id))
             label = (row.title_ref or "").strip() if row is not None else ""
         return label or "（尚未指定主题，请依据访谈画像自行拟定合适的主题）"
@@ -496,7 +621,7 @@ class PlanningService:
         )
         intake = load_json_field(state.intake_json, None)
         if intake and intake.get("answers"):
-            profile = self._profile_text(intake["answers"])
+            profile = self._profile_text(intake)
             if profile:
                 user_content += f"\n学习者画像（来自生成前访谈）：{profile}"
         return [
@@ -505,123 +630,25 @@ class PlanningService:
         ]
 
     # ------------------------------------------------------------------
-    # 生成前访谈（v2）：规则第一轮 + 模型追问（上限 MAX_INTAKE_ROUNDS 轮）
+    # AI访谈：完整历史、问题额度与学习者画像
     # ------------------------------------------------------------------
-    def _intake_gate(self, lease: Lease, task_id: str, state: PlanningTaskStateRow) -> Optional[dict]:
-        """无访谈记录 → 抛第一轮问卷；已有答案 → 视需要追问或完成（返回学习者答案）。"""
-        data = load_json_field(state.intake_json, None)
-        if data and data.get("done"):
-            return {"answers": data.get("answers", [])}
-        round_no = int(data.get("round", 0)) if data else 0
-        if round_no >= MAX_INTAKE_ROUNDS:
-            self._intake_mark_done(task_id, data or {})
-            return {"answers": (data or {}).get("answers", [])}
-        if not data:
-            questions = INTAKE_ROUND1
-            self._intake_save(task_id, {"round": 1, "questions": questions, "answers": [], "done": False})
-            raise WaitStateSignal(
-                "awaiting_intake",
-                question=f"{len(questions)} 个问题，了解你的基础与期望（可跳过）",
-            )
-        questions = self._intake_followups(task_id, state, data.get("answers", []))
-        if not questions:
-            self._intake_mark_done(task_id, data)
-            return {"answers": data.get("answers", [])}
-        self._intake_save(task_id, {**data, "round": round_no + 1, "questions": questions, "done": False})
-        raise WaitStateSignal(
-            "awaiting_intake",
-            question=f"还有 {len(questions)} 个问题，帮助把规划调得更准（可跳过）",
-        )
+    def _intake_gate(self,lease,task_id,state):
+        from .intake import IntakeService
+        return IntakeService(self).gate(lease,task_id,state)
 
-    def _intake_save(self, task_id: str, payload: dict) -> None:
+    def _intake_save(self,task_id,payload):
         with self.db.session() as sess:
-            row = sess.get(PlanningTaskStateRow, task_id)
-            if row is not None:
-                row.intake_json = json.dumps(payload, ensure_ascii=False)
-                row.updated_at = utcnow()
-                sess.commit()
+            row=sess.get(PlanningTaskStateRow,task_id)
+            if row:
+                row.intake_json=json.dumps(payload,ensure_ascii=False);row.updated_at=utcnow()
 
-    def _intake_mark_done(self, task_id: str, data: dict) -> None:
-        self._intake_save(task_id, {**data, "done": True})
+    def _profile_text(self,intake):
+        from .intake import profile_text
+        return profile_text(intake)
 
-    def _intake_followups(self, task_id: str, state: PlanningTaskStateRow, answers: list[dict]) -> list[dict]:
-        """模型追问：失败/无 adapter/无必要 → 返回空（降级直接生成）。"""
-        if self.model_adapter_factory is None:
-            return []
-        try:
-            adapter = self._require_model_adapter(state.owner_user_id, task_id)
-        except PlanningError:
-            return []
-        profile = self._profile_text(answers)
-        # S3（消 D6）：访谈追问指令走模板快照（intake_followup_v1，SHA-256 校验）
-        template = self.prompts.load_local_template("intake_followup_v1")["template"]
-        body = template.format(profile=profile)
-        system_line, _, user_body = body.partition("\n")
-        messages = [
-            {"role": "system", "content": system_line},
-            {"role": "user", "content": user_body.lstrip("\n")},
-        ]
-        try:
-            from ..agents.runner import run_structured_agent
-
-            run = run_structured_agent(
-                adapter, IntakeQuestionSet, messages,
-                tool_name="submit_intake_questions",
-            )
-        except PlanningError:
-            return []
-        return validate_intake_question_set(run.payload)["questions"]
-
-    def _profile_text(self, answers: list[dict]) -> str:
-        labels = {
-            q["question_id"]: {o["key"]: o["label"] for o in q["options"]}
-            for q in INTAKE_ROUND1
-        }
-        parts: list[str] = []
-        for a in answers:
-            qid = str(a.get("question_id", ""))
-            names = labels.get(qid, {})
-            sel = "、".join(names.get(x, x) for x in a.get("selections", []))
-            free = a.get("free_text") or ""
-            parts.append(f"{qid}={sel}{('；补充：' + free) if free else ''}")
-        return "；".join(parts)[:800]
-
-    def decide_intake(self, task_id: str, *, actor_id: str, answers: list[dict]) -> dict:
-        """记录访谈答案；范围题答案直接落 resolved_scope（合并旧的范围澄清）。"""
-        if not isinstance(answers, list) or not answers or len(answers) > 8:
-            raise error("invalid_field", "answers must be 1..8 items")
-        cleaned: list[dict] = []
-        scope_choice: Optional[str] = None
-        for a in answers:
-            qid = str(a.get("question_id", ""))[:40]
-            if not qid:
-                raise error("invalid_field", "missing question_id")
-            sels = [str(x)[:40] for x in (a.get("selections") or [])][:8]
-            free = str(a.get("free_text") or "")[:300]
-            if not sels and not free:
-                continue  # 跳过的题不记录
-            cleaned.append({"question_id": qid, "selections": sels, "free_text": free})
-            if qid == "scope" and sels and sels[0] in RESOLVED_SCOPES:
-                scope_choice = sels[0]
-        if not cleaned:
-            raise error("invalid_field", "no answered questions")
-        with self.db.session() as sess:
-            row = sess.get(PlanningTaskStateRow, task_id)
-            if row is None or row.owner_user_id != actor_id:
-                raise error("task_not_found", status=404)
-            if row.wait_state != "awaiting_intake":
-                raise error("state_invalid", "task not awaiting intake", status=409)
-            data = load_json_field(row.intake_json, {"round": 1, "questions": [], "answers": []})
-            data["answers"] = data.get("answers", []) + cleaned
-            # round = 当前问题轮次（由 _intake_gate 推进）；此处只追加答案
-            row.intake_json = json.dumps(data, ensure_ascii=False)
-            row.wait_state = None
-            row.clarification_question = None
-            if scope_choice:
-                row.resolved_scope = scope_choice
-            row.updated_at = utcnow()
-            sess.commit()
-        return {"task_id": task_id, "round": data["round"], "wait_state": None}
+    def decide_intake(self,task_id,*,actor_id,answers):
+        from .intake import IntakeService
+        return IntakeService(self).decide(task_id,actor_id,answers)
 
     # ------------------------------------------------------------------
     # 用户决策恢复
@@ -663,8 +690,32 @@ class PlanningService:
             row = sess.get(PlanningTaskStateRow, task_id)
             if row is None or row.owner_user_id != actor_id:
                 raise error("task_not_found", status=404)
+            from ..tasks.service import LearningTaskRow
+            from ..logging_audit.models import TaskStateRow
+            execution = sess.get(LearningTaskRow, task_id)
+            event = sess.get(TaskStateRow, task_id)
+            parent = sess.get(CourseRow if row.target_kind == "course" else LearningRouteRow, row.target_id)
+            confirmed = bool(parent and (parent.current_outline_version_id if row.target_kind == "course" else parent.current_route_version_id))
             intake = load_json_field(row.intake_json, None)
+            from .models import PlanningDraftRow
+            draft = sess.get(PlanningDraftRow, row.draft_id) if row.draft_id else None
+            content = load_json_field(draft.content_json, {}) if draft else {}
+            courses = [c for st in content.get("stages", []) for c in st["courses"]]
+            incomplete = bool(courses) and any(not c.get("units") for c in courses)
             return {
+                "task_status": "cancelled" if row.abandoned_at else execution.status,
+                "error_code": "TASK_CANCELLED" if row.abandoned_at else event.error_code if event else None,
+                "generation": execution.generation,
+                "attempt": execution.attempt,
+                "progress_current": event.progress_current if event else 0,
+                "progress_total": event.progress_total if event else 0,
+                "abandoned": bool(row.abandoned_at),
+                "confirmed": confirmed,
+                "title": parent.title_ref if parent else "",
+                "auto_retry_count": row.auto_retry_count,
+                "answer_draft": load_json_field(row.answer_draft_json, []),
+                "answer_draft_revision": row.answer_draft_revision,
+                "structure_status": "partial" if incomplete else "ready" if courses else "pending",
                 "task_id": row.task_id,
                 "planning_scope": row.planning_scope,
                 "resolved_scope": row.resolved_scope,
@@ -676,7 +727,11 @@ class PlanningService:
                 "search_decision": row.search_decision,
                 "intake": {
                     "round": (intake or {}).get("round", 0),
-                    "max_rounds": MAX_INTAKE_ROUNDS,
+                    "schema_version":(intake or {}).get("schema_version",0),
+                    "min_questions":4,"max_questions":6,
+                    "shown_count":(intake or {}).get("shown_count",len((intake or {}).get("questions",[]))),
+                    "history":(intake or {}).get("history",(intake or {}).get("questions",[])),
+                    "learner_profile":(intake or {}).get("learner_profile",{}),
                     "questions": (intake or {}).get("questions", []),
                     "answers": (intake or {}).get("answers", []),
                     "done": bool((intake or {}).get("done")),
@@ -684,4 +739,4 @@ class PlanningService:
             }
 
 
-__all__ = ["PlanningService", "PLAN_PROMPTS", "MAX_INTAKE_ROUNDS", "INTAKE_ROUND1"]
+__all__ = ["PlanningService", "PLAN_PROMPTS"]

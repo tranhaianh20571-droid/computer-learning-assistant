@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 from ..config_service import ConfigService
 from ..errors import Slice1Error, error
 from .anthropic import AnthropicAdapter
+from .imagegen import ImageGenerationAdapter
 from .base import AdapterBase, validate_endpoint
 from .gemini import GeminiAdapter
 from .minimax import MiniMaxTTSAdapter
@@ -19,6 +20,7 @@ from .paddleocr import PaddleOCRAdapter
 from .tavily_hikari import TavilyHikariAdapter
 
 ADAPTERS = {
+    "openai_image": ImageGenerationAdapter,
     "openai": OpenAIAdapter,
     "anthropic": AnthropicAdapter,
     "gemini": GeminiAdapter,
@@ -108,7 +110,10 @@ class CapabilityTestService:
         # 探测结果与既有状态合并，避免部分探测丢掉其它能力状态。
         merged = dict(view["capability_status"])
         merged.update(status)
-        updated = self.configs.set_capability_status(config_id, merged)
+        from ..capability_refresh import stamp_status
+        updated = self.configs.set_capability_status(config_id,
+            stamp_status(status, view["config_version"], view["capability_status"]),
+            expected_version=view["config_version"], merge=True)
         return {"config_id": config_id, "capability_status": updated["capability_status"]}
 
 

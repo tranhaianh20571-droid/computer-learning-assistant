@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .base import CAPABILITIES, PROBE_TEXT, AdapterBase, image_data_url
+import httpx
+
+from .base import CAPABILITIES, PROBE_TEXT, AdapterBase, AdapterError, image_data_url
 
 
 class OpenAIAdapter(AdapterBase):
+    supports_text_stream = True
     kind = "content_model"
     protocol = "openai"
     capabilities = CAPABILITIES
@@ -35,7 +38,15 @@ class OpenAIAdapter(AdapterBase):
         - plain_text：纯文字（即时对话路径）。
         供应商异常经 _map_status 映射为受控错误码。
         """
-        payload: dict[str, Any] = {"model": self.model_name, "messages": messages}
+        # Internal provider metadata is not an OpenAI wire field.
+        normalized = []
+        for message in messages:
+            item = dict(message)
+            if item.get("tool_calls"):
+                item["tool_calls"] = [{k: c[k] for k in ("id", "type", "function") if k in c}
+                                      for c in item["tool_calls"]]
+            normalized.append(item)
+        payload: dict[str, Any] = {"model": self.model_name, "messages": normalized}
         if options.get("response_format"):
             payload["response_format"] = options["response_format"]
         if options.get("tools"):
@@ -49,7 +60,8 @@ class OpenAIAdapter(AdapterBase):
         if tool_calls:
             fn = tool_calls[0].get("function") or {}
             tool_arguments = fn.get("arguments")
-        return {"content": msg.get("content") or "", "tool_arguments": tool_arguments}
+        return {"content": msg.get("content") or "", "tool_arguments": tool_arguments,
+                "tool_calls": tool_calls}
 
     def generate_stream_text(self, messages: list[dict], **options: Any) -> str:
         """流式收集为完整文本（v2）：供结构化生成的大 JSON 输出使用。
@@ -69,15 +81,12 @@ class OpenAIAdapter(AdapterBase):
         import json as _json
 
         payload: dict[str, Any] = {"model": self.model_name, "messages": messages, "stream": True}
-        client = self._client_or_new()
         try:
-            with client.stream(
+            with self._stream_request(
                 "POST", self._chat_url(), json=payload,
                 headers={**self.headers, "Accept": "text/event-stream"},
-            ) as response:
-                if not (200 <= response.status_code < 300):
-                    self._map_status(response.status_code, {"raw": response.read()[:256]})
-                for line in response.iter_lines():
+            ) as lines:
+                for line in lines:
                     if not line or not line.startswith("data:"):
                         continue
                     data = line[5:].strip()
@@ -161,20 +170,17 @@ class OpenAIAdapter(AdapterBase):
             "max_tokens": 8,
             "stream": True,
         }
-        client = self._client_or_new()
         try:
-            with client.stream(
+            with self._stream_request(
                 "POST",
                 self._chat_url(),
                 json=payload,
                 headers={**self.headers, "Accept": "text/event-stream"},
-            ) as response:
-                if not (200 <= response.status_code < 300):
-                    self._map_status(response.status_code, {"raw": response.read()[:256]})
+            ) as lines:
                 # 读取首个数据块确认确实是流式
-                for _ in response.iter_lines():
+                for _ in lines:
                     return
+        except AdapterError:
+            raise
         except Exception as exc:  # noqa: BLE001
-            from .base import AdapterError
-
             raise AdapterError("connection_error", status=502) from exc

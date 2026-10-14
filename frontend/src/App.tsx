@@ -180,6 +180,9 @@ export default function App() {
               />
             )}
             {route === "/reset" && <ResetView onDone={setNotice} onErr={setError} />}
+            <span className="auth-switch">
+              不想登录？<button className="linkbtn" type="button" onClick={() => go("/home")}>以访客身份继续</button>
+            </span>
           </div>
         </div>
       </div>

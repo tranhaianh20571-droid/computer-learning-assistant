@@ -118,6 +118,7 @@ $env:LEARNING_DATABASE_URL="postgresql+psycopg://learning_assistant:<密码>@127
 课程库回归入口为 `tests/course_library_browser.mjs`，夹具为 `tests/course_library_browser_fixture.py`。先启动隔离 PostgreSQL schema 对应的后端；设置 `TEST_BACKEND` 为该服务，不能指向真实应用的 8000 端口。`LEARNING_DATABASE_URL` 必须指向专用 `course_library_validation_*` schema，夹具写入前会检查。`TEST_PYTHON`、`PYTHONPATH` 和 `PW_ROOT` 分别指向既有解释器、生产包目录和已安装 Playwright 的 node_modules。截图和结果输出到 `.backup/`，不存储凭据。优先 Orca 内置浏览器；该脚本用于不可用时后备或后台回归。
 
 - 前端应用（`frontend/`）：`npm run build`；`node scripts/slice1_frontend_check.mjs <baseUrl> <outDir>`（默认 `http://127.0.0.1:4173`，需先 `vite preview` 或 dev server；检查登录页可达、匿名不渲染能力配置、窄屏可用、无真实外发、无敏感控制台输出）；再手动走查 `/course` → `/course/detail` → `/lecture`、设置页与 360px 窄屏布局。
+- 认证整页旅程回归：`node tests/auth_pages_browser.mjs`（`TEST_FRONTEND` 默认 `http://127.0.0.1:5173`；`PW_ROOT`、`TEST_BROWSER` 约定同上）。断言 `/login`、`/register`、`/verify`、`/reset` 四个认证路由**各自都存在可离开认证区的入口**，并实际点击验证落在非认证路由；任一页成为死胡同即失败。该断言针对的是「控件缺失」类缺陷——组件级与接口级测试断言的是既有元素存在，无法发现某个入口根本不存在。
 - 离线原型（`文档/ui/index.html`，AC-07）：`py -3 -m http.server 8765 --directory 文档/ui` 后用 Playwright 检查课程列表/详情/讲次/设置页无真实网络请求、无敏感控制台输出。
 
 ## 证据与验收归档

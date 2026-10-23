@@ -1,5 +1,15 @@
 # 测试执行入口
 
+## 论文讲解与流读取
+
+`test_native_execution.py` 检查讲解角色的总时限、无进展超时、请求取消回收，
+以及 HTTP 小包合并后的字节完整性、每批授权、撤销后阻止剩余内容和等待下一包时的及时刷新。
+配置模型在受控传输层校验每批内容，注入模型仍逐事件校验；工具调用、外发和最终发布保留校验。
+联合 `test_native_task_binding.py`、`test_native_teaching_authorization.py`、
+教学缓冲/恢复、资料绑定、规划质量与镜像专项执行，不默认全量。
+构建后运行 `teaching_recovery_browser.mjs` 检查桌面/手机的下一段错误原因与重试入口、
+断线恢复及音频等待。浏览器为合成接口；真实论文与配置模型的验收另行记录。
+
 ## Electron 桌面运行环境
 
 `desktop_browsers_unit.mjs` 检查用户所选浏览器的程序路径、HTTPS 参数和无 Shell 启动。

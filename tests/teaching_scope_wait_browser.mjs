@@ -15,10 +15,11 @@ try {
     page.on("pageerror", error => errors.push(error.message));
     const served = await mockBuiltFrontend(page);
     let starts = 0;
+    const positions = [];
     let workspace = {
       conversation_id: "synthetic-scope-wait", kind: "teaching", course_id: "course-a", lesson_id: "lesson-a",
       lesson_title: "合成考纲课堂", generation: 1, session_state: "active", server_managed: true,
-      audio_mode: "text", tts_authorized: false, steps: [], followups: [], queued_tasks: [],
+      audio_mode: "tts", tts_authorized: true, steps: [], followups: [], queued_tasks: [],
       authorization_required: false, needs_upgrade: false,
       scope_preparation: { status: "running", error_code: null }, last_checkpoint: null
     };
@@ -32,7 +33,10 @@ try {
         workspace = { ...workspace, scope_preparation: { status: "queued", error_code: null } };
         return json(route, { conversation_id: workspace.conversation_id, task_id: "existing-first-task" });
       }
-      if (pathname.endsWith("/checkpoint")) return json(route, { saved: true });
+      if (pathname.endsWith("/checkpoint")) {
+        positions.push(route.request().postDataJSON().position_ms);
+        return json(route, { saved: true });
+      }
       return json(route, { data: [] });
     });
     await page.goto(served.origin + "/#/lecture/synthetic-scope-wait");
@@ -41,6 +45,12 @@ try {
     assert.equal(await page.getByRole("button", { name: "重试准备考纲", exact: true }).count(), 0);
     assert.equal(starts, 0);
     checks.push(`pending-scope-never-reports-model-unavailable-${width}`);
+    await page.waitForFunction(() => document.querySelector(".lw-simple"));
+    const deadline = Date.now() + 10000;
+    while (!positions.length && Date.now() < deadline) await page.waitForTimeout(200);
+    assert(positions.length > 0);
+    assert(positions.every(position => position === 0));
+    checks.push(`waiting-without-audio-never-advances-playback-${width}`);
     workspace = { ...workspace, scope_preparation: { status: "failed", error_code: "MODEL_PROVIDER_ERROR" } };
     const retry = page.getByRole("button", { name: "重试准备考纲", exact: true });
     await retry.waitFor();
@@ -52,6 +62,13 @@ try {
     workspace = { ...workspace, scope_preparation: { status: "succeeded", error_code: null } };
     await page.getByText("单元考纲已就绪，正在准备首段讲解…", { exact: true }).waitFor();
     assert(!/讲解配置暂不可用/.test(await page.locator("body").innerText()));
+    workspace = { ...workspace, queued_tasks: [{ task_id: "failed-first", kind: "lesson_step_generate",
+      step_no: 1, status: "failed", error_code: "OUTPUT_INVALID", required_action: "retry" }] };
+    await page.getByRole("button", { name: "重试生成", exact: true }).waitFor();
+    assert.equal(await page.getByText("单元考纲已就绪，正在准备首段讲解…", { exact: true }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "重试准备考纲", exact: true }).count(), 0);
+    await page.getByText("模型返回的内容不符合要求，可重试生成。", { exact: true }).first().waitFor();
+    checks.push(`ready-scope-does-not-hide-first-segment-failure-${width}`);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.screenshot({ path: `${output}/scope-ready-${width}.png` });
     assert.deepEqual(errors, []);

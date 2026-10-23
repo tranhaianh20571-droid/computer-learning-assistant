@@ -98,6 +98,40 @@ def test_opt_in_wall_timeout_cancels_even_when_stream_keeps_arriving(streaming):
     assert closed==[True]
 
 
+@pytest.mark.parametrize("failure", ["silent", "trickle"])
+def test_teaching_role_bounds_silent_and_continuously_streaming_runs(monkeypatch, failure):
+    from backend.agents.contracts import TeachingStepInput
+    from backend.agents.roles import teaching_agent
+    closed, timers = [], []
+    timeout = asyncio.timeout
+
+    def scaled_timeout(delay):
+        timers.append(delay)
+        return timeout(.08 if delay == 120 else .03 if delay == 60 else delay)
+
+    monkeypatch.setattr(runner.asyncio, "timeout", scaled_timeout)
+
+    async def stream(messages, info):
+        try:
+            if failure == "silent":
+                await asyncio.sleep(10)
+            else:
+                yield '{"steps":[{"text":"'
+            while True:
+                yield "x"
+                await asyncio.sleep(.001)
+        finally:
+            closed.append(True)
+
+    with pytest.raises(PlanningError) as caught:
+        teaching_agent.generate_step(FunctionModel(stream_function=stream),
+            TeachingStepInput.from_messages([{"role": "user", "content": "synthetic"}]),
+            AgentDeps(), on_delta=lambda *args, **kwargs: None)
+    assert caught.value.code == "MODEL_TIMEOUT"
+    assert 120 in timers
+    assert closed == [True]
+
+
 def public_dns(host, port, *args):
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
 
@@ -553,6 +587,62 @@ def test_wire_checks_state_between_response_chunks():
     with pytest.raises(LeaseError):
         send(wire(lambda request: httpx.Response(200, stream=stream), deps=AgentDeps(check_state=check)))
     assert stream.closed
+
+
+def test_wire_coalesces_tiny_packets_without_losing_bytes_or_skipping_batch_fences():
+    checks = []
+    chunks = [b"x"] * 10000
+    stream = native._BoundedStream(Chunks(chunks), 10000,
+        AgentDeps(check_state=lambda: checks.append(1)))
+
+    async def receive():
+        return [chunk async for chunk in stream]
+
+    received = asyncio.run(receive())
+    assert b"".join(received) == b"x" * 10000
+    assert all(0 < len(chunk) <= 4096 for chunk in received)
+    assert len(received) == len(checks) < len(chunks) // 10
+
+
+def test_wire_batch_flush_does_not_wait_for_the_next_packet_and_cancels_pending_read():
+    closed = []
+
+    class DelayedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            try:
+                yield b"first"
+                await asyncio.sleep(10)
+            finally:
+                closed.append(True)
+
+    async def receive():
+        iterator = native._BoundedStream(DelayedBody(), 100, AgentDeps()).__aiter__()
+        try:
+            assert await asyncio.wait_for(anext(iterator), timeout=.5) == b"first"
+        finally:
+            await iterator.aclose()
+
+    asyncio.run(receive())
+    assert closed == [True]
+
+
+def test_wire_revocation_after_first_batch_blocks_all_buffered_remaining_bytes():
+    changed, delivered = [], []
+
+    def check():
+        if changed:
+            raise LeaseError("TASK_CANCEL_REQUESTED", "synthetic cancellation")
+
+    async def receive():
+        stream = native._BoundedStream(Chunks([b"x" * 10000]), 10000,
+            AgentDeps(check_state=check))
+        async for chunk in stream:
+            delivered.append(chunk)
+            changed.append(True)
+
+    with pytest.raises(LeaseError):
+        asyncio.run(receive())
+    assert delivered == [b"x" * 4096]
 
 
 @pytest.mark.parametrize("status,code", [(301, "MODEL_PROVIDER_ERROR"),

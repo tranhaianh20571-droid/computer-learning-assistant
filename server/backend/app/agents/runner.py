@@ -12,6 +12,7 @@ from pydantic_ai.messages import (
     TextPart, TextPartDelta, ThinkingPart, ThinkingPartDelta, UserPromptPart,
 )
 from pydantic_ai.output import NativeOutput, PromptedOutput, ToolOutput
+from pydantic_ai.models import Model
 from pydantic_ai.run import AgentRunResultEvent
 
 from ..logging_audit.instrumentation import native_instrumentation
@@ -218,7 +219,11 @@ async def execute_agent(source, output_cls, input: GenerationInput, deps: AgentD
                             result = None
                             async with agent.run_stream_events(prompt, **kwargs) as events:
                                 async for event in events:
-                                    deps.check()
+                                    # Configured HTTP bodies are fenced by
+                                    # _BoundedStream before the SDK receives each
+                                    # batch. Injected models have no transport guard.
+                                    if isinstance(source, Model):
+                                        deps.check()
                                     if progress_timeout_seconds is not None and isinstance(event,(PartStartEvent,PartDeltaEvent)):
                                         part=getattr(event,"part",None) or getattr(event,"delta",None)
                                         values=[getattr(part,key,None) for key in ("content","content_delta","args","args_delta")]

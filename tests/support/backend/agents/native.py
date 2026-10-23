@@ -51,18 +51,50 @@ class _BoundedStream(httpx.AsyncByteStream):
         self.stream, self.limit, self.deps = stream, limit, deps
 
     async def __aiter__(self):
-        size = 0
+        size, buffered = 0, bytearray()
+        pending = None
+        iterator = self.stream.__aiter__()
+        loop, flush_at = asyncio.get_running_loop(), 0
         try:
-            async for chunk in self.stream:
-                self.deps.check()
+            while True:
+                if pending is None:
+                    pending = asyncio.create_task(anext(iterator))
+                if buffered:
+                    done, _ = await asyncio.wait((pending,), timeout=max(0, flush_at-loop.time()))
+                    if not done:
+                        self.deps.check()
+                        yield bytes(buffered)
+                        buffered.clear()
+                        continue
+                try:
+                    chunk = await pending
+                except StopAsyncIteration:
+                    break
+                pending = None
                 size += len(chunk)
                 if size > self.limit:
                     raise error("MODEL_RESPONSE_TOO_LARGE")
-                yield chunk
+                if not buffered:
+                    flush_at = loop.time() + .05
+                buffered.extend(chunk)
+                # Authorize bounded application batches, rather than repeating
+                # a full database snapshot for each tiny HTTP/SSE packet.
+                while len(buffered) >= 4096:
+                    self.deps.check()
+                    batch = bytes(buffered[:4096])
+                    del buffered[:4096]
+                    yield batch
+            if buffered:
+                self.deps.check()
+                yield bytes(buffered)
         except httpx.TimeoutException:
             raise error("MODEL_TIMEOUT") from None
         except (httpx.HTTPError, OSError):
             raise error("MODEL_CONNECTION_ERROR") from None
+        finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
 
     async def aclose(self):
         await self.stream.aclose()

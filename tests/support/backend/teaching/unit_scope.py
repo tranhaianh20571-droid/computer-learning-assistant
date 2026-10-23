@@ -441,6 +441,8 @@ class UnitScopeService:
         from ..agents.runner import deps_for_source
         prompt = self.prompts.resolve_for_task(
             task_id, self._bound_prompt_name(task_id, SCOPE_PROMPTS))["template_snapshot"]
+        from ..materials.study_sources import LEARNING_FOCUS_POLICY
+        prompt += "\n" + LEARNING_FOCUS_POLICY
         try:
             deps = replace(deps_for_source(adapter), omit_content_trace=True,
                            on_process=lambda *_args, **_kwargs: None)
@@ -500,7 +502,7 @@ class UnitScopeService:
                     else "unit_scope_coverage_v1")
                 planned = unit_scope_coverage_agent.plan_coverage(
                     adapter, UnitScopeCoverageInput.from_messages([
-                        {"role": "system", "content": plan_prompt["template_snapshot"] +
+                        {"role": "system", "content": plan_prompt["template_snapshot"] + "\n" + LEARNING_FOCUS_POLICY +
                          ("\n" + SCOPE_MATERIAL_POLICY if material_search else "")},
                         {"role": "user", "content": json.dumps(
                             {"stage": "scope_coverage_plan", "context": context}, ensure_ascii=False)}]),
@@ -525,7 +527,7 @@ class UnitScopeService:
                 return review
             reviewed = unit_scope_review_agent.review_scope(
                 adapter, UnitScopeReviewInput.from_messages([
-                    {"role": "system", "content": review_prompt["template_snapshot"] +
+                    {"role": "system", "content": review_prompt["template_snapshot"] + "\n" + LEARNING_FOCUS_POLICY +
                      ("\n" + SCOPE_MATERIAL_POLICY if material_search else "")},
                     {"role": "user", "content": json.dumps(
                         {"context": context, "candidate": candidate.model_dump(),

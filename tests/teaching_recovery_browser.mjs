@@ -51,6 +51,11 @@ try{
   assert.equal(await page.getByRole("button",{name:"重试生成",exact:true}).count(),0);
   assert(!/操作失败|INTERNAL_ERROR|截止/.test(await page.locator(".lw-simple").innerText()));
   checks.push(`current-content-isolated-from-stale-and-next-failures-${width}`);
+  ws={...ws,queued_tasks:[{...task(2),error_code:"OUTPUT_INVALID"}]};
+  await page.getByText("模型返回的内容不符合要求，可重试生成。",{exact:false}).waitFor();
+  assert(!/自动重试/.test(await page.locator(".lw-simple").innerText()));
+  await page.getByRole("button",{name:"重试准备下一段",exact:true}).waitFor();
+  checks.push(`invalid-next-output-displays-reason-and-manual-recovery-${width}`);
   ws={...ws,steps:[step(1),step(2)]};
   await page.getByText("下一段暂未准备好",{exact:false}).waitFor({state:"hidden"});
   checks.push(`published-artifact-clears-old-error-${width}`);

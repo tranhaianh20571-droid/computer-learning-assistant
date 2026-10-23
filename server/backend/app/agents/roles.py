@@ -119,6 +119,10 @@ class TeachingAgent(_Role):
 
     def generate_step(self, source, input: TeachingStepInput, deps: AgentDeps, **options):
         from ..teaching.outputs import LessonPlanCandidate
+        # Bound the entire SDK run, including validation retries and streams that
+        # keep emitting. Transport read timeouts alone do not bound elapsed time.
+        options.setdefault("timeout_seconds", 120)
+        options.setdefault("progress_timeout_seconds", 60)
         return self._execute(source, input, deps, LessonPlanCandidate, "submit_lesson_steps", **options)
 
     def answer_followup(self, source, input: FollowupInput, deps: AgentDeps, **options):

@@ -4,6 +4,18 @@ import math
 import unicodedata
 
 PROMPT = "board_alignment_v1"
+GENERATION_POLICY = (
+    "板书务必与当前短段的讲稿规模一致，优先使用1至3个短语块；每个beat最多4个blocks，全文最多6个beats。"
+    "文字块text只取本段已经逐字说出的一个短语，"
+    "不要写整段摘要后仅引用其中几个词。块title可以省略；填写时也必须在讲稿中逐字出现并单独引用。"
+    "不要为了版式添加未说过的表头、图名、节点或边标签；只有本段能解释全部可见目标时才使用复杂图表。"
+    "最小合法例：beat.text='先校验输入，再调用工具。'；"
+    "blocks=[{id:'check',type:'text',text:'校验输入'},{id:'call',type:'text',text:'调用工具'}]；"
+    "cues=[{block_id:'check',target:'text',quote:'校验输入'},"
+    "{block_id:'call',target:'text',quote:'调用工具'}]。"
+    "每个cue必须对应正确的块和目标字段；完整文字块需要完整短语的引用。"
+    "结构校验指出具体目标后，只按讲稿原句修正该目标，未讲到的板书不要生成。"
+)
 
 
 def exact_subtitles(text, cues):
@@ -34,7 +46,7 @@ def exact_subtitles(text, cues):
 def contract_snapshot(prompts, task_id):
     from ..prompts.service import PromptUnavailable
     try:
-        return prompts.resolve_for_task(task_id, PROMPT)["template_snapshot"]
+        return prompts.resolve_for_task(task_id, PROMPT)["template_snapshot"] + "\n" + GENERATION_POLICY
     except PromptUnavailable:
         return None
 
@@ -149,7 +161,17 @@ def aligned_beats(beats, blocks):
     for beat in beats:
         available.update(block.id for block in beat.blocks)
         cues = []
-        for cue in beat.cues:
+        located = []
+        for index, cue in enumerate(beat.cues):
+            start = -1
+            for _ in range(cue.occurrence + 1):
+                start = beat.text.find(cue.quote, start + 1)
+                if start < 0:
+                    raise ValueError("board cue quote missing")
+            located.append((start, index, cue))
+        # Quote positions are authoritative. Normalize list order without
+        # changing narration, references, coverage or the board-writing rules.
+        for start, _, cue in sorted(located, key=lambda item: (item[0], item[1])):
             key = (cue.block_id, cue.target)
             if cue.block_id not in available or cue.target not in targets.get(cue.block_id, {}):
                 raise ValueError("board cue target unavailable")
@@ -158,11 +180,6 @@ def aligned_beats(beats, blocks):
                 if any((cue.block_id, f"node:{ident}") not in covered
                        for ident in (edge.from_id, edge.to_id)):
                     raise ValueError("board cue edge precedes endpoints")
-            start = -1
-            for _ in range(cue.occurrence + 1):
-                start = beat.text.find(cue.quote, start + 1)
-                if start < 0:
-                    raise ValueError("board cue quote missing")
             if offset + start < previous:
                 raise ValueError("board cue order invalid")
             if cue.block_id in defined and key not in visible:
@@ -181,7 +198,8 @@ def aligned_beats(beats, blocks):
                     visible.update((cue.block_id, target) for target in targets[cue.block_id])
             values, technical = targets[cue.block_id][cue.target]
             if not _matches(values, cue.quote, technical, beat.text[:start]):
-                raise ValueError("board cue expression differs")
+                raise ValueError(f"board cue expression differs: {cue.block_id}/{cue.target}; "
+                    "quote must cover this target's complete expression from the narration")
             previous = offset + start
             covered.add(key)
             cues.append({"block_id": cue.block_id, "target": cue.target,
@@ -192,7 +210,9 @@ def aligned_beats(beats, blocks):
         offset += len(beat.text)
     expected = {(ident, target) for ident, values in targets.items() if ident in defined for target in values}
     if expected - covered:
-        raise ValueError("board cue coverage missing")
+        missing = ", ".join(f"{ident}/{target}" for ident, target in sorted(expected-covered)[:24])
+        raise ValueError("board cue coverage missing: " + missing +
+            "; add exact narration references, or omit board content that was not narrated")
     return result
 
 

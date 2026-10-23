@@ -30,8 +30,9 @@ from .quality import default_coverage_plan
 
 
 def _message(system: str, payload: dict) -> list[dict]:
+    from ..materials.study_sources import LEARNING_FOCUS_POLICY
     return [
-        {"role": "system", "content": system},
+        {"role": "system", "content": system + "\n" + LEARNING_FOCUS_POLICY},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
 

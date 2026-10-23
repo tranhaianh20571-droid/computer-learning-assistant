@@ -463,11 +463,12 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
   useEffect(() => {
     if (!playing || ws?.conversation_id!==conversationId || ws.session_state!=="active") return;
     const timer = window.setInterval(() => {
-      if(!audioRef.current.sourceId)posRef.current+=5000;
+      if(!audioRequired&&!audioRef.current.sourceId&&bufferRef.current.view(`step:${current}`)?.text)
+        posRef.current+=5000;
       saveCheckpoint(current, posRef.current);
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [playing, current, saveCheckpoint, ws?.conversation_id, ws?.session_state, conversationId]);
+  }, [playing, current, saveCheckpoint, audioRequired, ws?.conversation_id, ws?.session_state, conversationId]);
 
   const gotoStep = useCallback(async (n: number) => {
     if (!ws) return;
@@ -631,11 +632,16 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
   const failures=teachingFailures(ws,current);
   const failedTasks = [...failures.current,...failures.followup];
   const nextFailed=failures.next.length>0;
+  const nextFailureCode=failures.next[0]?.error_code;
+  const nextFailureMessage=nextFailureCode&&nextFailureCode!=="INTERNAL_ERROR"
+    ?errText({code:nextFailureCode}):"本段准备中断，可重试恢复。";
+  const nextPreparing=ws.queued_tasks?.some(task=>task.kind==="lesson_step_generate"&&
+    !task.followup&&task.step_no===current+1&&["queued","leased","running"].includes(task.status));
   const artifactExhausted=typeof ws.artifact_recovery==="object"&&ws.artifact_recovery?.status==="exhausted";
   const artifactRepairing=typeof ws.artifact_recovery==="object"&&ws.artifact_recovery?.status==="repairing";
   const artifactMissing=ws.artifact_recovery===true || Boolean(typeof ws.artifact_recovery==="object"&&(ws.artifact_recovery?.available||ws.artifact_recovery?.required));
   const blocked = ws.authorization_required || ws.required_action === "authorize" || ws.needs_upgrade;
-  const scopeWaiting = !!ws.scope_preparation && !blocked;
+  const scopeWaiting = !!ws.scope_preparation && ws.scope_preparation.status !== "succeeded" && !blocked;
   const scopeFailed = scopeWaiting && ["failed", "expired", "cancelled", "not_generated"].includes(ws.scope_preparation!.status);
   const generationRetry=failedTasks.some(task=>task.required_action==="retry");
   const recoveryNeeded=!artifactExhausted&&(artifactMissing || generationRetry || failedTasks.length>0);
@@ -643,8 +649,8 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
   const failureMessage=!failureCode||failureCode==="INTERNAL_ERROR"?"本段准备中断，可重试恢复。":errText({code:failureCode});
   const emptyMessage = scopeWaiting ? scopeFailed
     ? `单元考纲准备未完成。${ws.scope_preparation?.error_code ? errText({code: ws.scope_preparation.error_code}) : "可以重试准备。"}`
-    : ws.scope_preparation?.status === "succeeded" ? "单元考纲已就绪，正在准备首段讲解…" : "正在准备本单元考纲，完成后继续讲解…"
-    : artifactExhausted ? "讲解补生成已达到重试上限，请检查模型设置。" : artifactRepairing ? "正在重新准备首段讲解…" : artifactMissing ? "首段讲解内容缺失，点击恢复讲解可重新准备。" : blocked ? "讲解配置暂不可用，请检查模型设置或恢复讲解。" : failedTasks.length ? failureMessage : "正在准备首段讲解…";
+    : "正在准备本单元考纲，完成后继续讲解…"
+    : artifactExhausted ? "讲解补生成已达到重试上限，请检查模型设置。" : artifactRepairing ? "正在重新准备首段讲解…" : artifactMissing ? "首段讲解内容缺失，点击恢复讲解可重新准备。" : blocked ? "讲解配置暂不可用，请检查模型设置或恢复讲解。" : failedTasks.length ? failureMessage : ws.scope_preparation?.status === "succeeded" ? "单元考纲已就绪，正在准备首段讲解…" : "正在准备首段讲解…";
 
   return (
     <div className="ink-classroom" data-nav-collapsed={navCollapsed}><aside id="classroom-navigation" className="classroom-nav" aria-label="课堂导航">
@@ -769,7 +775,8 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
               {(blocked || recoveryNeeded) && <button className="btn btn-sm" disabled={busy} onClick={recover}>{artifactMissing || blocked ? "恢复讲解" : "重试生成"}</button>}
               <a className="btn btn-sm" href="#/capabilities">模型设置</a>
             </div>}
-            {nextFailed&&!blocked&&<p className="help" role="status">下一段暂未准备好，将在可恢复时自动重试；当前讲解可以继续。
+            {nextPreparing&&!nextFailed&&!blocked&&displayComplete&&audioComplete&&<p className="help" role="status">正在准备下一段讲解…</p>}
+            {nextFailed&&!blocked&&<p className="help" role="status">下一段暂未准备好。{nextFailureMessage}
               <button className="btn btn-sm" disabled={busy} onClick={recover}>重试准备下一段</button></p>}
             {finalSegment && displayComplete && audioComplete && !quiz && quizBoundary?.scope==="lesson" && <button className="btn btn-pri btn-sm" disabled={busy||awaiting} onClick={async()=>{
               try {if(!await saveCheckpoint(current,posRef.current))return;

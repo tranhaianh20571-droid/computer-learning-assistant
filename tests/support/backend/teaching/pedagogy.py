@@ -200,6 +200,8 @@ def prepared_plan(service, conv, context):
 
 def refine_plan(service, conv, task_id, adapter, context):
     prompt = service.prompts.resolve_for_task(task_id, "lesson_blueprint_v1")["template_snapshot"]
+    from ..materials.study_sources import LEARNING_FOCUS_POLICY
+    prompt += "\n" + LEARNING_FOCUS_POLICY
     def get_lesson_context() -> dict:
         """Read only this version-bound lesson's learning goal and learner profile."""
         return context
@@ -211,7 +213,8 @@ def refine_plan(service, conv, task_id, adapter, context):
     run = lesson_planning_agent.plan_lesson(adapter, LessonPlanningInput.from_messages(
         [{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(context, ensure_ascii=False)}]),
         deps_for_source(adapter,max_requests=3), tools=[get_lesson_context,*tools],
-        output_validator=lambda _ctx, output: validate_new_blueprint(context, output))
+        output_validator=lambda _ctx, output: validate_new_blueprint(context, output),
+        timeout_seconds=180)
     return run.payload, context
 
 

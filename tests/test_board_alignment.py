@@ -39,7 +39,7 @@ def test_exact_quotes_resolve_offsets_and_keep_legacy_outputs_compatible():
     assert FollowupCandidate(alignment_version=1, answer=TEXT).alignment_version == 1
 
 
-@pytest.mark.parametrize("failure", ["quote", "wording", "target", "coverage", "order", "legacy", "negation"])
+@pytest.mark.parametrize("failure", ["quote", "wording", "target", "coverage", "legacy", "negation"])
 def test_mismatches_cannot_publish_as_aligned_content(failure):
     value = payload()
     beat = value["beats"][0]
@@ -51,8 +51,6 @@ def test_mismatches_cannot_publish_as_aligned_content(failure):
         beat["cues"][0]["target"] = "cell:0:0"
     elif failure == "coverage":
         beat["cues"].pop()
-    elif failure == "order":
-        beat["cues"].reverse()
     elif failure == "negation":
         value["text"] = value["text"].replace("再调用工具", "再不调用工具")
         beat["text"] = value["text"]
@@ -61,6 +59,30 @@ def test_mismatches_cannot_publish_as_aligned_content(failure):
     with pytest.raises(ValueError):
         StepCandidate.model_validate(value)
 
+
+def test_unordered_cue_list_resolves_in_narration_order_without_changing_content():
+    value = payload()
+    value["beats"][0]["cues"].reverse()
+    candidate = StepCandidate.model_validate(value)
+    assert candidate.text == TEXT
+    cues = scene_beats(candidate)[0]["cues"]
+    assert [cue["block_id"] for cue in cues] == ["check", "tool"]
+    assert [TEXT[cue["start"]:cue["end"]] for cue in cues] == ["校验输入", "调用工具"]
+    raw = '{"steps":[{"beats":[' + json.dumps(value["beats"][0], ensure_ascii=False) + "]"
+    preview = partial_step(raw, require_alignment=True)
+    assert preview["text"] == TEXT
+    assert preview["beats"][0]["cues"] == cues
+
+
+def test_missing_reference_identifies_the_target_for_sdk_repair():
+    value = payload()
+    value["beats"][0]["cues"].pop()
+    with pytest.raises(ValueError, match="board cue coverage missing: tool/text"):
+        StepCandidate.model_validate(value)
+    value = payload()
+    value["beats"][0]["cues"][0]["quote"] = "校验"
+    with pytest.raises(ValueError, match="board cue expression differs: check/text"):
+        StepCandidate.model_validate(value)
 
 @pytest.mark.parametrize("block", [
     {"id": "b", "type": "text", "title": "校验", "text": "校验输入"},

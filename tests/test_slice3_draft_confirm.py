@@ -14,7 +14,8 @@ from common_fixtures import (
     SyntheticSearchAdapter,
     auth_headers,
     make_user,
-    run_route_generate,
+    run_legacy_route_generate as run_route_generate,
+    run_route_generate as run_current_route_generate,
 )
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -58,7 +59,8 @@ def _confirmed_route(env, *, cycle: bool = False, empty: bool = False, confirm_f
         "/api/planning/routes", headers=auth_headers(token),
         json={"title": "确认路线", "scenario": "self_study"},
     ).json()["route_id"]
-    env["container"]["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
+    env["container"]["model"] = SkeletonThenOutlineAdapter(
+        payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD)
     env["container"]["search"] = SyntheticSearchAdapter()
     task_id = client.post(
         "/api/planning/tasks", headers=auth_headers(token),
@@ -309,7 +311,7 @@ class TestRouteConfirmMaterializesOutlines:
             json={"idempotency_key": f"t{uuid.uuid4().hex[:8]}", "task_kind": "route_generate",
                   "planning_scope": "route", "target_route_id": route_id},
         ).json()["task_id"]
-        body = run_route_generate(client, token, task_id)
+        body = run_current_route_generate(client, token, task_id)
         assert body["task_status"] == "succeeded", body
         draft_id = body["draft"]["draft_id"]
         draft = env["state"].drafts.get_draft(draft_id, actor_id=user_id)

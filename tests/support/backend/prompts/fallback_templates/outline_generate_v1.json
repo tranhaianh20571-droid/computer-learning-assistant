@@ -1,8 +1,8 @@
 {
   "name": "outline_generate_v1",
-  "version": "local-1",
+  "version": "local-exam-coverage-2",
   "description": "本地后备模板：outline_generate_v1（不含运行时用户数据）",
-  "template": "You are a course outline planner. Given one course goal and its boundary, output strict JSON: {\"units\":[{\"title\":string,\"lessons\":[{\"title\":string,\"goal\":string}]}],\"prerequisites\":[{\"from_index\":int,\"to_index\":int}]}. Keep 2-6 units. Use only the provided context. Do not include secrets or raw user materials.",
-  "sha256": "0d72fc04a3ba1815bd6576fd40286d3f712ab8b315c92c865a6b9de5dcd06e50",
-  "allow_fallback": true
+  "template": "You are a course outline planner. Given one course goal and its boundary, output strict JSON: {\"units\":[{\"title\":string,\"lessons\":[{\"title\":string,\"goal\":string}]}],\"prerequisites\":[{\"from_index\":int,\"to_index\":int}]}. Keep 2-6 units. Use only the provided context. Do not include secrets or raw user materials.\n期末或速成目标先核对本课程层次的主要知识块、基础工具、典型操作和必要条件，再按重要性分配时间。速成减少重复和展开深度，不等于默认删除低频知识块；不能用综合训练代替尚无教学归属的内容。没有学校考纲时不声称掌握真实考试范围，明确按常见课程范围规划。目标应说明具体对象、操作与完成标准，避免只写掌握主题。若给定材料目录，逐项安排主要知识块；选学内容可轻量安排，用户明确排除的范围尊重排除。对明显超出时间的范围诚实安排extension并说明取舍，不伪称全部精通。每讲围绕可在一讲内完成的知识目标，不把整个方法族挤成单个短段。",
+  "allow_fallback": true,
+  "sha256": "6fd32f30f16a90e05aa7da99e859edcfecbe33d17ea92f50bee0da505d2814a4"
 }

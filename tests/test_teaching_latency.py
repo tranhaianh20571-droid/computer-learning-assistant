@@ -158,7 +158,10 @@ def test_followup_stream_is_paused_and_final_answer_is_fenced(env):
         capability_status={"streaming":{"state":"available"}}
         model_name="synthetic-followup"
         def stream(self,messages):
-            value=json.dumps({"answer":"可以把键理解成抽屉的唯一标签。", "board":BOARD},ensure_ascii=False)
+            value=json.dumps({"alignment_version":1,"answer":"可以把键理解成抽屉的唯一标签。",
+                "beats":[{"id":"answer","text":"可以把键理解成抽屉的唯一标签。",
+                    "blocks":[{"id":"label","type":"text","text":"唯一标签"}],
+                    "cues":[{"block_id":"label","target":"text","quote":"唯一标签"}]}]},ensure_ascii=False)
             for n in range(0,len(value),12):yield value[n:n+12]
     state.teaching.model_adapter_factory=lambda *args:Adapter()
     reply=client.post(f"/api/teaching/{start['conversation_id']}/followup",headers=headers,

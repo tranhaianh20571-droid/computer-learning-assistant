@@ -2,79 +2,31 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Dialog from "./ui/Dialog";
 import "./capabilities.css";
 import { api } from "./api";
+import MemorySettings from "./views/MemorySettings";
+import MemoryPage from "./views/MemoryPage";
+import DocumentParserSettings from "./DocumentParserSettings";
+import SourceProviderSettings from "./SourceProviderSettings";
+import StorageSettings from "./views/StorageSettings";
+import { BookOpen, Cable, Cpu, FlaskConical, HardDrive, Image, ScanLine, Search, ShieldCheck } from "lucide-react";
+import PurposeModelSettings from "./ui/PurposeModelSettings";
+import InfoHint from "./ui/InfoHint";
+import ProviderConnection, { type ProviderConfig, type ProviderFeedback } from "./ui/ProviderConnection";
 
-/** 切片 1：能力配置页（个人模型/TTS、管理员云能力、连接器配对、外发确认查询）。 */
-
-const CAP_LABEL: Record<string, string> = {
-  text: "文本",
-  image: "图像识别",
-  image_generate: "图片生成",
-  tool_call: "工具调用",
-  json_schema: "JSON Schema",
-  streaming: "流式",
-  cancel: "取消",
-};
-
-const CAP_STATE: Record<string, { text: string; cls: string }> = {
-  available: { text: "可用", cls: "succeeded" },
-  unavailable: { text: "不可用", cls: "failed" },
-  unknown: { text: "未知", cls: "queued" },
-};
+/** 能力配置页：个人模型、语音与搜索，管理员 OCR，以及连接器和外发记录。 */
 
 const PROTOCOL_LABEL: Record<string, string> = {
   openai_image: "OpenAI 兼容图片生成",
+  minimax_video: "MiniMax H3 视频",
+  seedance: "Seedance 视频（Ark 兼容）",
   openai: "OpenAI 兼容",
   anthropic: "Anthropic 原生",
   gemini: "Gemini 原生",
   minimax: "MiniMax TTS",
   paddleocr: "PaddleOCR",
-  tavily_hikari: "Tavily Hikari",
+  anysearch: "AnySearch",
 };
 
-const CAP_DETAIL: Record<string, string> = {
-  error: "测试未完成，请检查网络、服务地址和模型名后重试",
-  capability_test_failed: "测试未完成，请检查服务地址与模型名",
-  connection_error: "连接失败，请检查网络和代理",
-  timeout: "请求超时，请稍后重试",
-  credential_invalid: "凭据被服务拒绝，请更新 API Key",
-  unsupported: "服务不支持该能力",
-  rate_limit: "服务限流，请稍后重试",
-  provider_error: "服务暂时出错，请稍后重试",
-};
-
-function CapabilityBadges({ status }: { status: Record<string, any> }) {
-  const entries = Object.keys(status || {});
-  if (!entries.length) return <span className="help">未探测</span>;
-  return (
-    <div className="row">
-      {entries.map((cap) => {
-        const raw = status[cap];
-        const state = typeof raw === "string" ? raw : raw?.state || "unknown";
-        const meta = CAP_STATE[state] || CAP_STATE.unknown;
-        return (
-          <span key={cap} className="capability-result"><span className={`badge ${meta.cls}`}>
-             {CAP_LABEL[cap] || cap}：{meta.text}
-           </span>
-              {typeof raw === "object" && raw?.detail && state !== "available" && <small className="help">{CAP_DETAIL[raw.detail] || "服务未确认该能力，请检查配置后重试"}</small>}
-           </span>
-        );
-      })}
-    </div>
-  );
-}
-
-type ConfigItem = {
-  config_id: string;
-  owner_scope: string;
-  kind: string;
-  protocol: string;
-  endpoint: string;
-  model_name: string;
-  credential_mask: string;
-  capability_status: Record<string, any>;
-  config_version: number;
-  is_active: boolean;
-};
+type ConfigItem = ProviderConfig;
 
 type ConnectorItem = {
   binding_id: string;
@@ -83,32 +35,104 @@ type ConnectorItem = {
   last_seen_at?: string;
 };
 
-export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
-  const [configs, setConfigs] = useState<ConfigItem[]>([]);
+export default function CapabilityConfig({ isAdmin, ownerId, onErr, onOk }: {
+  isAdmin: boolean; ownerId: string; onErr?: (message: string) => void; onOk?: (message: string) => void;
+}) {
+  const pages = [["models", "内容模型"], ["research", "人物蒸馏模型"], ["memory", "记忆模型"], ["media", "图像与语音"], ["search", "搜索"], ["documents", "文档识别"], ["firecrawl", "Firecrawl"], ["bilinote", "BiliNote"], ["storage","存储与性能"]];
+  const categoryIcons:Record<string,React.ReactNode>={storage:<HardDrive/>,models:<Cpu/>,memory:<BookOpen/>,media:<Image/>,search:<Search/>,documents:<ScanLine/>,"personal-memory":<ShieldCheck/>,connections:<Cable/>,admin:<ScanLine/>};
+  const [page, setPage] = useState(() => new URLSearchParams(location.hash.split("?")[1] || "").get("section") || "models");
+  useEffect(() => {
+    function syncPage() { setPage(new URLSearchParams(location.hash.split("?")[1] || "").get("section") || "models"); }
+    window.addEventListener("hashchange", syncPage);
+    return () => window.removeEventListener("hashchange", syncPage);
+  }, []);
+  const currentPage = ["personal-memory","connections"].includes(page) || (page === "admin" && isAdmin) || pages.some(([key]) => key === page) ? page : "models";
+  const [memoryVisited, setMemoryVisited] = useState(currentPage === "memory");
+  useEffect(() => { if (currentPage === "memory") setMemoryVisited(true); }, [currentPage]);
+  const [allConfigs, setConfigs] = useState<ConfigItem[]>([]);
+  const searchConfig = allConfigs.find(config => config.kind === "search" && config.protocol === "anysearch" && config.owner_scope === "user" && config.is_active);
+  const [loaded, setLoaded] = useState(false);
+  const [configLoading, setConfigLoading] = useState(true);
+  const [configError, setConfigError] = useState("");
+  const [connectorLoading, setConnectorLoading] = useState(true);
+  const [connectorsLoaded, setConnectorsLoaded] = useState(false);
+  const [connectorError, setConnectorError] = useState("");
   const [connectors, setConnectors] = useState<ConnectorItem[]>([]);
   const [disclosures, setDisclosures] = useState<any[]>([]);
   const [taskId, setTaskId] = useState("");
   const [pairing, setPairing] = useState<any>(null);
   const [deviceName, setDeviceName] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [, setBusy] = useState(false);
   const [deleting, setDeleting] = useState<ConfigItem | null>(null);
   const [deleteError, setDeleteError] = useState("");
-  const [editing, setEditing] = useState<ConfigItem | null>(null);
   const [operation, setOperation] = useState<string | null>(null);
   const operationLock = useRef(false);
+  const alive = useRef(false);
+  const refreshVersion = useRef(0);
+  const connectorVersion = useRef(0);
+  const configRequest = useRef<AbortController | null>(null);
+  const connectorRequest = useRef<AbortController | null>(null);
+  const [providerFeedback, setProviderFeedback] = useState<Record<string, ProviderFeedback>>({});
+  const currentConfig = (kind: string) => allConfigs.filter(config => config.kind === kind && config.is_active
+    && config.owner_scope === (kind === "ocr" ? "admin" : "user")).at(-1);
+  function providerForm(kind: "image_generation" | "video_generation" | "tts" | "ocr") {
+    const config = currentConfig(kind);
+    return <ProviderConnection key={`${ownerId}:${kind}:${config?.config_id || "new"}:${config?.config_version || 0}`}
+      kind={kind} config={config} feedback={providerFeedback[kind]}
+      onSaved={(saved, feedback) => {
+        setProviderFeedback(previous => ({ ...previous, [kind]: feedback }));
+        setConfigs(previous => [...previous.filter(item => item.config_id !== saved.config_id), saved]);
+      }}
+      onRemove={saved => { setDeleteError(""); setDeleting(saved); }} />;
+  }
+
+  const refreshConfigs = useCallback(async () => {
+    const version = ++refreshVersion.current;
+    configRequest.current?.abort();
+    const controller = new AbortController();
+    configRequest.current = controller;
+    setConfigLoading(true); setConfigError("");
+    try {
+      const cfg = await api.listConfigs(undefined, controller.signal);
+      if (!alive.current || version !== refreshVersion.current) return;
+      setConfigs(cfg.data || []);
+      setLoaded(true);
+    } catch {
+      if (!controller.signal.aborted && alive.current && version === refreshVersion.current) setConfigError("加载能力配置失败，请重试。");
+    } finally {
+      if (alive.current && version === refreshVersion.current) setConfigLoading(false);
+    }
+  }, []);
+
+  const refreshConnectors = useCallback(async () => {
+    const version = ++connectorVersion.current;
+    connectorRequest.current?.abort();
+    const controller = new AbortController();
+    connectorRequest.current = controller;
+    setConnectorLoading(true); setConnectorError("");
+    try {
+      const conn = await api.listConnectors(controller.signal);
+      if (!alive.current || version !== connectorVersion.current) return;
+      setConnectors(conn.data || []); setConnectorsLoaded(true);
+    } catch {
+      if (!controller.signal.aborted && alive.current && version === connectorVersion.current) setConnectorError("加载连接器失败，请重试。");
+    } finally {
+      if (alive.current && version === connectorVersion.current) setConnectorLoading(false);
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
-    try {
-      const [cfg, conn] = await Promise.all([api.listConfigs(), api.listConnectors()]);
-      setConfigs(cfg.data || []);
-      setConnectors(conn.data || []);
-    } catch (e: any) {
-      onErr?.(e?.message || "加载失败");
-    }
-  }, [onErr]);
+    void refreshConnectors();
+    await refreshConfigs();
+  }, [refreshConfigs, refreshConnectors]);
 
   useEffect(() => {
-    refresh();
+    alive.current = true;
+    void refresh();
+    return () => {
+      alive.current = false; refreshVersion.current++; connectorVersion.current++;
+      configRequest.current?.abort(); connectorRequest.current?.abort();
+    };
   }, [refresh]);
 
   const loadDisclosures = useCallback(async () => {
@@ -122,14 +146,18 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
   }, [taskId, onErr]);
 
   return (
-    <div className="stack capabilities-page">
-      {editing && <ConfigEditor key={editing.config_id} config={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); onOk?.("配置已更新；能力将重新测试"); await refresh(); }} />}
+    <div className="capabilities-page">
       {deleting && <Dialog title="删除配置" kind="info" onClose={() => { if (!operationLock.current) setDeleting(null); }} actions={<>
         <button className="btn" disabled={Boolean(operation)} onClick={() => setDeleting(null)}>取消</button>
         <button className="btn btn-danger" disabled={Boolean(operation)} onClick={async () => {
           if (operationLock.current) return;
           operationLock.current = true; setOperation(`delete:${deleting.config_id}`);
-          try { await api.deactivateConfig(deleting.config_id); setConfigs(prev => prev.filter(c => c.config_id !== deleting.config_id)); setDeleting(null); onOk?.("配置已删除"); }
+          try {
+            await api.deactivateConfig(deleting.config_id);
+            setConfigs(prev => prev.filter(c => c.config_id !== deleting.config_id));
+            setProviderFeedback(previous => ({ ...previous, [deleting.kind]: { notice: "", error: "" } }));
+            setDeleting(null); onOk?.("配置已删除");
+          }
           catch (e: any) { setDeleteError(e?.message || "删除失败，请重试"); }
           finally { operationLock.current = false; setOperation(null); }
         }}>{operation ? "正在删除…" : "确认删除"}</button>
@@ -137,78 +165,47 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
         <p>确定删除 {PROTOCOL_LABEL[deleting.protocol] || deleting.protocol} {deleting.model_name}？后续任务将停止使用该配置。</p>
         {deleteError && <p role="alert" className="capability-detail">{deleteError}</p>}
       </Dialog>}
-      <div className="card stack">
-        <h1>能力配置</h1>
-        <p className="lede">
-          个人内容模型与 TTS、管理员云能力。凭据加密存储，页面只显示掩码；能力测试只发送非私人样例。
-        </p>
-        <button className="btn" onClick={refresh} disabled={busy}>刷新</button>
+      <aside className="settings-navigation" hidden={["connections","personal-memory","admin"].includes(currentPage)}>
+      <header className="settings-heading">
+        <div><h1>设置</h1><p className="help">个人模型与服务</p></div>
+      </header>
+      <nav className="settings-tabs" aria-label="设置分类">
+        {pages.map(([key, label]) => <button key={key} type="button" aria-current={currentPage === key ? "page" : undefined}
+          onClick={() => { setPage(key); location.hash = "/capabilities?section=" + key; }}><span className="settings-category-icon" aria-hidden="true">{categoryIcons[key]}</span>{label}</button>)}
+      </nav>
+      </aside>
+
+      <div className="settings-body">
+      {currentPage==="storage"&&<StorageSettings key={ownerId} isAdmin={isAdmin}/>}
+      {(currentPage==="firecrawl"||currentPage==="bilinote")&&<SourceProviderSettings key={ownerId+currentPage} provider={currentPage}/>}
+      <div hidden={!["models","research"].includes(currentPage)}>
+      <PurposeModelSettings key={ownerId + ":" + (currentPage === "research" ? "research" : "models")} researchOnly={currentPage === "research"} showAdvanced={new URLSearchParams(location.hash.split("?")[1] || "").get("advanced") === "1"} visible={["models","research"].includes(currentPage)} onSaved={refreshConfigs}/>
       </div>
-
-      <ContentModelForm
-        onErr={onErr}
-        onOk={async (m: string) => { onOk?.(m); await refresh(); }}
-        onBusy={setBusy}
-      />
-      <ContentModelForm imageGeneration onErr={onErr} onOk={async (m: string) => { onOk?.(m); await refresh(); }} onBusy={setBusy} />
-      <TtsForm
-        onErr={onErr}
-        onOk={async (m: string) => { onOk?.(m); await refresh(); }}
-        onBusy={setBusy}
-      />
-      {isAdmin && (
-        <AdminCloudForm
-          onErr={onErr}
-          onOk={async (m: string) => { onOk?.(m); await refresh(); }}
-          onBusy={setBusy}
-        />
-      )}
-
-      <div className="card stack">
-        <h2>已保存的配置</h2>
-        <p className="help">个人同类配置默认使用最近新增的一条。状态未知表示尚未确认能力，可点击“测试能力”查看结果。</p>
-        {configs.length === 0 && <p className="help">暂无配置。</p>}
-        {configs.map((c) => (
-          <div key={c.config_id} className="stack" style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
-            <div className="row">
-              <strong>{PROTOCOL_LABEL[c.protocol] || c.protocol}</strong>
-              <span className="badge queued">{c.kind}</span>
-              {c.owner_scope === "admin" && <span className="badge partial">管理员</span>}
-              <span className="mono">v{c.config_version}</span>
-            </div>
-            <div className="mono">{c.endpoint}{c.model_name ? ` · ${c.model_name}` : ""}</div>
-            <div className="row">
-              <span className="help">凭据：</span>
-              <span className="mono">{c.credential_mask}</span>
-            </div>
-            <CapabilityBadges status={c.capability_status} />
-            <div className="row">
-              <button className="btn" disabled={Boolean(operation)} onClick={() => setEditing(c)}>编辑</button>
-              <button
-                className="btn"
-                disabled={Boolean(operation)}
-                onClick={async () => {
-                  if (operationLock.current) return;
-                  operationLock.current = true; setOperation(`test:${c.config_id}`);
-                  try {
-                    const r = await api.testConfig(c.config_id);
-                    const values = Object.values(r.capability_status || {}) as any[];
-                    const failed = values.some(raw => (typeof raw === "string" ? raw : raw?.state) === "unavailable");
-                    const unknown = values.some(raw => (typeof raw === "string" ? raw : raw?.state) === "unknown");
-                    onOk?.(failed ? "测试完成，部分能力不可用，请查看原因" : unknown ? "测试完成，部分能力仍未确认，请查看原因" : "能力测试通过");
-                    setConfigs((prev) => prev.map((x) => (x.config_id === c.config_id ? { ...x, capability_status: r.capability_status } : x)));
-                  } catch (e: any) { onErr?.(e?.message || "测试失败"); }
-                  finally { operationLock.current = false; setOperation(null); }
-                }}
-              >
-                {operation === `test:${c.config_id}` ? "正在测试…" : "测试能力"}
-              </button>
-              <button className="btn" disabled={Boolean(operation)} onClick={() => { setDeleteError(""); setDeleting(c); }}>删除</button>
-            </div>
-          </div>
-        ))}
+      {currentPage === "media" && <div>
+        <header className="purpose-heading"><h2 aria-label="图像与语音">图像与语音<InfoHint label="图像与语音">课程封面、人物视频和讲解语音。三项服务分别配置，可以只启用其中一部分；密钥加密保存在服务端，保存后只显示掩码。</InfoHint></h2></header>
+        {configLoading && !loaded && <p role="status">正在加载能力配置…</p>}
+        {configError && <div role="alert">{configError}<button className="btn" onClick={refreshConfigs}>重试加载配置</button></div>}
+        {loaded && !configError && <>{providerForm("image_generation")}{providerForm("video_generation")}{providerForm("tts")}</>}
+      </div>}
+      <div hidden={currentPage !== "search"}>
+      <AnySearchForm key={ownerId} config={searchConfig} loaded={loaded} onBusy={setBusy} onRefresh={refresh}
+        onSaved={config => { if (alive.current) setConfigs(previous => [...previous.filter(item => item.config_id !== config.config_id), config]); }}
+        onDisabled={configId => { if (alive.current) setConfigs(previous => previous.filter(item => item.config_id !== configId)); }} />
       </div>
+      {currentPage === "documents" && <DocumentParserSettings key={ownerId} loaded={loaded && !configLoading && !configError}
+        config={allConfigs.filter(item => item.kind === "document_parser" && item.protocol === "paddleocr_vl" && item.is_active).at(-1)}
+        refresh={refreshConfigs} />}
+      {(memoryVisited || currentPage === "memory") && <div hidden={currentPage !== "memory"}>
+        <MemorySettings key={ownerId} isAdmin={isAdmin} />
+      </div>}
+      {currentPage === "personal-memory" && <div className="personal-memory-settings"><MemoryPage onErr={onErr || (() => {})} /></div>}
+      {isAdmin && currentPage === "admin" && <div>
+        {configLoading && !loaded && <p role="status">正在加载能力配置…</p>}
+        {configError && <div role="alert">{configError}<button className="btn" onClick={refreshConfigs}>重试加载配置</button></div>}
+        {loaded && !configError && providerForm("ocr")}
+      </div>}
 
+      <div hidden={currentPage !== "connections"}>
       <div className="card stack">
         <h2>本机连接器</h2>
         <p className="help">配对码一次性、10 分钟有效。连接器主动建立出站 WSS 通道，只允许本机回环目标。</p>
@@ -234,7 +231,9 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
             <div className="help">有效期至 {pairing.expires_at}</div>
           </div>
         )}
-        {connectors.length === 0 && <p className="help">暂无连接器。</p>}
+        {connectorLoading && <p className="help" role="status">正在加载连接器…</p>}
+        {connectorError && <div><p role="alert">{connectorError}</p><button className="btn" onClick={refreshConnectors}>重试加载连接器</button></div>}
+        {connectorsLoaded && !connectorLoading && !connectorError && connectors.length === 0 && <p className="help">暂无连接器。</p>}
         {connectors.map((c) => (
           <div key={c.binding_id} className="row" style={{ borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
             <span className="mono">{c.device_name || c.binding_id}</span>
@@ -298,246 +297,124 @@ export default function CapabilityConfig({ isAdmin, onErr, onOk }: any) {
           </table>
         )}
       </div>
+      </div>
+      </div>
     </div>
   );
 }
 
-function ConfigEditor({ config, onClose, onSaved }: { config: ConfigItem; onClose: () => void; onSaved: () => Promise<void> }) {
-  const [endpoint, setEndpoint] = useState(config.endpoint);
-  const [model, setModel] = useState(config.model_name);
-  const [apiKey, setApiKey] = useState("");
-  const [voice, setVoice] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState("");
-  const saveLock = useRef(false);
-  const needsModel = ["content_model", "image_generation", "tts"].includes(config.kind);
-  const needsVoice = config.kind === "tts" && Boolean(apiKey.trim());
-  return <Dialog title="编辑配置" kind="info" onClose={() => { if (!saveLock.current) onClose(); }} actions={<>
-    <button className="btn" disabled={saving} onClick={onClose}>取消</button>
-    <button className="btn btn-pri" disabled={saving || !endpoint.trim() || (needsModel && !model.trim()) || (needsVoice && !voice.trim())} onClick={async () => {
-      if (saveLock.current) return;
-      saveLock.current = true; setSaving(true);
-      try {
-        const credentials = apiKey.trim() ? { api_key: apiKey.trim(), ...(config.kind === "tts" ? { voice_id: voice.trim() } : {}) } : undefined;
-        await api.updateConfig(config.config_id, { endpoint: endpoint.trim(), model_name: model.trim(), ...(credentials ? { credentials } : {}) });
-        await onSaved();
-      } catch (e: any) { setSaveError(e?.message || "更新失败，请重试"); }
-      finally { saveLock.current = false; setSaving(false); }
-    }}>{saving ? "正在保存…" : "保存修改"}</button>
-  </>}>
-    <div className="capability-editor">
-      <p>{PROTOCOL_LABEL[config.protocol] || config.protocol}</p>
-      <label className="field">服务地址<input disabled={saving} value={endpoint} onChange={e => setEndpoint(e.target.value)} /></label>
-      <label className="field">模型名<input disabled={saving} value={model} onChange={e => setModel(e.target.value)} /></label>
-      <label className="field">新的 API Key<input type="password" autoComplete="off" disabled={saving} value={apiKey} placeholder="留空保留现有凭据" onChange={e => setApiKey(e.target.value)} /></label>
-      {needsVoice && <label className="field">音色 ID<input disabled={saving} value={voice} onChange={e => setVoice(e.target.value)} /><span>更换语音凭据时，请填写该账号可用的音色 ID。</span></label>}
-      <p>API Key 留空会保留现有凭据。修改后需要重新确认能力状态。</p>
-      {saveError && <p role="alert" className="capability-detail">{saveError}</p>}
-    </div>
-  </Dialog>;
+const SEARCH_DETAIL: Record<string, string> = {
+  SEARCH_TIMEOUT: "搜索服务响应较慢，请稍后测试。",
+  SEARCH_CONNECTION_ERROR: "暂时无法连接搜索服务，请检查网络后再测试。",
+  SEARCH_RATE_LIMITED: "搜索请求较频繁，请稍后测试。",
+  SEARCH_CREDENTIAL_INVALID: "API Key 无效，请更新后测试。",
+  SEARCH_QUOTA_EXCEEDED: "AnySearch 额度不足，可补充额度后再测试。",
+  SEARCH_PROVIDER_UNAVAILABLE: "搜索服务暂不可用，请稍后测试。",
+  SEARCH_OUTPUT_INVALID: "搜索服务未返回有效结果，请稍后测试。",
+  SEARCH_RESPONSE_TOO_LARGE: "搜索服务响应异常，请稍后测试。",
+  SEARCH_REQUEST_REJECTED: "搜索服务未接受请求，请稍后测试。",
+  SEARCH_CONFIG_UNAVAILABLE: "搜索配置尚不可用，请测试或更新 API Key。",
+  SEARCH_BUDGET_EXCEEDED: "本次搜索暂不可用，请稍后测试。",
+  SEARCH_INTERRUPTED: "测试未完成，请稍后再试。",
+  credential_invalid: "API Key 无效，请更新后测试。",
+  connection_error: "暂时无法连接搜索服务，请检查网络后再测试。",
+  timeout: "搜索服务响应较慢，请稍后测试。",
+  rate_limit: "搜索请求较频繁，请稍后测试。",
+};
+
+function searchDetail(detail: unknown): string {
+  return typeof detail === "string" && Object.hasOwn(SEARCH_DETAIL, detail)
+    ? SEARCH_DETAIL[detail] : "上次验证未确认可用，可稍后测试；学习时仍会按需尝试搜索。";
 }
 
-function ContentModelForm({ onErr, onOk, onBusy, imageGeneration = false }: any) {
-  const [protocol, setProtocol] = useState(imageGeneration ? "openai_image" : "openai");
-  const [endpoint, setEndpoint] = useState("https://api.openai.com/v1");
-  const [model, setModel] = useState("");
+function AnySearchForm({ config, loaded, onBusy, onRefresh, onSaved, onDisabled }: {
+  config?: ConfigItem; loaded: boolean; onBusy: (busy: boolean) => void;
+  onRefresh: () => Promise<void>; onSaved: (config: ConfigItem) => void;
+  onDisabled: (configId: string) => void;
+}) {
   const [apiKey, setApiKey] = useState("");
-  const [working, setWorking] = useState(false);
-  const saveLock = useRef(false);
-  return (
-    <div className="card stack">
-      <h2>{imageGeneration ? "课程封面图片模型（可选）" : "个人内容模型"}</h2>
-      {imageGeneration && <p className="help">水墨程序绘图无需此配置。图片生成使用独立模型，调用前确认外发；能力测试会生成一张合成样例图片，可能计费。</p>}
-      <div className="row">
-        <label className="field">
-          <span>协议</span>
-          <select value={protocol} onChange={(e) => setProtocol(e.target.value)}>
-            {imageGeneration ? <option value="openai_image">OpenAI 兼容图片生成</option> : <>
-            <option value="openai">OpenAI 兼容</option>
-            <option value="anthropic">Anthropic 原生</option>
-            <option value="gemini">Gemini 原生</option></>}
-          </select>
-        </label>
-        <label className="field" style={{ flex: 1 }}>
-          <span>服务地址</span>
-          <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
-        </label>
-      </div>
-      <div className="row">
-        <label className="field" style={{ flex: 1 }}>
-          <span>模型名</span>
-          <input value={model} onChange={(e) => setModel(e.target.value)} />
-        </label>
-        <label className="field" style={{ flex: 1 }}>
-          <span>API Key</span>
-          <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
-        </label>
-      </div>
-      <button className="btn btn-pri"
-        disabled={working || !endpoint.trim() || !model.trim() || !apiKey.trim()}
-        onClick={async () => {
-          if (saveLock.current) return;
-          saveLock.current = true; setWorking(true); onBusy?.(true);
-          try {
-            await api.createConfig({
-              kind: imageGeneration ? "image_generation" : "content_model",
-              protocol,
-              endpoint: endpoint.trim(),
-              model_name: model.trim(),
-              credentials: { api_key: apiKey.trim() },
-              owner_scope: "user",
-            });
-            setApiKey("");
-            await onOk?.("模型配置已保存（凭据已加密）");
-          } catch (e: any) { onErr?.(e?.message || "保存失败"); }
-          finally { saveLock.current = false; setWorking(false); onBusy?.(false); }
-        }}
-      >
-        {working ? "正在保存…" : "保存模型配置"}
+  const [working, setWorking] = useState<"save" | "test" | "disable" | null>(null);
+  const [notice, setNotice] = useState("");
+  const lock = useRef(false);
+  const alive = useRef(false);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  // 展示掩码永远不作为凭据；也拒绝带空白/控制字符的输入，不暗中修剪 Key。
+  const validKey = Boolean(apiKey) && apiKey.length <= 4096 && apiKey === apiKey.trim()
+    && !/[\s\u0000-\u001f\u007f-\u009f*•●…]/u.test(apiKey)
+    && apiKey !== config?.credential_mask;
+
+  const perform = async (action: "save" | "test" | "disable") => {
+    if (!loaded || lock.current || (action === "save" ? !validKey : !config)) return;
+    lock.current = true; setWorking(action); setNotice(""); onBusy(true);
+    const current = config;
+    // 清空受控输入后再等待网络，无论保存成功或失败都不保留明文。
+    const credentials = action === "save" ? { api_key: apiKey } : undefined;
+    if (action === "save") setApiKey("");
+    let saved = current;
+    let persisted = false;
+    try {
+      if (action === "save") {
+        saved = current
+          ? await api.updateConfig(current.config_id, { credentials })
+          : await api.createConfig({ kind: "search", protocol: "anysearch", endpoint: "https://api.anysearch.com",
+            model_name: "", credentials, owner_scope: "user" });
+        persisted = true;
+        if (!alive.current) return;
+        onSaved(saved!);
+        setNotice("Key 已保存，学习时将按需搜索。");
+      }
+      if (!saved || !alive.current) return;
+      if (action === "disable") {
+        await api.deactivateConfig(saved.config_id);
+        if (!alive.current) return;
+        onDisabled(saved.config_id);
+        setNotice("搜索已停用。学习将使用现有资料继续。");
+      } else if (action === "test") {
+        const result = await api.testConfig(saved.config_id);
+        if (!alive.current) return;
+        const tested = result.capability_status?.text;
+        const testedState = typeof tested === "string" ? tested : tested?.state;
+        setNotice(testedState === "available" ? "AnySearch 测试通过。" : searchDetail(tested?.detail));
+      }
+    } catch (error: unknown) {
+      if (!alive.current) return;
+      const safe = error as { status?: number; code?: string };
+      setNotice(safe.status === 409 ? "配置已发生变化，请刷新后再更新或测试。"
+        : safe.status === 401 ? "会话已失效，请刷新页面后重试。"
+        : safe.status === 403 ? "当前会话无权管理此搜索配置，请刷新后重试。"
+        : safe.status === 429 ? SEARCH_DETAIL.SEARCH_RATE_LIMITED
+        : safe.code && Object.hasOwn(SEARCH_DETAIL, safe.code) ? searchDetail(safe.code)
+        : safe.status === 422 ? "配置格式不正确，请检查 API Key 的格式后重试。"
+        : action === "disable" ? "停用未完成，请稍后重试。"
+        : action === "save" ? persisted ? "Key 已保存，学习时将按需搜索。" : "保存未完成，请稍后重试。"
+        : "测试未完成，可稍后重试；学习时仍会按需尝试搜索。");
+    } finally {
+      if (alive.current) await onRefresh();
+      lock.current = false;
+      if (alive.current) { setWorking(null); onBusy(false); }
+    }
+  };
+
+  return <section className="card stack" aria-labelledby="anysearch-heading">
+    <h2 id="anysearch-heading" aria-label="AnySearch 搜索">AnySearch 搜索<InfoHint label="AnySearch 搜索">使用你自己的 AnySearch 账号额度，学伴按需发送最小主题查询；AnySearch 可能通过内部上游服务完成搜索。保存后会在学习中按需自动使用，无需先测试，也可随时停用。连接测试只发送非私人样例，会使用少量搜索额度；未配置或实际搜索失败时，学习会使用现有资料继续。</InfoHint></h2>
+    {!loaded ? <p className="help" role="status">正在加载搜索设置…</p>
+      : !config && <p className="help">尚未配置搜索。你仍可使用现有资料学习。</p>}
+    <label className="field">
+      <span>{config ? "新的 API Key" : "API Key"}</span>
+      <input type="password" autoComplete="off" spellCheck={false} maxLength={4096}
+        value={apiKey} disabled={!loaded || Boolean(working)} placeholder={config ? "只在更新 Key 时填写" : "填写自己的 AnySearch API Key"}
+        onChange={event => { setApiKey(event.target.value); setNotice(""); }} />
+    </label>
+    <div className="row">
+      <button className="btn btn-pri" disabled={!loaded || Boolean(working) || !validKey} onClick={() => perform("save")}>
+        {working === "save" ? "正在保存…" : config ? "更新 Key" : "保存 Key"}
       </button>
+      {config && <>
+        <button className="iconbtn" title="测试" aria-label="测试搜索" disabled={Boolean(working)} onClick={() => perform("test")}><FlaskConical size={16} /></button>
+        <button className="btn" disabled={Boolean(working)} onClick={() => perform("disable")}>{working === "disable" ? "正在停用…" : "停用搜索"}</button>
+      </>}
     </div>
-  );
-}
-
-function TtsForm({ onErr, onOk, onBusy }: any) {
-  const [endpoint, setEndpoint] = useState("https://api.minimaxi.com");
-  const [apiKey, setApiKey] = useState("");
-  const [voice, setVoice] = useState("");
-  const [voices,setVoices] = useState<{voice_id:string;name:string;category:string;description:string}[]>([]);
-  const [working,setWorking] = useState<"query"|"save"|null>(null);
-  const [catalogMessage,setCatalogMessage] = useState("");
-  const categories=[{id:"system_voice",name:"系统音色"},{id:"voice_cloning",name:"克隆音色"},{id:"voice_generation",name:"文生音色"}];
-  const resetCatalog=()=>{setVoices([]);setVoice("");setCatalogMessage("");};
-  const selected=voices.find(item=>item.voice_id===voice);
-  return (
-    <div className="card stack">
-      <h2>个人语音（MiniMax）</h2>
-      <div className="row">
-        <label className="field" style={{ flex: 1 }}>
-          <span>服务地址</span>
-          <input value={endpoint} disabled={Boolean(working)} onChange={(e) => {setEndpoint(e.target.value);resetCatalog();}} />
-        </label>
-        <label className="field" style={{ flex: 1 }}>
-          <span>音色</span>
-          <select aria-label="音色" style={{width:"100%",minWidth:0}} value={voice} onChange={e=>setVoice(e.target.value)} disabled={Boolean(working)||!voices.length}>
-            <option value="">{working==="query"?"正在获取音色…":voices.length?"请选择音色":"先获取可用音色"}</option>
-            {categories.map(category=>{
-              const items=voices.filter(item=>item.category===category.id);
-              return items.length?<optgroup key={category.id} label={category.name}>
-                {items.map(item=><option key={item.voice_id} value={item.voice_id}>{item.name===item.voice_id?item.name:`${item.name} · ${item.voice_id}`}</option>)}
-              </optgroup>:null;
-            })}
-          </select>
-        </label>
-        <button className="btn" style={{alignSelf:"flex-end"}} disabled={Boolean(working)||!apiKey.trim()||!endpoint.trim()}
-          onClick={async()=>{
-            setWorking("query");onBusy?.(true);setCatalogMessage("");setVoices([]);setVoice("");
-            try{
-              const result=await api.listTtsVoices({endpoint,api_key:apiKey});
-              const items=result.data||[];setVoices(items);
-              setCatalogMessage(items.length?`已获取 ${items.length} 个音色` : "当前账号未返回可用音色。");
-            }catch(e:any){
-              setCatalogMessage("获取失败，请检查服务地址与 API Key 后重试。");onErr?.(e?.message||"获取音色失败");
-            }finally{setWorking(null);onBusy?.(false);}
-          }}>{working==="query"?"正在获取…":"获取可用音色"}</button>
-      </div>
-      {catalogMessage&&<p className="help" role="status">{catalogMessage}</p>}
-      {selected?.description&&<p className="help">{selected.description}</p>}
-      <label className="field">
-        <span>API Key</span>
-        <input type="password" value={apiKey} disabled={Boolean(working)} onChange={(e) => {setApiKey(e.target.value);resetCatalog();}} autoComplete="off" />
-      </label>
-      <button
-        disabled={Boolean(working)||!voice||!apiKey.trim()||!endpoint.trim()}
-        onClick={async () => {
-          setWorking("save");onBusy?.(true);
-          try {
-            await api.createConfig({
-              kind: "tts",
-              protocol: "minimax",
-              endpoint: endpoint.trim(),
-              model_name: "speech-2.8-hd",
-              credentials: { api_key: apiKey.trim(), voice_id: voice },
-              owner_scope: "user",
-            });            onOk?.("TTS 配置已保存（默认 speech-2.8-hd）");
-          } catch (e: any) { onErr?.(e?.message || "保存失败"); }
-          finally { setWorking(null);onBusy?.(false); }
-        }}
-      >
-        保存 TTS 配置
-      </button>
-    </div>
-  );
-}
-
-function AdminCloudForm({ onErr, onOk, onBusy }: any) {
-  const [kind, setKind] = useState("ocr");
-  const [protocol, setProtocol] = useState("paddleocr");
-  const [endpoint, setEndpoint] = useState("https://ocr.example.com/api");
-  const [model, setModel] = useState("PaddleOCR-VL-1.6");
-  const [apiKey, setApiKey] = useState("");
-  const [working, setWorking] = useState(false);
-  const saveLock = useRef(false);
-  return (
-    <div className="card stack">
-      <h2>管理员云能力</h2>
-      <p className="help">仅管理员可见与配置；普通用户不可读取这些配置的凭据。</p>
-      <div className="row">
-        <label className="field">
-          <span>类型</span>
-          <select
-            value={kind}
-            onChange={(e) => {
-              const k = e.target.value;
-              setKind(k);
-              setProtocol(k === "ocr" ? "paddleocr" : "tavily_hikari");
-              setEndpoint(k === "ocr" ? "https://ocr.example.com/api" : "http://127.0.0.1:8787");
-              setModel(k === "ocr" ? "PaddleOCR-VL-1.6" : "");
-            }}
-          >
-            <option value="ocr">云端 OCR</option>
-            <option value="search">联网搜索</option>
-          </select>
-        </label>
-        <label className="field" style={{ flex: 1 }}>
-          <span>服务地址</span>
-          <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
-        </label>
-      </div>
-      <div className="row">
-        {kind === "ocr" && (
-          <label className="field" style={{ flex: 1 }}>
-            <span>模型</span>
-            <input value={model} onChange={(e) => setModel(e.target.value)} />
-          </label>
-        )}
-        <label className="field" style={{ flex: 1 }}>
-          <span>API Key</span>
-          <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
-        </label>
-      </div>
-      <button className="btn btn-pri"
-        disabled={working || !endpoint.trim() || !apiKey.trim()}
-        onClick={async () => {
-          if (saveLock.current) return;
-          saveLock.current = true; setWorking(true); onBusy?.(true);
-          try {
-            await api.createConfig({
-              kind,
-              protocol,
-              endpoint: endpoint.trim(),
-              model_name: model.trim(),
-              credentials: { api_key: apiKey.trim() },
-              owner_scope: "admin",
-            });
-            setApiKey("");
-            await onOk?.("云能力配置已保存");
-          } catch (e: any) { onErr?.(e?.message || "保存失败"); }
-          finally { saveLock.current = false; setWorking(false); onBusy?.(false); }
-        }}
-      >
-        {working ? "正在保存…" : "保存云能力配置"}
-      </button>
-    </div>
-  );
+    <p className="help">连接测试会使用少量搜索额度。</p>
+    {notice && <p className="help" role="status">{notice}</p>}
+  </section>;
 }

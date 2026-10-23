@@ -75,6 +75,7 @@ class GeminiAdapter(AdapterBase):
             }
         elif capability == "cancel":
             pass
+        self._apply_probe_reasoning(payload)
         status, body, _ = self._request(
             "POST", self._model_url("generateContent"), json_body=payload, params=self._params()
         )
@@ -82,6 +83,7 @@ class GeminiAdapter(AdapterBase):
 
     def _probe_streaming(self) -> None:
         payload = {"contents": [{"role": "user", "parts": [{"text": PROBE_TEXT}]}]}
+        self._apply_probe_reasoning(payload)
         try:
             with self._stream_request(
                 "POST",

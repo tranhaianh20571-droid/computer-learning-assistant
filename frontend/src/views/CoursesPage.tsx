@@ -104,7 +104,7 @@ export default function CoursesPage({ me, onErr, go }: {
         }}>{deleteBusy ? "正在删除…" : "确认删除"}</button>
       </>}>
       <p>确定删除“{deleting.title}”？</p>
-      <p>{deleting.kind === "route" ? "仅删除合集编排，其中的课程和已有学习记录会保留。" : "将删除这门课程的大纲、讲次和相关学习产物，并从所属合集中移除。此操作无法撤销。"}</p>
+      <p>{deleting.kind === "route" ? "将删除该合集当前编排中的全部课程，连同其大纲、讲次和学习记录；已移出的课程与共享资料会保留。此操作无法撤销。" : "将删除这门课程的大纲、讲次和相关学习产物，并从所属合集中移除。此操作无法撤销。"}</p>
       {deleteError && <p className="library-delete-error" role="alert">{deleteError}</p>}
     </Dialog>}
   </div>;

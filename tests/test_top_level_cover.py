@@ -63,7 +63,9 @@ def test_confirm_and_repeat_confirm_create_only_one_root_cover(env):
     for stage in get_route(env, rid)["stages"]:
         for course in stage["courses"]:
             assert features.cover("course", course["course_id"], env[2])["status"] == "suppressed"
-    assert calls == []
+    # ADR-034 automatic mode: confirming the root plan already pinned the enabled image model, so the
+    # single root cover is a real image request instead of a local placeholder.
+    assert len(calls) == 1 and "无文字" in calls[0]
 
 
 def test_random_request_keys_reuse_pending_current_and_explicit_regenerate(env):
@@ -120,13 +122,37 @@ def test_historic_membership_and_multiple_routes_match_library_until_all_detache
     with env[1].db.session() as sess:
         sess.add(RouteDetachedCourseRow(route_id=rid1, course_id=cid))
     assert features.cover("course", cid, env[2])["status"] == "suppressed"
-    assert env[0].delete(f"/api/planning/routes/{rid2}", headers=env[3]).status_code == 200
+    # ADR-038 cascade: deleting a route removes its *current* members, so rid2 is detached instead
+    # of deleted here — this case is about grouping, not about cascade deletion.
+    with env[1].db.session() as sess:
+        sess.add(RouteDetachedCourseRow(route_id=rid2, course_id=cid))
     with env[1].db.session() as sess:
         course = sess.get(CourseRow, cid)
         course.source_route_version_id = sess.get(LearningRouteRow, rid1).current_route_version_id
         assert resolve(sess, "course", cid, env[2])["cover_eligible"] is True
     assert cid in {row["id"] for row in get_library(env) if row["kind"] == "course"}
     assert features.cover("course", cid, env[2])["status"] == "not_generated"
+
+
+def test_delete_route_cascades_current_members_but_keeps_historic_ones(env):
+    features, _, _ = configured(env)
+    cid, _ = create_draft(env, "course", "Cascaded member")
+    rid1, _, _ = committed_route(env, "Cascade first root")
+    rid2, _, _ = committed_route(env, "Cascade second root")
+    attach(env, rid1, cid, historic=True)
+    attach(env, rid2, cid)
+    assert features.cover("course", cid, env[2])["cover_owner_id"] == min(rid1, rid2)
+    members = [c["course_id"] for stage in get_route(env, rid2)["stages"] for c in stage["courses"]]
+    assert cid in members and len(members) >= 2
+    # rid2 currently organizes these courses, so deleting rid2 deletes all of them.
+    response = env[0].delete(f"/api/planning/routes/{rid2}", headers=env[3])
+    assert response.status_code == 200 and sorted(response.json()["course_ids"]) == sorted(members)
+    assert not {row["id"] for row in get_library(env) if row["kind"] == "course"} & set(members)
+    assert env[0].get(f"/api/courses/{cid}/overview", headers=env[3]).status_code == 404
+    with env[1].db.session() as sess:
+        assert sess.get(CourseRow, cid).deleted_at is not None
+    # The historic-only route survives deletion of the route it never currently organized.
+    assert env[0].get(f"/api/routes/{rid1}/overview", headers=env[3]).status_code == 200
 
 
 def test_queued_child_is_cancelled_before_supplier_call(env):
@@ -207,14 +233,35 @@ def test_copy_survives_source_deletion_before_worker_publishes(env):
     assert env[0].get(current["image_url"], headers=env[3]).status_code == 200 and len(calls) == 1
 
 
-def test_scope_without_completed_cover_uses_stable_local_fallback(env):
-    features, _, calls = configured(env)
+def test_scope_conversion_without_completed_cover_pins_the_enabled_image_model(env):
+    features, config, calls = configured(env)
     rid, item = create_draft(env, title="Local scope fallback")
     response = env[0].post(f"/api/planning/drafts/{item['draft_id']}/scope", headers=env[3],
         json={"planning_scope": "course"})
     assert response.status_code == 200, response.text
     cid = response.json()["draft"]["target_id"]
     work = response.json()["cover"]
+    assert work["status"] == "queued"
+    features._run(work["task_id"])
+    # ADR-034 automatic mode: the enabled image model is pinned at scope conversion, no per-cover dialog.
+    cover = features.cover("course", cid, env[2])
+    assert cover["actual_method"] == "image" and len(calls) == 1
+    grant = features.cover_disclosures.list_for_task(work["task_id"], actor_id=env[2])
+    assert len(grant) == 1 and grant[0]["config_version"] == config["config_version"]
+    again = features.enqueue_cover("course", cid, env[2], "new-random-key", automatic=True)
+    assert again["task_id"] == work["task_id"] and len(calls) == 1
+
+
+def test_scope_conversion_uses_local_cover_when_automatic_authorization_is_off(env):
+    features, _, calls = configured(env)
+    features.cover_automatic_authorization = False
+    rid, item = create_draft(env, title="Local scope fallback off")
+    response = env[0].post(f"/api/planning/drafts/{item['draft_id']}/scope", headers=env[3],
+        json={"planning_scope": "course"})
+    assert response.status_code == 200, response.text
+    cid = response.json()["draft"]["target_id"]
+    work = response.json()["cover"]
+    assert work["requested_method"] == "procedural"
     features._run(work["task_id"])
     assert features.cover("course", cid, env[2])["actual_method"] == "procedural"
     again = features.enqueue_cover("course", cid, env[2], "new-random-key", automatic=True)
@@ -230,3 +277,36 @@ def test_revoked_pending_cannot_be_reused(env):
     response = automatic(env, rid, idempotency_key="another-key")
     assert response.status_code == 409 and response.json()["error_code"] == "DISCLOSURE_REVOKED"
     assert counts(env) == (1, 1) and calls == []
+
+
+def test_confirm_without_image_model_keeps_the_local_cover(env):
+    features, config, calls = configured(env)
+    features.cover_configs.deactivate(config["config_id"], actor_id=env[2], is_admin=False)
+    rid, item, result = committed_route(env, "No image model")
+    assert result["covers"][0]["requested_method"] == "procedural"
+    features._run(result["covers"][0]["task_id"])
+    cover = features.cover("route", rid, env[2])
+    assert cover["actual_method"] == "procedural" and cover["requested_method"] == "procedural"
+    assert cover["image_url"] and calls == []
+
+
+def test_confirm_keeps_the_local_cover_when_automatic_authorization_is_off(env):
+    features, _, calls = configured(env)
+    features.cover_automatic_authorization = False
+    rid, item, result = committed_route(env, "Automatic authorization off")
+    assert result["covers"][0]["requested_method"] == "procedural"
+    features._run(result["covers"][0]["task_id"])
+    assert features.cover("route", rid, env[2])["actual_method"] == "procedural" and calls == []
+
+
+def test_revoked_automatic_grant_never_reaches_the_supplier(env):
+    features, _, calls = configured(env)
+    rid, item, result = committed_route(env, "Revoked automatic grant")
+    work = result["covers"][0]
+    grants = features.cover_disclosures.list_for_task(work["task_id"], actor_id=env[2])
+    assert len(grants) == 1
+    features.cover_disclosures.revoke(grants[0]["grant_id"], actor_id=env[2])
+    features._run(work["task_id"])
+    cover = features.cover("route", rid, env[2])
+    assert cover["status"] == "failed" and cover["error_code"] == "DISCLOSURE_REVOKED"
+    assert cover["image_url"] is None and calls == []

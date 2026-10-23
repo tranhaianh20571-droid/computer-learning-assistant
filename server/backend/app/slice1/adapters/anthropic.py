@@ -83,6 +83,7 @@ class AnthropicAdapter(AdapterBase):
             payload["tool_choice"] = {"type": "tool", "name": "probe_json"}
         elif capability == "cancel":
             pass
+        self._apply_probe_reasoning(payload)
         status, body, _ = self._request("POST", self._messages_url(), json_body=payload)
         self._map_status(status, body)
 
@@ -93,6 +94,7 @@ class AnthropicAdapter(AdapterBase):
             "messages": [{"role": "user", "content": PROBE_TEXT}],
             "stream": True,
         }
+        self._apply_probe_reasoning(payload)
         try:
             with self._stream_request(
                 "POST",

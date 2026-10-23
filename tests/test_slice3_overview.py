@@ -10,10 +10,11 @@ from common_fixtures import (
     OUTLINE_OK_PAYLOAD,
     ROUTE_OK_PAYLOAD,
     SyntheticModelAdapter,
+    SkeletonThenOutlineAdapter,
     SyntheticSearchAdapter,
     auth_headers,
     make_user,
-    run_route_generate,
+    run_legacy_route_generate as run_route_generate,
 )
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -54,7 +55,8 @@ def _confirm_route_and_outline(env):
         "/api/planning/routes", headers=auth_headers(token),
         json={"title": "总览路线", "scenario": "self_study"},
     ).json()["route_id"]
-    env["container"]["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
+    env["container"]["model"] = SkeletonThenOutlineAdapter(
+        payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD)
     env["container"]["search"] = SyntheticSearchAdapter()
     t1 = client.post(
         "/api/planning/tasks", headers=auth_headers(token),

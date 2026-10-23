@@ -37,6 +37,22 @@ const restored=stageBoard([{step_no:1,board_scope:"stage",board:scene}],{present
 const tags=restored.presentation.blocks.filter(block=>block.id!=="later").map(block=>block.layout_group);
 assert.equal(new Set(tags).size,1);
 assert(restored.presentation.blocks.find(block=>block.id==="later").layout_group!==tags[0]);
+const frozenA={id:"frozen-a",type:"text",text:"First topic",layout_group:"first"};
+const frozenB={id:"frozen-b",type:"text",text:"Second topic",layout_group:"second"};
+const appendedA={id:"new-a",type:"text",text:"Later addition",layout_group:"first"};
+assert.deepEqual(boardGroups([frozenA,frozenB,appendedA]).flatMap(group=>group.block_ids),
+  ["frozen-a","frozen-b","new-a"],"a later reference to an earlier group stays at the end");
+const mergedStage=stageBoard([{step_no:1,board_scope:"stage",
+  board:{presentation:{blocks:[{id:"a",type:"text",text:"A"},{id:"b",type:"text",text:"B"}]},
+    beats:[{block_ids:["a"]},{block_ids:["b"]}]}}],
+  {presentation:{blocks:[{id:"a",type:"text",text:"A"},{id:"c",type:"text",text:"C"}]},
+    beats:[{block_ids:["a","c"]}]},2,"stage");
+assert.deepEqual(mergedStage.presentation.all_blocks.map(block=>block.id),["a","b","c"]);
+assert.deepEqual(boardGroups(mergedStage.presentation.all_blocks,mergedStage.beats).flatMap(group=>group.block_ids),["a","b","c"]);
+const textBeats=[{block_ids:["a"]},{block_ids:["b"]}];
+const streamPrefix=boardGroups([{id:"a",type:"text",text:"A"}],textBeats.slice(0,1));
+const streamAppend=boardGroups([{id:"a",type:"text",text:"A"},{id:"b",type:"text",text:"B"}],textBeats);
+assert.equal(streamPrefix[0].id,streamAppend[0].id,"compacting a new beat preserves the existing group's anchor");
 const oldGroups=[{id:"one",block_ids:["one"]},{id:"two",block_ids:["two"]}];
 const oldBlocks=[{id:"one",type:"text",text:"第一组说明"},{id:"two",type:"text",text:"第二组说明"}];
 const original=layoutBoard(oldBlocks,1200,new Set(["one","two"]),[],{},"",{},{groups:oldGroups,pageHeight:900});

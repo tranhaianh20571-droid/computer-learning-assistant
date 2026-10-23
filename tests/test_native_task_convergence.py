@@ -75,6 +75,23 @@ def test_registered_planning_errors_preserve_identity(code):
     assert to_controlled_error(exc) is exc
 
 
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize("kind,code", [("timeout", "MODEL_TIMEOUT"), ("connection", "MODEL_CONNECTION_ERROR")])
+def test_sdk_wrapped_transport_failure_preserves_retry_eligibility(provider, kind, code):
+    import importlib
+    import httpx2
+    from pydantic_ai.exceptions import ModelAPIError
+    from backend.planning.retry_policy import AUTO_RETRY_ERRORS
+    sdk = importlib.import_module(provider)
+    request = httpx2.Request("POST", "https://synthetic.invalid/v1/messages")
+    failure = sdk.APITimeoutError(request=request) if kind == "timeout" else sdk.APIConnectionError(request=request)
+    wrapped = ModelAPIError("synthetic-model", "synthetic-private-error")
+    wrapped.__cause__ = failure
+    result = to_controlled_error(wrapped)
+    assert result.code == code and result.code in AUTO_RETRY_ERRORS
+    assert "synthetic-private" not in str(result)
+
+
 def test_create_caller_transaction_dedup_and_rollback(env):
     db, tasks, _ = env
     with pytest.raises(RuntimeError, match='synthetic_abort'):

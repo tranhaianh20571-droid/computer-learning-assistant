@@ -10,10 +10,11 @@ from common_fixtures import (
     OUTLINE_OK_PAYLOAD,
     ROUTE_OK_PAYLOAD,
     SyntheticModelAdapter,
+    SkeletonThenOutlineAdapter,
     SyntheticSearchAdapter,
     auth_headers,
     make_user,
-    run_route_generate,
+    run_legacy_route_generate as run_route_generate,
 )
 
 from backend.planning.scene import (  # noqa: E402
@@ -60,7 +61,8 @@ def _confirmed_route(env):
         "/api/planning/routes", headers=auth_headers(token),
         json={"title": "场景路线", "scenario": "self_study"},
     ).json()["route_id"]
-    env["container"]["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
+    env["container"]["model"] = SkeletonThenOutlineAdapter(
+        payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD)
     env["container"]["search"] = SyntheticSearchAdapter()
     task_id = client.post(
         "/api/planning/tasks", headers=auth_headers(token),

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from .errors import TeachingError
 from .service import TeachingService
+from .knowledge import CoverageIn, KnowledgeCompleteIn, ChannelIn, LessonTitleIn
 
 
 class CheckpointIn(BaseModel):
@@ -27,6 +28,29 @@ class AudioIn(BaseModel):
     step_no: int = Field(ge=1,le=24)
 
 
+class FeynmanStartIn(BaseModel):
+    checkpoint_id: str = Field(min_length=1, max_length=64)
+
+
+class FeynmanAnswerIn(BaseModel):
+    question_id: str = Field(min_length=1, max_length=64)
+    revision: int = Field(ge=1)
+    content: str = Field(min_length=1, max_length=3000)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    help: bool = False
+
+
+class FeynmanActionIn(BaseModel):
+    revision: int = Field(ge=1)
+
+
+class FeynmanPlaybackIn(BaseModel):
+    turn_id: str = Field(min_length=1, max_length=64)
+    client_seq: int = Field(ge=1)
+    position_ms: int = Field(ge=0, le=120000)
+    ended: bool = False
+
+
 class LessonConfirmIn(BaseModel):
     fingerprint: str = Field(min_length=64, max_length=64)
     content_confirmed: bool = False
@@ -42,9 +66,64 @@ def create_teaching_router(
     resolve_user: Callable[[Request], Any],
 ) -> APIRouter:
     router = APIRouter(tags=["slice4"])
+    from .interactive import create_interactive_router
+    router.include_router(create_interactive_router(teaching, resolve_user))
 
     def _user(request: Request):
         return resolve_user(request)
+
+    @router.get("/api/teaching/{conversation_id}/knowledge")
+    def knowledge(conversation_id: str, request: Request, after: int = 0, limit: int = 30):
+        if after < 0 or not 1 <= limit <= 100:
+            from .errors import terr
+            raise terr("invalid_field")
+        return teaching.knowledge.view(conversation_id, _user(request).user_id, after=after, limit=limit)
+
+    @router.post("/api/teaching/{conversation_id}/coverage")
+    def coverage(conversation_id: str, body: CoverageIn, request: Request):
+        return teaching.knowledge.coverage(conversation_id, _user(request).user_id, body)
+
+    @router.post("/api/teaching/{conversation_id}/knowledge/complete")
+    def knowledge_complete(conversation_id: str, body: KnowledgeCompleteIn, request: Request):
+        return teaching.knowledge.complete(conversation_id, _user(request).user_id, body)
+
+    @router.put("/api/teaching/{conversation_id}/presentation")
+    def presentation(conversation_id: str, body: ChannelIn, request: Request):
+        return teaching.knowledge.save_channel(conversation_id, _user(request).user_id, body)
+
+    @router.patch("/api/teaching/{conversation_id}/lesson-title")
+    def lesson_title(conversation_id: str, body: LessonTitleIn, request: Request):
+        return teaching.knowledge.rename(conversation_id, _user(request).user_id, body)
+
+    @router.get("/api/teaching/{conversation_id}/feynman")
+    def feynman_view(conversation_id: str, request: Request):
+        return teaching.feynman.view(conversation_id, _user(request).user_id)
+
+    @router.post("/api/teaching/{conversation_id}/feynman/start")
+    def feynman_start(conversation_id: str, body: FeynmanStartIn, request: Request):
+        return teaching.feynman.start(conversation_id, _user(request).user_id, body.checkpoint_id)
+
+    @router.post("/api/teaching/{conversation_id}/feynman/answer")
+    def feynman_answer(conversation_id: str, body: FeynmanAnswerIn, request: Request):
+        return teaching.feynman.answer(conversation_id, _user(request).user_id, body.question_id,
+            body.revision, body.content, body.idempotency_key, help=body.help)
+
+    @router.post("/api/teaching/{conversation_id}/feynman/skip")
+    def feynman_skip(conversation_id: str, body: FeynmanActionIn, request: Request):
+        return teaching.feynman.action(conversation_id, _user(request).user_id, body.revision, "skip")
+
+    @router.post("/api/teaching/{conversation_id}/feynman/continue")
+    def feynman_continue(conversation_id: str, body: FeynmanActionIn, request: Request):
+        return teaching.feynman.action(conversation_id, _user(request).user_id, body.revision, "continue")
+
+    @router.post("/api/teaching/{conversation_id}/feynman/retry")
+    def feynman_retry(conversation_id: str, request: Request):
+        return teaching.feynman.retry(conversation_id, _user(request).user_id)
+
+    @router.post("/api/teaching/{conversation_id}/feynman/playback")
+    def feynman_playback(conversation_id: str, body: FeynmanPlaybackIn, request: Request):
+        return teaching.feynman.playback(conversation_id, _user(request).user_id,
+            body.turn_id, body.client_seq, body.position_ms, body.ended)
 
     @router.post("/api/teaching/prewarm-library")
     def prewarm_library(request: Request):
@@ -134,14 +213,21 @@ def create_teaching_router(
         user = _user(request)
         return teaching.resume_lesson(conversation_id, actor_id=user.user_id)
 
+    @router.post("/api/teaching/{conversation_id}/answer-audio")
+    def answer_audio(conversation_id: str, request: Request) -> dict:
+        return teaching.ensure_answer_audio(conversation_id, actor_id=_user(request).user_id)
+
     @router.post("/api/teaching/tasks/{task_id}/run")
     def run_task(task_id: str, request: Request) -> dict:
         """执行步骤/TTS/追问 worker（本地开发与测试入口；生产由 worker 池领取）。"""
         user = _user(request)
         task = teaching.tasks.get_task(task_id, actor_id=user.user_id)
         kind = task["kind"]
+        if kind in ("feynman", "feynman_audio"):
+            teaching.feynman.retry(task["subject_id"].split(":")[0], user.user_id)
+            return {"status": "queued", "task_id": task_id}
         if task["status"]=="succeeded":return {"status":"succeeded"}
-        teaching._check_authorization(task_id, audio=kind == "tts")
+        teaching._check_authorization(task_id, audio=kind in ("tts", "tts_answer"))
         teaching.tasks.requeue_for_retry(task_id, actor_id=user.user_id)
         if teaching.server_managed and kind in ('tts','lesson_step_generate') and ':followup:' not in task['subject_id']:
             return {'status':'queued','task_id':task_id}
@@ -151,6 +237,8 @@ def create_teaching_router(
             return teaching.run_step_generation(task_id)
         if kind == "tts":
             return teaching.run_tts(task_id)
+        if kind == "tts_answer":
+            return teaching.run_answer_tts(task_id)
         from ..planning.errors import error
 
         raise error("invalid_field", f"unknown teaching task kind {kind}")

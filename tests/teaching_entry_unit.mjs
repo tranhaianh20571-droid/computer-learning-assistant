@@ -49,6 +49,7 @@ assert.equal(lessonAudioRequired({}, {...step,audio_ready:true,audio_id:"synthet
 assert.equal(lessonAudioRequired({queued_tasks:[{kind:"tts",step_no:1,status:"failed"}]},step,1),false);
 assert.equal(lessonAudioRequired({queued_tasks:[{kind:"tts",step_no:2,status:"queued"}]},step,1),false);
 assert.equal(lessonAudioRequired({queued_tasks:[{kind:"tts",step_no:1,status:"running"}]},step,1),true);
-assert.equal(lessonAudioRequired({tts_authorized:true},undefined,1),false);
+assert.equal(lessonAudioRequired({tts_authorized:true},undefined,1),true);
+assert.equal(lessonAudioRequired({tts_authorized:false},undefined,1),false);
 
 console.log(JSON.stringify({checks:["direct_teaching_actions_without_consent","cover_consent_preserved","authorized_audio_only","failed_and_wrong_step_audio_do_not_gate","teaching_actions_remain_compatible"],synthetic:true}));

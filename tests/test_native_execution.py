@@ -15,6 +15,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.capabilities import AbstractCapability
 
 from backend.agents import native, runner
 from backend.agents.contracts import AgentDeps, GenerationInput, RunBudget
@@ -44,6 +45,59 @@ def execute(model, deps=None, **kwargs):
     return asyncio.run(runner.execute_agent(model, Candidate, INPUT, deps or AgentDeps(), **kwargs))
 
 
+@pytest.mark.parametrize("meaningful",[False,True])
+def test_opt_in_progress_timeout_ignores_blank_keepalive_but_allows_long_real_output(meaningful):
+    closed=[]
+    class SlowInitialization(AbstractCapability):
+        id="synthetic_slow_initialization"
+        async def before_run(self,ctx):
+            await asyncio.sleep(.6)
+    async def stream(messages,info):
+        try:
+            if meaningful:
+                for char in '{"value":1}':
+                    yield char
+                    await asyncio.sleep(.07)
+            else:
+                while True:
+                    yield " "
+                    await asyncio.sleep(.02)
+        finally:
+            closed.append(True)
+    model=FunctionModel(stream_function=stream)
+    options={"on_delta":lambda *args,**kwargs:None,"timeout_seconds":4,"progress_timeout_seconds":.5,
+        "capabilities":[SlowInitialization()]}
+    if meaningful:
+        assert execute(model,**options).payload.value==1
+    else:
+        with pytest.raises(PlanningError) as caught:execute(model,**options)
+        assert caught.value.code=="MODEL_TIMEOUT"
+    assert closed
+
+
+@pytest.mark.parametrize("streaming",[False,True])
+def test_opt_in_wall_timeout_cancels_even_when_stream_keeps_arriving(streaming):
+    closed=[]
+    async def slow(messages,info):
+        try:
+            await asyncio.sleep(10)
+            return ModelResponse(parts=[TextPart('{"value":1}')])
+        finally:
+            closed.append(True)
+    async def trickle(messages,info):
+        try:
+            while True:
+                yield " "
+                await asyncio.sleep(.001)
+        finally:
+            closed.append(True)
+    model=FunctionModel(slow,stream_function=trickle)
+    with pytest.raises(PlanningError) as failure:
+        execute(model,timeout_seconds=.05,on_delta=(lambda *args,**kwargs:None) if streaming else None)
+    assert failure.value.code=="MODEL_TIMEOUT"
+    assert closed==[True]
+
+
 def public_dns(host, port, *args):
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
 
@@ -60,6 +114,38 @@ def send(transport, *, url="https://model.invalid/v1/chat/completions", body=b"{
                                    follow_redirects=False) as client:
             return await client.post(url, content=body)
     return asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure",[httpx.ConnectTimeout,httpx.ConnectError])
+def test_pinned_transport_tries_next_approved_address_only_before_sending(failure):
+    seen=[]
+    deps=AgentDeps()
+    def resolve(*args):
+        return [(socket.AF_INET,socket.SOCK_STREAM,6,"",(address,443))
+                for address in ("93.184.216.34","93.184.216.35")]
+    def reply(request):
+        seen.append((request.url.host,request.headers["host"],request.extensions["sni_hostname"]))
+        if len(seen)==1:
+            raise failure("synthetic connection establishment failure",request=request)
+        return httpx.Response(200,json={"synthetic":True})
+    response=send(wire(reply,deps=deps,resolver=resolve))
+    assert response.status_code==200
+    assert seen==[(address,"model.invalid",b"model.invalid") for address in ("93.184.216.34","93.184.216.35")]
+    assert deps.budget.wire_requests==2
+
+
+@pytest.mark.parametrize("failure",[httpx.ReadTimeout,httpx.WriteError])
+def test_pinned_transport_does_not_resubmit_after_ambiguous_send(failure):
+    seen=[]
+    def resolve(*args):
+        return [(socket.AF_INET,socket.SOCK_STREAM,6,"",(address,443))
+                for address in ("93.184.216.34","93.184.216.35")]
+    def reply(request):
+        seen.append(request.url.host)
+        raise failure("synthetic failure after connection",request=request)
+    with pytest.raises(PlanningError):
+        send(wire(reply,resolver=resolve))
+    assert seen==["93.184.216.34"]
 
 
 @pytest.mark.parametrize("output_name", ["RouteCandidate", "OutlineCandidate", "IntakeQuestionSet",
@@ -84,7 +170,7 @@ def test_migrated_synthetic_fixtures_honor_native_schema_with_business_tools(out
         "LessonBlueprint": (LearningAdapter(), LessonBlueprint,
             {"lesson_goal": "synthetic"}, validate_new_blueprint),
         "LessonPlanCandidate": (LearningAdapter(), LessonPlanCandidate,
-            {"current_stage": {"phase": "intuition"}, "context": {"lesson_title": "synthetic"},
+            {"current_stage": {"phase": "intuition", "goal_ids": ["g1"]}, "context": {"lesson_title": "synthetic"},
              "is_final": False}, None),
         "UnitAssessment": (LearningAdapter(), UnitAssessment,
             {"lessons": [{"lesson_id": "synthetic"}]}, None),
@@ -337,15 +423,61 @@ def test_wire_public_dns_pin_host_sni_authorized_actual_body():
     assert sent[0].content == body
 
 
-@pytest.mark.parametrize("addresses", [[], ["127.0.0.1"], ["10.0.0.1"], ["169.254.169.254"],
+@pytest.mark.parametrize("endpoint,port", [
+    ("http://model.invalid/v1", 80), ("http://model.invalid:9999/v1", 9999),
+    ("https://model.invalid/v1", 443)])
+def test_wire_scheme_default_port_and_http_destination_fence(endpoint, port):
+    resolved, sent = [], []
+    def resolver(host, actual_port, *args):
+        resolved.append((host, actual_port))
+        return public_dns(host, actual_port, *args)
+    transport = wire(lambda request: sent.append(request) or httpx.Response(200),
+                     endpoint=endpoint, resolver=resolver)
+    assert send(transport, url=endpoint + "/chat/completions").status_code == 200
+    assert resolved == [("model.invalid", port)]
+    assert sent[0].url.scheme == endpoint.split(":")[0]
+    assert sent[0].url.port == (port if port not in (80, 443) else None)
+    assert sent[0].headers["host"] == endpoint.split("/")[2]
+
+
+@pytest.mark.parametrize("addresses", [["127.0.0.1"], ["10.0.0.1"], ["198.18.0.23"],
     ["192.0.2.1"], ["::1"], ["fc00::1"], ["8.8.8.8", "127.0.0.1"]])
-def test_wire_rejects_nonpublic_or_mixed_dns_before_connect(addresses):
+def test_wire_allows_nonpublic_or_mixed_dns_and_keeps_host_sni(addresses):
+    sent = []
+    resolver = lambda host, port, *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, port))
+                                        for addr in addresses]
+    assert send(wire(lambda request: sent.append(request) or httpx.Response(200),
+                     resolver=resolver)).status_code == 200
+    assert len(sent) == 1
+    assert sent[0].url.host == addresses[0]
+    assert sent[0].headers["host"] == "model.invalid"
+    assert sent[0].extensions["sni_hostname"] == b"model.invalid"
+
+
+@pytest.mark.parametrize("addresses", [[], ["169.254.169.254"],
+    ["8.8.8.8", "169.254.169.254"], ["::ffff:169.254.169.254"]])
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_wire_rejects_empty_or_metadata_dns_before_connect(addresses, scheme):
     sent = []
     resolver = lambda host, port, *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, port))
                                         for addr in addresses]
     with pytest.raises(PlanningError) as exc:
-        send(wire(lambda request: sent.append(request) or httpx.Response(200), resolver=resolver))
+        send(wire(lambda request: sent.append(request) or httpx.Response(200), resolver=resolver,
+                  endpoint=scheme + "://model.invalid/v1"),
+             url=scheme + "://model.invalid/v1/chat/completions")
     assert exc.value.code == "MODEL_PROVIDER_ERROR" and sent == []
+
+
+@pytest.mark.parametrize("endpoint", ["https://169.254.169.254/v1",
+    "https://metadata.google.internal/v1", "https://[::ffff:169.254.169.254]/v1"])
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_wire_metadata_hostname_rejected_even_when_dns_is_public(endpoint, scheme):
+    endpoint = endpoint.replace("https://", scheme + "://")
+    sent = []
+    with pytest.raises(PlanningError) as exc:
+        send(wire(lambda request: sent.append(request) or httpx.Response(200), endpoint=endpoint),
+             url=endpoint + "/chat/completions")
+    assert exc.value.code == "MODEL_PROVIDER_ERROR" and not sent
 
 
 @pytest.mark.parametrize("url", ["http://model.invalid/v1/chat/completions",
@@ -479,6 +611,56 @@ def test_wire_operational_errors_are_controlled(exception, code):
     with pytest.raises(PlanningError) as exc:
         send(wire(fail))
     assert exc.value.code == code
+
+
+@pytest.mark.parametrize("failure,code", [
+    (httpx.ReadTimeout, "MODEL_TIMEOUT"),
+    (httpx.ReadError, "MODEL_CONNECTION_ERROR"),
+])
+def test_wire_response_body_failures_remain_retryable(failure, code):
+    class InterruptedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b" "
+            raise failure("synthetic-private-response-failure")
+    with pytest.raises(PlanningError) as exc:
+        send(wire(lambda request: httpx.Response(200, stream=InterruptedBody())))
+    assert exc.value.code == code
+    assert "synthetic-private" not in str(exc.value)
+
+
+@pytest.mark.parametrize("protocol,endpoint", [
+    ("openai", "https://model.invalid/v1"),
+    ("anthropic", "https://model.invalid/v1"),
+    ("gemini", "https://model.invalid/v1beta"),
+])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_official_provider_body_timeout_is_controlled(protocol, endpoint, streaming, monkeypatch):
+    if protocol == "gemini":
+        import importlib
+        importlib.import_module("google.genai.types")
+    sent = []
+    class InterruptedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b""
+            raise httpx.ReadTimeout("synthetic-private-response-failure")
+    real_transport = native.SafeModelTransport
+    def factory(endpoint, deps, *, max_bytes):
+        def handler(request):
+            sent.append(request)
+            return httpx.Response(200, stream=InterruptedBody())
+        return real_transport(endpoint, deps, max_bytes=max_bytes,
+            inner=httpx.MockTransport(handler), resolver=public_dns)
+    monkeypatch.setattr(native, "SafeModelTransport", factory)
+    source = AdapterBase(endpoint=endpoint, model_name="synthetic-model",
+        credentials={"api_key": "synthetic-key"})
+    source.protocol = protocol
+    deps = AgentDeps()
+    kwargs = {"on_delta": lambda *args, **kwargs: None} if streaming else {}
+    with pytest.raises(PlanningError) as exc:
+        execute(source, deps, **kwargs)
+    assert exc.value.code == "MODEL_TIMEOUT"
+    assert len(sent) == deps.budget.wire_requests == 1
+    assert "synthetic-private" not in str(exc.value)
     assert "synthetic" not in str(exc.value)
 
 
@@ -514,7 +696,7 @@ def test_wire_rechecks_dns_and_budget_for_each_actual_try():
     assert len(dns) == len(sent) == deps.budget.wire_requests == 1
 
 
-@pytest.mark.parametrize("endpoint", ["http://model.invalid/v1", "https://user:pass@model.invalid/v1",
+@pytest.mark.parametrize("endpoint", ["ftp://model.invalid/v1", "https://user:pass@model.invalid/v1",
     "https://model.invalid/v1?q=synthetic", "https://model.invalid/v1#fragment"])
 def test_native_provider_rejects_invalid_configuration(endpoint):
     source = AdapterBase(endpoint=endpoint, credentials={"api_key": "synthetic-key"})
@@ -542,7 +724,13 @@ def test_native_provider_requires_credentials_before_network():
     ("openai", "https://model.invalid/v1", "/v1/chat/completions"),
     ("anthropic", "https://model.invalid/v1", "/v1/messages"),
     ("gemini", "https://model.invalid/v1beta", "/v1beta/models/synthetic-model:generateContent")])
-def test_official_provider_endpoint_auth_and_no_sdk_retries(protocol, endpoint, path, monkeypatch):
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_official_provider_endpoint_auth_and_no_sdk_retries(protocol, endpoint, path, monkeypatch, scheme):
+    endpoint = endpoint.replace("https://", scheme + "://")
+    if protocol == "gemini":
+        # HttpOptions must capture the real client types before the temporary spy.
+        import importlib
+        importlib.import_module("google.genai.types")
     sent, authorized, clients = [], [], []
     real_transport = native.SafeModelTransport
     real_client = httpx.AsyncClient
@@ -574,7 +762,7 @@ def test_official_provider_endpoint_auth_and_no_sdk_retries(protocol, endpoint, 
     assert len(authorized) == 2 and authorized[0] == authorized[1]
     assert sent[0].url.path == path and sent[0].url.host == "8.8.8.8"
     assert authorized[0][0] == sent[0].content
-    assert authorized[0][1] == "https://model.invalid" + path
+    assert authorized[0][1] == scheme + "://model.invalid" + path
     assert json.loads(sent[0].content)
     assert clients[0]["trust_env"] is False and clients[0]["follow_redirects"] is False
     assert "synthetic-private-provider-body" not in str(exc.value)

@@ -32,7 +32,38 @@ ROUTE_OK_PAYLOAD = {
     "prerequisites": [{"from_index": 0, "to_index": 2}, {"from_index": 1, "to_index": 3}],
 }
 
+# Coverage areas deliberately mirror ROUTE_OK_PAYLOAD course titles so the quality
+# gate can bind every required area and the route draft can be confirmed.
+COVERAGE_AREAS = ["数据库基础", "SQL 实践", "事务与并发", "索引与优化"]
+
+COVERAGE_OK_PAYLOAD = {
+    "scope_contract": {
+        "target_outcome": "能独立完成基础查询与事务处理",
+        "in_scope": list(COVERAGE_AREAS),
+        "out_of_scope": ["分布式数据库"],
+        "assumptions": ["读者具备基础命令行能力"],
+    },
+    "coverage_areas": [
+        {"area": area, "depth": "核心", "search_query": area, "required": True}
+        for area in COVERAGE_AREAS
+    ],
+    "prerequisite_policy": {"assumed_general": [], "bridge_required": [], "notes": ""},
+    "status": "ready",
+}
+
 OUTLINE_OK_PAYLOAD = {
+    # planning-quality schema (working tree) requires an explicit scope contract and coverage.
+    "scope_contract": {
+        "target_outcome": "能独立完成基础查询与事务处理",
+        "in_scope": ["SQL 基础", "事务", "索引"],
+        "out_of_scope": ["分布式数据库"],
+        "assumptions": ["读者具备基础命令行能力"],
+    },
+    "coverage_areas": [
+        {"area": "SQL 基础", "depth": "基础", "search_query": "SQL 基础语法", "required": True},
+        {"area": "事务", "depth": "核心", "search_query": "数据库事务 ACID", "required": True},
+        {"area": "索引", "depth": "进阶", "search_query": "数据库索引优化", "required": True},
+    ],
     "units": [
         {"title": "单元一：入门", "lessons": [
             {"title": "第 1 讲：环境准备", "goal": "装好环境"},
@@ -140,6 +171,18 @@ class SkeletonThenOutlineAdapter(SyntheticModelAdapter):
         self.generate_calls.append(options)
         import json
 
+        # The outline pipeline first asks for a coverage plan with its own schema.
+        required = ((options.get("response_format") or {}).get("json_schema") or {}).get(
+            "schema", {}).get("required", [])
+        tool_names = [((tool.get("function") or {}).get("name") or "") for tool in options.get("tools", [])]
+        if ("scope_contract" in required and "coverage_areas" in required) or any(
+                "coverage" in name for name in tool_names):
+            coverage = dict(COVERAGE_OK_PAYLOAD)
+            if "response_format" in options:
+                return {"content": json.dumps(coverage, ensure_ascii=False)}
+            if "tools" in options:
+                return {"content": "", "tool_arguments": json.dumps(coverage, ensure_ascii=False)}
+            return {"content": f"```json\n{json.dumps(coverage, ensure_ascii=False)}\n```"}
         prompt_text = "\n".join(str(m.get("content", "")) for m in messages)
         is_refine = "课程名称：" in prompt_text
         if is_refine and self.fail_refine:
@@ -162,7 +205,7 @@ class SyntheticSearchAdapter:
     """合成搜索适配器：ok / timeout / error 三态。"""
 
     kind = "search"
-    protocol = "tavily_hikari"
+    protocol = "anysearch"
 
     def __init__(self, *, fail: str | None = None) -> None:
         self.fail = fail  # None | "timeout" | "error"
@@ -170,14 +213,11 @@ class SyntheticSearchAdapter:
 
     def search(self, query, **kwargs):
         self.calls += 1
+        from backend.search.contracts import SearchProviderError
         if self.fail == "timeout":
-            exc = Exception("timeout")
-            exc.code = "timeout"
-            raise exc
+            raise SearchProviderError("SEARCH_TIMEOUT", retryable=True)
         if self.fail == "error":
-            exc = Exception("connection_error")
-            exc.code = "connection_error"
-            raise exc
+            raise SearchProviderError("SEARCH_CONNECTION_ERROR", retryable=True)
         return {
             "query_id": f"qry_{uuid.uuid4().hex[:8]}",
             "results": [
@@ -201,6 +241,36 @@ def run_route_generate(client, token: str, task_id: str, *, scope: str = "route"
             state.intake_json='{"done":true,"answers":[]}'
             if scope:state.resolved_scope=scope
     return client.post(f"/api/planning/tasks/{task_id}/run",headers=headers or auth_headers(token)).json()
+
+
+def run_legacy_route_generate(client, token, task_id, **kwargs):
+    """Seed a historical route-only draft for legacy shell/permission tests.
+
+    Current four-layer generation and incomplete-confirmation rejection use
+    run_route_generate directly and remain covered by their dedicated suites.
+    """
+    import json
+    from backend.planning.models import PlanningDraftRow
+
+    result = run_route_generate(client, token, task_id, **kwargs)
+    draft = result.get("draft")
+    if not draft or not draft.get("draft_id"):
+        return result
+    with client.app.state.slice3.db.session() as session:
+        row = session.get(PlanningDraftRow, draft["draft_id"])
+        if row.draft_kind != "route":
+            return result
+        owner = row.owner_user_id
+        content = json.loads(row.content_json)
+        content["structure_version"] = 1
+        for stage in content.get("stages", []):
+            for course in stage.get("courses", []):
+                for key in ("units", "refinement_status", "refinement_error"):
+                    course.pop(key, None)
+        row.content_json = json.dumps(content, ensure_ascii=False)
+    result["draft"] = client.app.state.slice3.drafts.get_draft(
+        draft["draft_id"], actor_id=owner)
+    return result
 
 
 
@@ -244,22 +314,25 @@ class TeachingModelAdapter(SyntheticModelAdapter):
             return {"content": _json.dumps(synthetic_lesson_blueprint(), ensure_ascii=False)}
         if "follow-up question" in last:
             return {"content": _json.dumps({
+                "alignment_version": 1,
                 "answer": "这是追问的合成回答，按定义、例子、误用三段展开。",
                 "board": None,
             }, ensure_ascii=False)}
         return {"content": _json.dumps({
             "steps": [{
+                "alignment_version": 1,
                 "title": "合成教学步骤",
                 "text": "本步骤讲解当前讲次的核心概念：先给出定义，再用一个具体例子说明它在真实系统里如何出现，"
                         "最后指出两个最常见的误用与判别方法，帮助你把概念落到可操作的判断上。整段朗读约四十秒。",
                 "board": {
                     "kind": "board", "title": "核心概念速览",
-                    "points": ["定义：并发事务之间的可见性约定", "例子：转账场景的两个事务", "误用：把隔离级别当成锁"],
-                    "code": None, "formula": None,
-                    "nodes": [{"id": "n1", "label": "事务 A"}, {"id": "n2", "label": "事务 B"}],
-                    "edges": [{"from_id": "n1", "to_id": "n2", "label": "冲突"}],
-                    "original_refs": [], "reveal_ms": [0, 4000, 8000],
+                    "format_version": 3,
                 },
+                "beats": [{"id": "one",
+                    "text": "本步骤讲解当前讲次的核心概念：先给出定义，再用一个具体例子说明它在真实系统里如何出现，"
+                            "最后指出两个最常见的误用与判别方法，帮助你把概念落到可操作的判断上。整段朗读约四十秒。",
+                    "blocks": [{"id": "concept", "type": "text", "text": "核心概念"}],
+                    "cues": [{"block_id": "concept", "target": "text", "quote": "核心概念"}]}],
             }],
         }, ensure_ascii=False)}
 

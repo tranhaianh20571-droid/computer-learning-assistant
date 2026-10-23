@@ -1,7 +1,7 @@
 """切片 2 T02 契约测试：数据模型、上传校验、配额账本、渲染与文本可信判定。
 
 不依赖真实 OCR 凭据；OCR 写路径（T03/T04）不在本文件覆盖范围。
-合成样本由 scripts/slice2_sample_generate.py 生成，不使用任何真实教材。
+合成样本由 tests/material_pdf_samples.py 生成，不使用任何真实教材。
 """
 
 from __future__ import annotations
@@ -48,8 +48,7 @@ from backend.materials.upload import (  # noqa: E402
     validate_one,
 )
 
-sys.path.insert(0, str(ROOT / "scripts"))
-from slice2_sample_generate import SAMPLES, generate  # noqa: E402
+from material_pdf_samples import generate  # noqa: E402
 
 
 @pytest.fixture(scope="module")

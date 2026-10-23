@@ -40,11 +40,18 @@ for(const width of [390,1400]){
   const g=layoutBoard([table,sequence],width,new Set(['table','sequence']),[],{},'',{},{responsive:true});
   const pageFor=id=>g.pages.find(p=>p.placements.some(x=>x.id===id));
   const tp=pageFor('table'),tplace=tp.placements.find(p=>p.id==='table');
+  const cells=tp.elements.filter(e=>e.customData?.tableCellOrder!==undefined);
+  const characters=cell=>Array.from(cell.customData.fullText).length;
+  const total=cells.reduce((sum,cell)=>sum+characters(cell),0);
   let y=0;
   for(let row=1;row<=3;row++){
-    const progress=row/3,partial={...table,reveal_progress:progress};
-    const painted=presentBoard(tp,[partial]);assert(painted.every(e=>e.customData?.tableRow===undefined||e.customData.tableRow<=row));
-    const cell=painted.find(e=>e.type==='rectangle'&&e.customData?.tableRow===row);
+    const target=cells.find(e=>e.customData.tableRow===row&&e.customData.tableColumn===1);
+    const before=cells.filter(e=>e.customData.tableCellOrder<target.customData.tableCellOrder).reduce((sum,cell)=>sum+characters(cell),0);
+    const progress=.16+.84*(before+1.5)/total,partial={...table,reveal_progress:progress};
+    const painted=presentBoard(tp,[partial]);
+    assert(painted.every(e=>!e.text||e.customData?.tableRow===undefined||e.customData.tableRow<=row));
+    const cell=painted.find(e=>e.id===target.id);
+    assert.equal(Array.from(cell.text).length,1,'cursor follows the cell currently being written');
     const next=boardWritingY(tp,tplace,partial,progress);assert.equal(next,cell.y+cell.height/2);assert(next>y);y=next;
   }
   const sp=pageFor('sequence'),splace=sp.placements.find(p=>p.id==='sequence');

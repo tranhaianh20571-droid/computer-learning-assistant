@@ -125,6 +125,34 @@ def test_single_course_revision(env):
     assert "stages" not in turn["result"]["candidate"]
 
 
+def test_dialogue_status_and_result_use_one_read_snapshot(env, monkeypatch):
+    from sqlalchemy import event
+    from backend.tasks.service import LearningTaskRow
+    client, state, user, headers = env
+    monkeypatch.setattr(state.features, "kick", lambda _: None)
+    _, item = draft(env)
+    queued = state.features.enqueue_dialogue(item["draft_id"], owner=user, revision=1,
+        content="合成并发快照检查", key="snapshot")
+    published = []
+    def publish_between_reads(conn, cursor, statement, parameters, context, executemany):
+        if (not published and statement.lstrip().upper().startswith("SELECT")
+                and "FROM " + PlanningDialogueRow.__tablename__ in statement):
+            published.append(True)
+            with state.db.session() as sess:
+                sess.get(PlanningDialogueRow, queued["task_id"]).result_json = json.dumps(
+                    {"action": "clarification", "answer": "合成完整结果"})
+                sess.get(LearningTaskRow, queued["task_id"]).status = "succeeded"
+    event.listen(state.db.engine, "after_cursor_execute", publish_between_reads)
+    try:
+        first = state.features.dialogue(item["draft_id"], user)["turns"][0]
+    finally:
+        event.remove(state.db.engine, "after_cursor_execute", publish_between_reads)
+    assert published
+    assert first["status"] != "succeeded" or first["result"].get("answer") == "合成完整结果"
+    second = state.features.dialogue(item["draft_id"], user)["turns"][0]
+    assert second["status"] == "succeeded" and second["result"]["answer"] == "合成完整结果"
+
+
 def test_cover_tool_generates_persistent_png_with_owner_and_delete_guards(env):
     client,state,user,headers=env
     def forbidden_model(*args):

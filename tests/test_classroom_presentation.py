@@ -81,7 +81,13 @@ def test_real_agent_pipeline_saves_beats_in_authorized_workspace(env):
         supports_text_stream=True
         model_name="synthetic-beats"
         def stream(self,messages):
-            payload=candidate(phase="intuition",covered_goal_ids=["g1"],lesson_finished=False)
+            beats=json.loads(json.dumps(BEATS))
+            beats[0]["blocks"]=[{**BLOCK,"title":"","columns":["键","值"],"rows":[["键","值"]]}]
+            beats[0]["cues"]=[{"block_id":"mapping","target":f"cell:{row}:{column}","quote":"键和值"}
+                for row in range(2) for column in range(2)]
+            beats[1]["blocks"][0]["text"]="每个键唯一"
+            beats[1]["cues"]=[{"block_id":"boundary","target":"text","quote":"每个键唯一"}]
+            payload=candidate(alignment_version=1,beats=beats,phase="intuition",covered_goal_ids=["g1"],lesson_finished=False)
             value=json.dumps({"steps":[payload]},ensure_ascii=False)
             for pos in range(0,len(value),17):yield value[pos:pos+17]
     state.teaching.model_adapter_factory=lambda *args:Adapter()
@@ -90,4 +96,4 @@ def test_real_agent_pipeline_saves_beats_in_authorized_workspace(env):
     workspace=client.get(f"/api/teaching/{start['conversation_id']}",headers=headers).json()
     saved=workspace["steps"][0]
     assert saved["text"]==TEXT and len(saved["board"]["beats"])==2
-    assert saved["board"]["presentation"]["version"]==2
+    assert saved["board"]["presentation"]["version"]==3

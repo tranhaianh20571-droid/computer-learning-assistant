@@ -1,0 +1,6 @@
+{$MARKET_DOMAIN} {
+	encode zstd gzip
+	root * /srv/market
+	try_files {path} /index.html
+	file_server
+}

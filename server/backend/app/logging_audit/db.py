@@ -92,8 +92,18 @@ class Database:
         self._factory = sessionmaker(bind=self.engine, expire_on_commit=False, future=True)
 
     def create_all(self) -> None:
+        from ..cleanup import models as local_resource_models  # noqa: F401
+        from ..memory import personal as personal_models  # noqa: F401
+        from ..materials import corpus as corpus_models  # noqa: F401
+        from ..materials import source_models  # noqa: F401
+        from ..memory import models as memory_models  # noqa: F401
+        from ..characters import models as character_models  # noqa: F401
         from ..agents.task_binding import AgentBudgetRow  # noqa: F401
+        from ..agents.model_routing import ModelRoleRow, TaskModelRoleRow  # noqa: F401
+        from ..search.repository import SearchCallRow, SearchTaskBudgetRow  # noqa: F401
         from ..teaching.authorization import LessonAuthorizationRow  # noqa: F401
+        from ..teaching.unit_scope import UnitScopeRow  # noqa: F401
+        from ..review import models as review_models  # noqa: F401
 
         Base.metadata.create_all(self.engine)
         if self.url.startswith("postgresql"):

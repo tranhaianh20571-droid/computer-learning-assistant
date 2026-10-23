@@ -111,9 +111,14 @@ class MiniMaxTTSAdapter(AdapterBase):
 
     def _probe(self, capability: str) -> None:
         # 文本能力探测：用固定非私人样例请求一条极短音频。
-        self.synthesize("OK", voice_id=self.voice_id or "male-qn-qingse")
+        from .base import AdapterError
+        result = self.synthesize("OK", voice_id=self.voice_id or "male-qn-qingse")
+        if not result.get("audio_hex") or not result.get("subtitle"):
+            raise AdapterError("capability_test_failed")
 
-    def build_request(self, text: str, *, voice_id: Optional[str] = None) -> dict:
+    def build_request(self, text: str, *, voice_id: Optional[str] = None, emotion: Optional[str] = None,
+                      speed: float = 1., volume: float = 1., pitch: int = 0,
+                      voice_modify: Optional[dict] = None, pronunciation: Optional[list[str]] = None) -> dict:
         voice = voice_id or self.voice_id
         if not voice:
             from .base import AdapterError
@@ -123,11 +128,30 @@ class MiniMaxTTSAdapter(AdapterBase):
             from .base import AdapterError
 
             raise AdapterError("text_too_long", status=400)
+        if emotion is not None and emotion not in ("happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm"):
+            from .base import AdapterError
+            raise AdapterError("invalid_field", status=400)
+        from .base import AdapterError
+        import math
+        if (not all(type(value) in (int, float) and math.isfinite(value) for value in (speed, volume))
+                or not .5 <= speed <= 2 or not 0 < volume <= 10 or type(pitch) is not int or not -12 <= pitch <= 12):
+            raise AdapterError("invalid_field", status=400)
+        if voice_modify:
+            for key, value in voice_modify.items():
+                if key == "sound_effects":
+                    if value not in ("spacious_echo", "auditorium_echo", "lofi_telephone", "robotic"):
+                        raise AdapterError("invalid_field", status=400)
+                elif key not in ("pitch", "intensity", "timbre") or type(value) is not int or not -100 <= value <= 100:
+                    raise AdapterError("invalid_field", status=400)
+        if pronunciation and (len(pronunciation) > 100 or any(not isinstance(item, str) or len(item) > 200 for item in pronunciation)):
+            raise AdapterError("invalid_field", status=400)
         return {
             "model": self.model_name,
             "text": text,
             "stream": False,
-            "voice_setting": {"voice_id": voice, "speed": 1.0, "vol": 1.0, "pitch": 0},
+            "voice_setting": {"voice_id": voice, "speed": speed, "vol": volume, "pitch": pitch, **({"emotion": emotion} if emotion else {})},
+            **({"voice_modify": voice_modify} if voice_modify else {}),
+            **({"pronunciation_dict": {"tone": pronunciation}} if pronunciation else {}),
             "audio_setting": {
                 "format": self.audio_format,
                 "sample_rate": self.sample_rate,
@@ -138,9 +162,9 @@ class MiniMaxTTSAdapter(AdapterBase):
             "subtitle_type": self.subtitle_type,
         }
 
-    def synthesize(self, text: str, *, voice_id: Optional[str] = None) -> dict:
+    def synthesize(self, text: str, *, voice_id: Optional[str] = None, emotion: Optional[str] = None, **options) -> dict:
         """返回含音频 hex、字幕与文本哈希的受控结果（不含原始供应商异常）。"""
-        payload = self.build_request(text, voice_id=voice_id)
+        payload = self.build_request(text, voice_id=voice_id, emotion=emotion, **options)
         status, body, headers = self._request("POST", self._tts_url(), json_body=payload)
         self._map_status(status, body)
         if isinstance(body,dict) and isinstance(body.get("base_resp"),dict) and str(body["base_resp"].get("status_code",0))!="0":
@@ -182,38 +206,50 @@ def _fetch_subtitle_file(url: str) -> Optional[list[dict]]:
     import httpx
 
     try:
-        from .base import validate_endpoint
-        validate_endpoint(url,require_https=True,allow_private=False)
+        _validate_subtitle_endpoint(url)
         r = httpx.get(url, timeout=20.0, follow_redirects=False,trust_env=False)
         r.raise_for_status()
         if len(r.content)>1024*1024:return None
         entries = r.json()
     except Exception:  # noqa: BLE001 - 抓取失败按无字幕处理（无音频模式）
         return None
-    if not isinstance(entries, list):
-        return None
-    out = []
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        out.append({
-            "text": str(e.get("text") or "")[:200],
-            "begin_ms": int(float(e.get("time_begin") or 0)),
-            "end_ms": int(float(e.get("time_end") or 0)),
-        })
-    return out or None
+    return _normalize_subtitle(entries)
+
+
+def _validate_subtitle_endpoint(url: str) -> None:
+    """Keep private targets blocked while accepting proxy benchmark addresses."""
+    import socket
+    from urllib.parse import urlparse
+    from .base import AdapterError, validate_endpoint
+    from ...net_policy import addresses_allowed, is_literal_address
+
+    validate_endpoint(url, require_https=True, allow_private=True)
+    parsed = urlparse(url)
+    if parsed.username is not None or parsed.password is not None:
+        raise AdapterError("invalid_endpoint")
+    # Fake-IP is accepted only as the DNS answer for a certificate-checked name.
+    infos = socket.getaddrinfo(parsed.hostname, parsed.port or 443, 0, socket.SOCK_STREAM)
+    if not addresses_allowed([info[4][0] for info in infos],
+            from_hostname=not is_literal_address(parsed.hostname)):
+        raise AdapterError("invalid_endpoint", detail="private_address")
 
 
 def _normalize_subtitle(value: Any) -> Optional[list[dict]]:
     """内联字幕（若供应商直接返回数组）归一化。"""
     if not isinstance(value, list) or not value:
         return None
+    import math
     out = []
     for e in value:
-        if isinstance(e, dict):
-            out.append({
-                "text": str(e.get("text") or "")[:200],
-                "begin_ms": int(float(e.get("begin_ms") or 0)),
-                "end_ms": int(float(e.get("end_ms") or 0)),
-            })
+        if not isinstance(e, dict):
+            return None
+        try:
+            begin = float(e.get("begin_ms", e.get("time_begin")))
+            end = float(e.get("end_ms", e.get("time_end")))
+        except (ValueError, TypeError, OverflowError):
+            return None
+        if (not math.isfinite(begin) or not math.isfinite(end) or not 0 <= begin < end <= 120000
+                or not isinstance(e.get("text"), str) or not e["text"].strip() or len(e["text"]) > 8000):
+            return None
+        out.append({"text": e["text"], "begin_ms": int(begin), "end_ms": int(end)})
     return out or None

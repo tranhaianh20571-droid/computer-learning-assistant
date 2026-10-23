@@ -1,0 +1,41 @@
+.app-logo {
+  display: block;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  background: transparent;
+}
+
+.settings-brand .app-logo {
+  margin: 0 auto;
+}
+
+.auth-ink-brand .app-logo {
+  width: 52px;
+  height: 52px;
+}
+
+.assessment-screen .brand > .app-logo {
+  width: 36px;
+  height: 36px;
+}
+
+@media (max-width: 600px) {
+  .settings-brand .app-logo {
+    width: 40px;
+    height: 40px;
+  }
+
+  .auth-ink-brand .app-logo {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+@media (max-width: 520px) {
+  .assessment-screen .brand > .app-logo {
+    width: 30px;
+    height: 30px;
+  }
+}

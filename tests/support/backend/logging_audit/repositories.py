@@ -54,6 +54,7 @@ _AUDIT_EVENTS = frozenset(
         "auth.session.revoked",
         "admin.approval.changed",
         "config.changed",
+        "search.execution",
         "external.disclosure.confirmed",
         "connector.bound",
         "connector.revoked",

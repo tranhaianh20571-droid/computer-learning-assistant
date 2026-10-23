@@ -216,3 +216,21 @@ def test_repair_publication_checks_lease_and_does_not_publish_cancelled_task(env
             TeachingStepRow.conversation_id == started["conversation_id"]))
         assert sess.get(AgentBudgetRow, started["task_id"]).logical_requests == 1
     assert env.calls == []
+
+
+def test_repair_cannot_replace_revoked_source_child_grant(env):
+    started = missing_first(env, second=True)
+    with env.db.session() as sess:
+        child = sess.scalar(select(LearningTaskRow).where(
+            LearningTaskRow.subject_id == started["conversation_id"] + ":2:1"))
+        grant = sess.scalar(select(DisclosureGrantRow).where(
+            DisclosureGrantRow.task_id == child.task_id,
+            DisclosureGrantRow.content_category == "query"))
+        from backend.planning.models import utcnow, ConversationRow
+        grant.revoked_at = utcnow()
+    with pytest.raises(Exception) as caught:
+        with env.db.session() as sess:
+            conv = sess.get(ConversationRow, started["conversation_id"])
+            env.service._ensure_artifact_repair(sess, conv, 2)
+    assert caught.value.code.lower() == "disclosure_revoked"
+    assert repair_tasks(env) == [] and env.calls == []

@@ -12,9 +12,10 @@ from common_fixtures import (
     ROUTE_OK_PAYLOAD,
     AllUnavailableAdapter,
     SyntheticModelAdapter,
+    SkeletonThenOutlineAdapter,
     SyntheticSearchAdapter,
     auth_headers,
-    run_route_generate,
+    run_legacy_route_generate as run_route_generate,
     make_user,
 )
 
@@ -59,7 +60,8 @@ def _prepare_route(env, *, payload=None):
         "/api/planning/routes", headers=auth_headers(token),
         json={"title": "故障注入路线", "scenario": "self_study"},
     ).json()["route_id"]
-    env["container"]["model"] = SyntheticModelAdapter(payload=payload or ROUTE_OK_PAYLOAD)
+    env["container"]["model"] = (SyntheticModelAdapter(payload=payload) if payload is not None
+        else SkeletonThenOutlineAdapter(payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD))
     env["container"]["search"] = SyntheticSearchAdapter()
     return user_id, token, route_id
 
@@ -133,21 +135,19 @@ class TestFaultContextBudget:
         user_id, token, route_id = _prepare_route(env)
         env["container"]["search"] = SyntheticSearchAdapter(fail="timeout")
         task_id, body = _run_route_task(env, token, route_id)
-        assert body["wait_state"] == "awaiting_search_decision"
+        assert "wait_state" not in body
 
-        # 决策 1：retry（适配器恢复）
         env["container"]["search"] = SyntheticSearchAdapter()
         r = client.post(f"/api/planning/tasks/{task_id}/decision",
                         headers=auth_headers(token), json={"decision": "retry"})
-        assert r.json()["task_status"] == "partial"
+        assert r.status_code == 409
 
-        # 决策 2：offline_continue（新一轮任务）
         env["container"]["search"] = SyntheticSearchAdapter(fail="error")
         task_id2, body2 = _run_route_task(env, token, route_id)
-        assert body2["wait_state"] == "awaiting_search_decision"
+        assert "wait_state" not in body2
         r2 = client.post(f"/api/planning/tasks/{task_id2}/decision",
                          headers=auth_headers(token), json={"decision": "offline_continue"})
-        assert r2.json()["task_status"] == "partial"
+        assert r2.status_code == 409
         # 离线路径 manifest 无 external 引用（不伪造联网依据）
         with env["database"].session() as sess:
             rows = sess.execute(

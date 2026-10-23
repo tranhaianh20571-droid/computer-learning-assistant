@@ -22,7 +22,7 @@
   --ground:#F5F6F4; --surface:#FFFFFF; --sunk:#ECEEEC; --sunk2:#E3E6E4;
   --ink:#15171A; --ink2:#454B53; --ink3:#6A717B;
   --rule:#D9DCDF; --rule2:#BFC4C9;
-  --nav:#15171B; --nav2:#1E2126; --nav-ink:#ECEEF0; --nav-dim:#A3AAB3; --nav-rule:#30343B;
+  --nav:#111111; --nav2:#282828; --nav-ink:#ECEEF0; --nav-dim:#A3AAB3; --nav-rule:#383838;
   --accent:#2346C8; --accent-ink:#FFFFFF; --accent-w:#E9EDFA; --accent-2:#1A379F;
   --draft:#A8520A; --draft-w:#FBF1E6; --draft-line:#D08A45;
   --ok:#1E7248; --ok-w:#E7F3EC;
@@ -651,9 +651,6 @@ button.ink-cover-art { cursor:pointer; }
 .teaching-formula-content .katex-html { line-height:1.6; }
 .teaching-formula-fallback { display:block; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; line-height:1.5; overflow-wrap:anywhere; }
 .board-controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:10px; border-bottom:1px solid var(--rule); font-size:12px; }
-.board-graph-detail { padding:10px; border-top:1px solid var(--rule); font-size:13px; }
-.board-graph-detail summary { cursor:pointer; }
-.board-graph-detail .row { flex-wrap:wrap; gap:6px; margin-top:8px; }
 .lw-simple .tx-step b { overflow-wrap:anywhere; }
 .lw-simple .lecture-segment {
   --segment-accent:#425d78; --segment-tag:#edf2f7; --segment-rule:#dce5ed;

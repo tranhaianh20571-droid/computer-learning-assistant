@@ -155,8 +155,12 @@ def test_locked_detach_and_delete_route_and_course(env):
     assert removed.status_code == 200, removed.text
     scene = env[0].get(f"/api/routes/{rid}/scene", headers=env[3])
     assert scene.status_code == 200 and courses[1]["title"] not in scene.text
-    assert env[0].delete(f"/api/planning/routes/{rid}", headers=env[3]).status_code == 200
-    assert any(c["id"] == one for c in get_library(env))
+    # 删除合集级联删除当前编排中的成员课程（two 已先单独删除，故只剩 one）
+    deleted = env[0].delete(f"/api/planning/routes/{rid}", headers=env[3])
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["course_ids"] == [one]
+    assert not any(c["id"] == one for c in get_library(env))
+    assert env[0].get(f"/api/courses/{one}/overview", headers=env[3]).status_code == 404
 
 
 def test_started_not_completed_and_version_match(env):
@@ -191,7 +195,7 @@ def test_owner_guest_context_and_input_isolation(env):
     assert client.post("/api/planning/input-matches", headers=other, json={"input": "合成学习目标"}).json()["matches"] == []
     assert client.post("/api/planning/input-matches", headers=headers, json={"input": "合成学习目标"}).json()["matches"]
     guest = TestClient(client.app)
-    assert guest.get("/api/planning/library").json()["data"] == []
+    assert guest.get("/api/planning/library").status_code == 401
     course = get_route(env, rid)["stages"][0]["courses"][0]["course_id"]
     assert client.get(f"/api/courses/{course}/overview?route_id=invalid", headers=headers).status_code == 404
 

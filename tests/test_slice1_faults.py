@@ -81,7 +81,7 @@ def _make_user(client: TestClient, *, admin: bool = False) -> dict:
     reg = client.post("/api/auth/register", json={"email": email, "password": pw, "display_name": "u"})
     assert reg.status_code == 201, reg.text
     uid = reg.json()["user_id"]
-    client.post("/api/auth/verify-email", json={"token": reg.json()["verify_token"]})
+    assert reg.json()["status"] == "approved"
     # 确保 bootstrap admin 的邮箱可用（可能已存在）
     from backend.auth.models import UserRow
 
@@ -90,11 +90,6 @@ def _make_user(client: TestClient, *, admin: bool = False) -> dict:
         row.status = "approved"
         row.is_admin = True
         sess.commit()
-    client.post(
-        "/api/auth/admin/approve",
-        json={"user_id": uid},
-        headers={"Authorization": f"Bearer {_login_bootstrap(client, admin['user_id'])}"},
-    )
     login = client.post("/api/auth/login", json={"email": email, "password": pw})
     assert login.status_code == 200, login.text
     return {"user_id": uid, "headers": {"Authorization": f"Bearer {login.json()['session_token']}"}}

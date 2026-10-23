@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import Dialog from "./ui/Dialog";
 import { planningMatchLink } from "./lib/learningLinks";
+import SourceComposer from "./ui/SourceComposer";
+import {useSourceImports} from "./hooks/useSourceImports";
 
 /**
  * 首页 · 选择学习任务（v2 对齐原型布局）：
@@ -22,30 +24,30 @@ const EXAMPLES_CHAT = [
   "Python 的 GIL 到底限制了什么？",
 ];
 
-type Mat = { material_id: string; status: string };
-
-function MatGlyph({ status }: { status: string }) {
-  const cls = status === "parsed" ? "is-ok" : status === "partial" ? "is-partial" : status === "failed" ? "is-fail" : "";
-  const text = status === "parsed" ? "已解析" : status === "partial" ? "部分可用" : status === "failed" ? "解析失败" : status === "parsing" ? "解析中" : "已上传";
-  return (
-    <span className={`st st-mat ${cls}`}>
-      <i className="g" aria-hidden="true" />
-      <span className="k">资料</span>
-      {text}
-    </span>
-  );
-}
-
 export default function TaskEntry({ me, onErr, onOk, go }: {
   me: any; onErr: (s: string) => void; onOk: (s: string) => void; go: (p: string) => void;
 }) {
   const [type, setType] = useState<"plan" | "chat">("plan");
   const [text, setText] = useState("");
+  const [hintIndex, setHintIndex] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [mats, setMats] = useState<Mat[]>([]);
-  const [picked, setPicked] = useState<string[]>([]);
-  const [attachOpen, setAttachOpen] = useState(false);
-  const attachRef = useRef<HTMLDivElement | null>(null);
+  const sources=useSourceImports(me?.user_id||"",onErr);
+  const [pendingPlan, setPendingPlan] = useState<any>(null);
+  useEffect(() => {
+    if (text.trim() || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const count = type === "plan" ? EXAMPLES_PLAN.length : EXAMPLES_CHAT.length;
+    const timer = window.setInterval(() => setHintIndex(index => (index + 1) % count), 5000);
+    return () => window.clearInterval(timer);
+  }, [text, type]);
+  useEffect(() => {
+    let alive = true;
+    if (me) api.currentPlanning().then(result => {
+      if (alive && result.planning && !result.planning.confirmed && !result.planning.abandoned) {
+        setPendingPlan(result.planning);
+      }
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [me]);
   const [resume, setResume] = useState<{
     courseId: string; title: string; lesson: { id: string; title: string } | null; startable: boolean;
   } | null>(null);
@@ -92,34 +94,10 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
     }
   }, [go, resume]);
 
-  useEffect(() => {
-    if (!me) return;
-    (async () => {
-      try {
-        const r = await api.listMaterials();
-        setMats((r.data || []).filter((m: Mat) => m.status !== "failed"));
-      } catch { /* 资料列表失败不阻塞入口 */ }
-    })();
-  }, [me]);
-
-  // 点外部收起附件弹层
-  useEffect(() => {
-    if (!attachOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (attachRef.current && !attachRef.current.contains(e.target as Node)) setAttachOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [attachOpen]);
-
-  const toggleMat = useCallback((id: string) => {
-    setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
-  }, []);
-
   const [possibleDuplicate, setPossibleDuplicate] = useState<any[] | null>(null);
   const submit = useCallback(async (continuePlanning = false) => {
     if (!me) return onErr("请先登录后再开始。");
-    const goal = text.trim();
+    const goal = text.trim() || (sources.hasSources ? type==="plan"?"依据所附资料规划学习":"请帮助我理解所附资料" : "");
     if (!goal || busy) return;
     setBusy(true);
     try {
@@ -129,6 +107,7 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
           if (check.matches.length) { setPossibleDuplicate(check.matches); return; }
         }
         setPossibleDuplicate(null);
+        const picked=await sources.ingest();
         const title = goal.split(/[。.，,\n]/)[0].slice(0, 40) || "学习路线";
         const route = await api.createRoute(title, "self_study", goal);
         const task = await api.createPlanningTask({
@@ -140,23 +119,29 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
         });
         sessionStorage.setItem("slice3.pendingTask", task.task_id);
         sessionStorage.setItem("slice3.pendingRoute", route.route_id);
+        sessionStorage.removeItem(`task-attachments:${me.user_id}`);
+        sources.clear();
         onOk("任务已提交，正在生成候选…");
         go("/planning");
       } else {
+        const picked=await sources.ingest();
         const conv = await api.createChat({ material_ids: picked, scenario: "self_study" });
         await api.sendChat(conv.conversation_id, {
           content: goal, use_search: false, idempotency_key: `web-${Date.now()}`,
         });
         sessionStorage.setItem("slice3.convId", conv.conversation_id);
+        sessionStorage.removeItem(`task-attachments:${me.user_id}`);
+        sources.clear();
         onOk("已发送，进入即时对话。");
         go("/chat");
       }
     } catch (e: any) {
-      onErr(e?.code ? `${e.code}` : "提交失败");
+      if(e?.code!=="SOURCE_IMPORT_CANCELLED")
+        onErr(e?.sourceImport ? e.message : e?.code ? `${e.code}` : "提交失败");
     } finally {
       setBusy(false);
     }
-  }, [busy, go, me, onErr, onOk, picked, text, type]);
+  }, [busy, go, me, onErr, onOk, text, type, sources]);
 
   return (
     <div className="home">
@@ -166,6 +151,15 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
         <button className="btn btn-pri btn-sm" disabled={busy} onClick={() => go(planningMatchLink(possibleDuplicate[0]))}>查看已有课程</button>
       </>}><p>学习目标与已有规划相同，最终课程内容可能不同。</p><ul>{possibleDuplicate.map(m => <li key={m.id}><a href={`#${planningMatchLink(m)}`}>{m.title}</a></li>)}</ul></Dialog>}
       <section aria-labelledby="ask">
+        {pendingPlan && <button className="nextpill" style={{ marginBottom: 18 }} onClick={() => {
+          sessionStorage.setItem("slice3.pendingTask", pendingPlan.task_id);
+          sessionStorage.setItem("slice3.pendingRoute", pendingPlan.target_id);
+          go("/planning");
+        }}>
+          <span className="kicker">继续规划</span>
+          <b className="od-truncate" style={{ maxWidth: 320 }}>{pendingPlan.title || "上次的学习规划"}</b>
+          <span aria-hidden="true">›</span>
+        </button>}
         {resume && (
           <button className="nextpill" style={{ marginBottom: 18 }} onClick={resumeGo}>
             <span className="kicker">继续学习</span>
@@ -187,65 +181,23 @@ export default function TaskEntry({ me, onErr, onOk, go }: {
             <button role="radio" aria-checked={type === "chat"} onClick={() => setType("chat")}>即时对话</button>
           </div>
           <label className="sr" htmlFor="goal">{type === "plan" ? "学习目标" : "你的问题"}</label>
-          <textarea
-            className="ta"
-            id="goal"
-            placeholder={type === "plan" ? "例如：我想系统补齐做后端开发需要的基础课" : "例如：TCP 的 TIME_WAIT 为什么要等 2MSL？"}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-          />
+          <SourceComposer label={type==="plan"?"学习目标":"你的问题"} disabled={busy}
+            placeholder={`例如：${(type==="plan"?EXAMPLES_PLAN:EXAMPLES_CHAT)[hintIndex % (type==="plan"?EXAMPLES_PLAN.length:EXAMPLES_CHAT.length)]}`}
+            onChange={(value,links)=>{setText(value);sources.setLinks(links);}}
+            onFiles={sources.addFiles} onSubmit={()=>void submit()}/>
+          {sources.tray}
           <div className="cbar">
-            <div className="attach-wrap" ref={attachRef}>
-              <button
-                type="button"
-                className="attach-btn"
-                aria-expanded={attachOpen}
-                onClick={() => setAttachOpen((v) => !v)}
-              >
-                ＋ 附上资料{picked.length > 0 ? `（已选 ${picked.length}）` : "（可选）"}
-              </button>
-              {attachOpen && (
-                <div className="attach-pop" role="listbox" aria-label="选择要附加的资料">
-                  {mats.length === 0 && <p className="muted" style={{ margin: "8px 12px" }}>还没有可用资料；先去「我的资料」上传。</p>}
-                  {mats.map((m) => (
-                    <button
-                      key={m.material_id}
-                      role="option"
-                      aria-selected={picked.includes(m.material_id)}
-                      onClick={() => toggleMat(m.material_id)}
-                    >
-                      <MatGlyph status={m.status} />
-                      <span className="od-truncate" style={{ maxWidth: 200 }}>{m.material_id.slice(0, 12)}</span>
-                      {picked.includes(m.material_id) && <span aria-hidden="true">✓</span>}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            {picked.map((id) => (
-              <span className="chip" key={id}>
-                <MatGlyph status={mats.find((x) => x.material_id === id)?.status || "uploaded"} />
-                <span className="od-truncate" style={{ maxWidth: 140 }}>{id.slice(0, 10)}</span>
-                <button type="button" onClick={() => toggleMat(id)} aria-label={`移除资料 ${id}`}>×</button>
-              </span>
-            ))}
+            {me&&sources.pickerControl}
             <span className="grow" />
-            <button type="button" className="btn btn-pri submit" aria-describedby={type === "plan" ? "planning-cover-notice" : undefined} disabled={busy || !text.trim() || !me} onClick={() => submit()}>
+            <button type="button" className="btn btn-pri submit" aria-describedby={type === "plan" ? "planning-cover-notice" : undefined} disabled={busy || (!text.trim()&&!sources.hasSources) || !me} onClick={() => submit()}>
               {busy ? <><span className="spin" />正在提交…</> : type === "plan" ? "生成规划草稿" : "开始对话"}
             </button>
           </div>
         </div>
         {type === "plan" && <p className="help" id="planning-cover-notice">
-          规划提交不会自动外发图片请求。封面生成需另行确认图片模型、知识主题和费用范围。
+          规划确认后会自动生成封面。已启用图片模型时只发送主题与画面描述，可能计费；未配置则使用本地水墨封面。
         </p>}
 
-        {!text.trim() && (
-          <div className="hint-row" aria-label="示例">
-            {(type === "plan" ? EXAMPLES_PLAN : EXAMPLES_CHAT).map((s) => (
-              <button key={s} type="button" onClick={() => setText(s)}>{s}</button>
-            ))}
-          </div>
-        )}
       </section>
     </div>
   );

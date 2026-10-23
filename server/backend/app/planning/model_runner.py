@@ -97,13 +97,13 @@ class ModelCapabilityGate:
             if expiry and expiry > monotonic_ms():
                 return "unavailable"
         status = getattr(self.adapter, "capability_status", None)
+        if getattr(self.adapter, "defer_capability_probe", False):
+            return "available"
         saved = status.get(capability) if isinstance(status, dict) else None
         if isinstance(saved, dict):
             saved = saved.get("state")
         if saved in ("available", "unavailable"):
             return saved
-        if getattr(self.adapter, "defer_capability_probe", False):
-            return "available"  # actual request validates it; background probes never block teaching
         if probe is None:
             return "unavailable"
         try:

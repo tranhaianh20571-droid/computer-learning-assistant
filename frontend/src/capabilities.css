@@ -1,6 +1,7 @@
+body:has(.capabilities-page) { min-width: 320px; }
 .capabilities-page { max-width: 1120px; margin: 0 auto; }
 .capabilities-page .row > .field { min-width: 200px; }
-.capabilities-page input, .capabilities-page select, .capability-editor input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--rule2); border-radius: var(--r2); background: var(--surface); }
+.capabilities-page input, .capabilities-page select, .capability-editor input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--rule2); border-radius: 6px; background: var(--surface); }
 .capabilities-page .mono { overflow-wrap: anywhere; }
 .capabilities-page .config-item { border-top: 1px solid var(--rule); padding-top: var(--s4); }
 .capabilities-page .help { font-size: var(--t-s); color: var(--ink2); }
@@ -13,3 +14,69 @@
 .capabilities-page button:not(.btn) { min-height: 40px; padding: 8px 16px; border: 1px solid var(--rule2); border-radius: var(--r2); cursor: pointer; background: var(--surface); }
 .capabilities-page button:disabled { cursor: wait; opacity: .6; }
 @media (max-width: 600px) { .capabilities-page .row > .field { flex-basis: 100%; min-width: 0; } .capabilities-page .card { padding: var(--s4); } }
+.capabilities-page>[hidden]{display:none!important}
+.settings-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.settings-heading h1{margin:0;font-size:26px}.settings-heading p{margin:6px 0 0}
+.settings-tabs{display:flex;gap:24px;overflow:auto;border-bottom:1px solid var(--rule2);padding:0 0 1px;scrollbar-width:thin}
+.capabilities-page .settings-tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;padding:14px 0;min-height:48px;white-space:nowrap;color:var(--ink2)}
+.capabilities-page .settings-tabs button[aria-current=page]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+.capabilities-page .card{border:0;border-radius:0;box-shadow:none;padding:24px 0;background:transparent}
+.capabilities-page>.settings-section{padding:24px 0}.settings-section h2{font-size:21px;margin:0}
+.settings-section-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid var(--rule);padding-top:28px;margin-top:16px}
+.settings-section-heading h3{font-size:17px;margin:0}.memory-provider{padding:22px 0;border-bottom:1px solid var(--rule)}
+.memory-provider h3{font-size:15px;margin:0}.memory-provider .field{max-width:100%}.memory-provider input[type=number]{max-width:180px}
+.settings-inline-link{text-decoration:underline;text-underline-offset:4px;font-size:14px}
+.capabilities-page .checkline input{width:16px;min-height:16px;height:16px;padding:0;appearance:auto;accent-color:var(--ink)}
+.model-picker{position:relative;display:grid;gap:8px;min-width:0}
+.model-picker-input{position:relative}.model-picker-input input{padding-right:48px;width:100%}
+.capabilities-page .model-picker button.model-picker-toggle,.capability-editor .model-picker button.model-picker-toggle{position:absolute;right:2px;top:2px;width:40px;height:40px;min-height:40px;padding:0;border:0;border-radius:4px;background:transparent;display:grid;place-items:center;color:var(--ink2)}
+.model-picker-menu{position:absolute;top:100%;left:0;right:0;z-index:40;padding:6px;background:var(--surface);border:1px solid var(--rule2);border-radius:6px;box-shadow:0 8px 24px #1a21121a;min-width:220px;max-width:100%}
+.model-picker-options{max-height:240px;overflow:auto}.model-picker-menu button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;overflow-wrap:anywhere;white-space:normal}
+.capabilities-page .model-picker-menu button,.capability-editor .model-picker-menu button{border:0;border-radius:4px;background:transparent;min-height:40px;padding:8px 10px;font-size:13px}
+.model-picker-menu button:hover,.model-picker-menu button[aria-pressed=true]{background:var(--ground)}.model-picker-menu p{font-size:12px;line-height:1.7;padding:8px}
+.model-picker-refresh{border-bottom:1px solid var(--rule)!important}.settings-section :focus-visible,.settings-tabs :focus-visible,.model-picker :focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+@media(max-width:600px){.settings-tabs{gap:20px}.capabilities-page .row>.field{flex-basis:100%!important}.capabilities-page .row>div:has(.model-picker){flex-basis:100%;min-width:0!important}.settings-section-heading{align-items:flex-start;flex-direction:column;gap:8px}}
+.personal-memory-settings select { min-height: 44px; border: 1px solid var(--rule2); border-radius: 6px; padding: 8px 12px; max-width: 100%; background: var(--surface); color: var(--ink); }
+.personal-memory-settings .row { gap: 12px; }
+.config-test { flex-shrink: 0; }
+
+/* The navigation and active form share a stable grid; saved values stay in place. */
+.capabilities-page{display:grid;grid-template-columns:180px minmax(0,1fr);gap:40px;max-width:1120px;font:14px/1.65 var(--sans)}
+.settings-navigation{min-width:0}.settings-body{min-width:0;max-width:792px}
+.settings-heading{padding:0 10px 24px;gap:8px}.settings-heading h1{font-size:17px}.settings-heading p{display:none}
+.capabilities-page .settings-tabs{display:flex;flex-direction:column;gap:4px;border:0;overflow:visible;padding:0}
+.capabilities-page .settings-tabs button{text-align:left;border:0;border-radius:6px;padding:10px 12px;min-height:40px;font-size:13px}
+.capabilities-page .settings-tabs button[aria-current=page]{background:#eaf1ed;color:#285a47}
+.capabilities-page input,.capabilities-page select{min-height:38px;padding:8px 12px;font-size:13px;line-height:20px;border-radius:6px}
+.capabilities-page .card h2,.capabilities-page .settings-section h2{font-size:20px}
+.capabilities-page .btn{min-height:34px;padding:6px 16px;font-size:13px;border-radius:6px}
+.capabilities-page .purpose-settings .btn-pri{background:#263f32;border-color:#263f32;color:white}
+.capabilities-page .purpose-settings>[hidden]{display:none!important}
+.purpose-heading{margin-bottom:28px}.purpose-heading h2{font-size:26px;margin:0;font-weight:600}
+.purpose-heading p{margin:8px 0 0;color:var(--ink2);font-size:14px}
+.capabilities-page .purpose-tabs{display:flex;gap:24px;border-bottom:1px solid var(--rule);margin-bottom:24px;overflow:auto;scrollbar-width:thin}
+.capabilities-page .purpose-tabs button{padding:0 0 12px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;white-space:nowrap;font-size:14px;color:var(--ink2)}
+.capabilities-page .purpose-tabs button[aria-current=page]{border-bottom-color:var(--ink);color:var(--ink);font-weight:600}
+.purpose-connection h3{font-size:16px;margin:0 0 20px;font-weight:600}
+.purpose-field{display:grid;grid-template-columns:132px minmax(0,1fr);gap:24px;padding:10px 0;align-items:start}
+.purpose-field>label{padding-top:7px}.purpose-field>select{max-width:224px}
+.purpose-control{display:flex;gap:8px;align-items:center}.purpose-control input{min-width:0;width:100%;flex:1}
+.purpose-field .help{font-size:12px;margin:6px 0 0}.purpose-secret{position:relative;min-width:0}.purpose-secret input{padding-right:44px}
+.capabilities-page button.iconbtn{display:inline-grid;place-items:center;flex-shrink:0;min-height:36px;width:36px;padding:0;border:0;background:transparent}
+.purpose-secret .iconbtn{position:absolute;top:1px;right:2px}
+.memory-provider input.memory-saved-key::placeholder{color:var(--ink);opacity:1}
+.capabilities-page button.purpose-test{width:38px;min-height:38px;border:1px solid var(--rule2);border-radius:6px}
+.purpose-model .model-picker{grid-template-columns:132px minmax(0,1fr);gap:24px;padding:10px 0}
+.purpose-model .model-picker>label{padding-top:7px}.purpose-model .model-picker-menu{left:156px;width:calc(100% - 156px)}
+.capabilities-page .purpose-model .model-picker-toggle{top:1px;height:36px;min-height:36px;width:36px}
+.purpose-capabilities{margin-left:156px;display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--ink2)}
+.purpose-capabilities>span{display:inline-flex;gap:4px;align-items:center}
+.purpose-reasoning{margin:20px 0 0 156px;font-size:13px}.purpose-reasoning summary{cursor:pointer;color:var(--ink2);padding:8px 0}
+.purpose-save{display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:1px solid var(--rule);margin-top:24px;padding:20px 0}
+.purpose-save>div{display:flex;gap:8px}.purpose-save .help{font-size:12px}.purpose-scope{display:flex;align-items:center;gap:8px;border-top:1px solid var(--rule);padding-top:20px;font-size:12px!important}
+.purpose-settings :focus-visible,.settings-navigation :focus-visible{outline:2px solid #285a47;outline-offset:3px}
+.purpose-spin{animation:purpose-spin 1s linear infinite}@keyframes purpose-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.purpose-spin{animation:none}}
+@media(max-width:1100px){.capabilities-page{grid-template-columns:148px minmax(0,1fr);gap:24px}.purpose-field{grid-template-columns:100px minmax(0,1fr);gap:16px}.purpose-model .model-picker{grid-template-columns:100px minmax(0,1fr);gap:16px}.purpose-model .model-picker-menu{left:116px;width:calc(100% - 116px)}.purpose-reasoning,.purpose-capabilities{margin-left:116px}}
+@media(max-width:850px){.capabilities-page{display:block}.settings-heading{padding:0 0 16px}.capabilities-page .settings-tabs{flex-direction:row;gap:8px;overflow:auto;border-bottom:1px solid var(--rule);padding-bottom:12px;margin-bottom:24px}.capabilities-page .settings-tabs button{white-space:nowrap;flex-shrink:0}.settings-body{max-width:none}}
+@media(max-width:600px){.capabilities-page input,.capabilities-page select{min-height:44px;font-size:14px}.capabilities-page .btn{min-height:44px}.capabilities-page button.iconbtn{width:44px;min-height:44px}.settings-heading h1{font-size:16px}.purpose-heading h2{font-size:24px}.purpose-heading{margin-bottom:20px}.purpose-field{grid-template-columns:1fr;gap:8px;padding:8px 0}.purpose-field>label{padding-top:0}.purpose-field>select{max-width:none}.purpose-model .model-picker{grid-template-columns:1fr;gap:8px;padding:8px 0}.purpose-model .model-picker>label{padding:0}.purpose-model .model-picker-menu{left:0;width:100%}.capabilities-page .purpose-model .model-picker-toggle{height:42px;width:42px;min-height:42px}.purpose-secret .iconbtn{height:42px;min-height:42px!important}.purpose-capabilities,.purpose-reasoning{margin-left:0}.purpose-save{flex-wrap:wrap;margin-top:16px;padding:16px 0}.purpose-save>div{margin-left:auto}.purpose-tabs{gap:20px!important}.capabilities-page .purpose-tabs button{min-height:44px}.capabilities-page .settings-tabs button{min-height:44px}}

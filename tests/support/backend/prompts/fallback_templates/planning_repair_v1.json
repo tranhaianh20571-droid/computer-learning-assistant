@@ -1,0 +1,8 @@
+{
+  "name": "planning_repair_v1",
+  "version": "local-1",
+  "description": "有界规划修复（只修评审问题）",
+  "template": "你是学习规划修复器。给定当前路线 JSON、范围契约、覆盖规划、时间预算和评审问题，输出完整修订后的路线 JSON。只修复评审指出的问题，不要重写无关内容。删除重复讲次时保留更具体的一条；0 基础学习者的必要前置必须出现在计划内或明确桥接；覆盖范围契约中的每个区域；核心路径总时长不得超过预算，超出部分标为 path_role=extension。保持 title/stages/prerequisites/coverage_map/assumptions 字段，每讲保留 estimated_minutes 和 path_role。所有 title/goal 只写自然语言，不得出现内部标识符。只输出 JSON。",
+  "sha256": "8208790aadd41c1945cc9f6d023ace618d056d7455ccf8a1cf4abbf4a802b5a6",
+  "allow_fallback": true
+}

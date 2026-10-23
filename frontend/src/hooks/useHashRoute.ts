@@ -9,6 +9,7 @@ const ROUTE_ALIASES: Record<string, string> = {
 const STATIC_ROUTES = new Set([
   "/home", "/login", "/register", "/verify", "/reset", "/chat", "/planning",
   "/courses", "/materials", "/tasks", "/admin", "/canvas", "/capabilities",
+  "/cards", "/card-market", "/memory", "/market-receive", "/review",
 ]);
 
 /** Keep stale demo links and malformed hashes from rendering an empty shell. */
@@ -16,8 +17,8 @@ function normalizeRoute(raw: string) {
   const route = raw || "/home";
   if (ROUTE_ALIASES[route]) return ROUTE_ALIASES[route];
   const path = route.split("?")[0];
-  if (STATIC_ROUTES.has(path)) return path;
-  if (/^\/(?:route|course|lecture)\/[^/?]+$/.test(path)) return route;
+  if (STATIC_ROUTES.has(path)) return ["/cards", "/card-market", "/capabilities", "/review"].includes(path) ? route : path;
+  if (/^\/(?:route|course|lecture|card|knowledge)\/[^/?]+$/.test(path)) return route;
   return "/home";
 }
 

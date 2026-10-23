@@ -26,6 +26,49 @@ os.environ.setdefault("LEARNING_DATABASE_URL", get_database_url())
 import pytest  # noqa: E402
 
 
+@pytest.fixture(autouse=True, scope="module")
+def close_module_connection_pools():
+    """Retire idle test pools even when a legacy fixture fails before yielding."""
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+    engines = set()
+    def track(connection):
+        engines.add(connection.engine)
+    event.listen(Engine, "engine_connect", track)
+    try:
+        yield
+    finally:
+        event.remove(Engine, "engine_connect", track)
+        for engine in engines:
+            engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def stop_planning_backgrounds(monkeypatch):
+    """Stop dispatcher threads started by a test before the next test shares the DB."""
+    try:
+        from backend.planning.background import PlanningBackground
+    except Exception:  # noqa: BLE001 - importing the test mirror is best effort
+        yield
+        return
+    instances = []
+    original_start = PlanningBackground.start
+
+    def start(self):
+        instances.append(self)
+        return original_start(self)
+
+    monkeypatch.setattr(PlanningBackground, "start", start)
+    try:
+        yield
+    finally:
+        for instance in instances:
+            try:
+                instance.close()
+            except Exception:  # noqa: BLE001 - best-effort test cleanup
+                pass
+
+
 @pytest.fixture(autouse=True)
 def native_synthetic_model_session(monkeypatch):
     """Legacy generate ducks only; configured adapters retain native wire checks.

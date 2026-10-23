@@ -1,0 +1,52 @@
+{
+  "name": "study-companion-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "学习助手伙伴 Windows 桌面版",
+  "author": "Study Companion contributors",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "components": "node scripts/build-components.mjs",
+    "pack": "electron-builder --win --x64 --dir --publish never",
+    "dist": "electron-builder --win nsis --x64 --publish never",
+    "test": "node --test ../tests/desktop_install_unit.mjs ../tests/desktop_browsers_unit.mjs"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9",
+    "yauzl": "3.2.0"
+  },
+  "devDependencies": {
+    "7zip-bin": "5.2.0",
+    "electron": "45.0.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "io.studycompanion.desktop",
+    "productName": "学习助手伙伴",
+    "artifactName": "StudyCompanion-${version}-${arch}-Setup.${ext}",
+    "directories": {"output": "../.backup/desktop-dist"},
+    "files": ["src/**/*", "assets/**/*", "package.json"],
+    "extraResources": [
+      {"from": "../frontend/dist", "to": "frontend"},
+      {"from": "../server/backend/app", "to": "backend/app", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]},
+      {"from": "../server/source-worker", "to": "source-worker", "filter": ["*.py"]},
+      {"from": "../deploy/memory_service.py", "to": "memory_service.py"},
+      {"from": "src/detect-browsers.ps1", "to": "browser-tools/detect-browsers.ps1"},
+      {"from": "manifests/runtime.json", "to": "runtime.json"}
+    ],
+    "win": {"target": ["nsis"], "requestedExecutionLevel": "asInvoker", "icon": "assets/icon.ico"},
+    "nsis": {
+      "oneClick": false,
+      "allowElevation": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "include": "installer.nsh"
+    },
+    "publish": {"provider": "github", "owner": "tranhaianh20571-droid", "repo": "computer-learning-assistant"}
+  }
+}

@@ -68,12 +68,19 @@ class Slice3State:
         )
         from .teaching.assessment import AssessmentService
         self.assessments = AssessmentService(self.teaching)
+        from .review.service import ReviewService
+        self.review = ReviewService(self.teaching)
         # 切片 5：在线清理、备份轮换与恢复锁
         from .cleanup.service import CleanupService
         from .planning.deletion import PlanningDeletionService
 
         self.cleanup = CleanupService(db, storage=self.storage, audit=audit)
         self.deletion = PlanningDeletionService(db, audit)
+        from .memory.service import MemoryService
+        self.memory = MemoryService(db, audit)
+        self.chat.memory = self.memory
+        self.planning.memory = self.memory
+        self.teaching.memory = self.memory
         # 切片 2 T03/T04：逐页解析 + OCR 管线（适配器经工厂注入，真实凭据为人工前置）
         from .materials.ocr import OcrPipelineService
         from .materials.chunk_index import ChunkIndexService
@@ -89,6 +96,8 @@ class Slice3State:
         # 资料路由经 holder 惰性取管线（slice2 装配早于 slice3）
         self.pipeline_holder = pipeline_holder if pipeline_holder is not None else {"pipeline": None}
         self.pipeline_holder["pipeline"] = self.ocr_pipeline
+        from .characters.distillation_models import CharacterBuildRow, CharacterBuildStageRow  # noqa: F401
+        from .characters.persona import CharacterPersonaRow  # noqa: F401
 
 
 class TaskServiceShim(TaskService):
@@ -207,7 +216,7 @@ class DevSyntheticModelAdapter:
 
 class DevSyntheticSearchAdapter:
     kind = "search"
-    protocol = "tavily_hikari"
+    protocol = "anysearch"
 
     def search(self, query, **kwargs):
         return {
@@ -298,6 +307,7 @@ def _configured_model_descriptor(view, credentials):
     adapter.config_version = view["config_version"]
     adapter.http_pool_key = (adapter.config_id, adapter.config_version)
     adapter.capability_status = view["capability_status"]
+    adapter.reasoning_settings = view.get("reasoning_settings", {})
     adapter.defer_capability_probe = True
     return adapter
 
@@ -305,7 +315,7 @@ def _configured_model_descriptor(view, credentials):
 def _config_model_factory(configs) -> Optional[Any]:
     """按用户已存能力配置构建模型适配器（设置页为真相源）。
 
-    取属主最新一条活跃 content_model 配置，按协议映射适配器；
+    解析任务固定的用途连接，按协议映射适配器；
     端点由适配器统一规范化，能力测试与实际生成使用同一路径。
     """
     from .slice1.capability_refresh import CapabilityRefresher
@@ -314,12 +324,17 @@ def _config_model_factory(configs) -> Optional[Any]:
     build = _configured_model_descriptor
 
     def factory(owner_user_id: str, task_id: str):
-        view = configs.latest_active_for_owner(owner_user_id, "content_model")
+        from .planning.authorization import bound_planning_config
+        planning_bound, view = bound_planning_config(configs, owner_user_id, task_id)
+        if not planning_bound:
+            from .agents.model_routing import task_role_config
+            view = task_role_config(configs, owner_user_id, task_id)
         if view is None:
             return None
         adapter = build(view, configs.resolve_credentials(view["config_id"]))
         if adapter is not None:
             adapter.task_id = task_id
+            adapter.disclosure_grant_id = view.get("_planning_grant_id")
             from .agents.task_binding import bind_task_deps
             from .slice1.disclosure_service import DisclosureService
             adapter.agent_deps = bind_task_deps(configs.db, adapter, actor_id=owner_user_id,
@@ -330,6 +345,7 @@ def _config_model_factory(configs) -> Optional[Any]:
     refresher.builder = build
     configs.capability_refresher = refresher
     factory.refresher = refresher
+    factory.role_routing = True
 
     return factory
 
@@ -412,10 +428,12 @@ def create_slice3_app(
                     return adapter
 
                 model_adapter_factory = _model_factory_chain
-        if model_adapter_factory is None or search_adapter_factory is None:
-            dev_model, dev_search = _dev_synthetic_factories()
-            model_adapter_factory = model_adapter_factory or dev_model
-            search_adapter_factory = search_adapter_factory or dev_search
+        if search_adapter_factory is None:
+            from .search.service import configured_search_factory
+            search_adapter_factory = configured_search_factory(base.configs)
+        if model_adapter_factory is None:
+            dev_model, _ = _dev_synthetic_factories()
+            model_adapter_factory = dev_model
         if ocr_adapter_factory is None and os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") == "1":
             ocr_adapter_factory = lambda owner, task_id: _DevSyntheticOcrAdapter()  # noqa: E731
         if tts_adapter_factory is None and os.environ.get("LEARNING_DEV_SYNTHETIC_MODEL") == "1":
@@ -432,7 +450,12 @@ def create_slice3_app(
             pipeline_holder=holder,
         )
     app.state.slice3 = state
+    app.state.slice1.characters.teaching = state.teaching
+    state.teaching.characters = app.state.slice1.characters
     if managed_teaching:
+        from .planning.authorization import PlanningAuthorization
+        state.planning.authorization = PlanningAuthorization(app.state.slice1.configs,
+            app.state.slice1.disclosures)
         state.teaching.disclosures = app.state.slice1.disclosures
         state.teaching.configs=app.state.slice1.configs
         state.teaching.authorization.automatic_enabled = os.environ.get("TEACHING_AUTOMATIC_AUTHORIZATION", "1") == "1"
@@ -440,18 +463,9 @@ def create_slice3_app(
             state.teaching.tts_adapter_factory.authorize_task = state.teaching._check_authorization
         from .teaching.background import TeachingBackground
         state.teaching.background=TeachingBackground(state.teaching)
-        @app.on_event("startup")
-        def start_teaching_background():state.teaching.background.start()
-        @app.on_event("shutdown")
-        def stop_teaching_background():state.teaching.background.close()
     state.features.cover_configs = app.state.slice1.configs
     state.features.cover_disclosures = app.state.slice1.disclosures
-    @app.on_event("startup")
-    def start_cover_background():
-        state.features.cover_background.start()
-    @app.on_event("shutdown")
-    def stop_cover_background():
-        state.features.cover_background.close()
+    state.features.cover_automatic_authorization = os.environ.get("COVER_AUTOMATIC_AUTHORIZATION", "1") == "1"
     if state.features.image_adapter_factory is None:
         def image_factory(owner, task_id):
             import json
@@ -483,6 +497,24 @@ def create_slice3_app(
 
         return resolve_user_or_guest(request, app.state.slice0.auth)
 
+    from .materials.attachments import AttachmentService, create_attachment_router
+    from .materials.storage import MaterialStorage
+    if app.state.slice2.materials.storage is None:
+        app.state.slice2.materials.storage = state.storage
+    state.attachments = AttachmentService(state.db, app.state.slice2.materials,
+        app.state.slice1.configs, app.state.slice1.disclosures, state.tasks, state.storage)
+    app.include_router(create_attachment_router(state.attachments, _resolve_user))
+    from .materials.source_imports import SourceImports
+    from .materials.source_router import create_source_router
+    state.source_imports = SourceImports(state.attachments)
+    app.include_router(create_source_router(state.source_imports, _resolve_user))
+    from .characters.distillation import DistillationService
+    from .characters.distillation_router import create_distillation_router
+    state.distillation=DistillationService(app.state.slice1.characters,state.tasks,state.prompts,
+        app.state.slice1.disclosures,state.planning.model_adapter_factory,state.planning.search_adapter_factory,
+        media_service=app.state.slice1.character_media)
+    app.include_router(create_distillation_router(state.distillation,_resolve_user))
+
     app.include_router(
         create_planning_router(
             db=state.db,
@@ -509,8 +541,24 @@ def create_slice3_app(
     )
     from .teaching.assessment_router import create_assessment_router
     app.include_router(create_assessment_router(state.assessments, _resolve_user))
+    from .review.router import create_review_router
+    app.include_router(create_review_router(state.review, _resolve_user))
+    from .memory.router import create_memory_router
+    app.include_router(create_memory_router(state.memory, _resolve_user, app.state.slice1.characters))
+    from .memory.proxy import create_proxy_router
+    app.include_router(create_proxy_router(state.db))
 
     from .cleanup.router import create_cleanup_router
+    from .cleanup.manager import LocalResourceManager
+    from .cleanup.resource_router import create_resource_router
+    state.resources = LocalResourceManager(state)
+    app.include_router(create_resource_router(state.resources, _resolve_user))
+
+    from .lifecycle import worker_lifespan
+    workers = ([state.teaching.background] if managed_teaching else []) + [
+        state.features.cover_background, state.attachments, state.source_imports,
+        state.distillation, state.resources]
+    app.router.lifespan_context = worker_lifespan(workers, parent=app.router.lifespan_context)
 
     app.include_router(
         create_cleanup_router(cleanup=state.cleanup, resolve_user=_resolve_user)
@@ -541,6 +589,22 @@ def create_slice3_app(
         )
 
     from .teaching.errors import TeachingError
+    from .cleanup.errors import CleanupError
+
+    @app.exception_handler(CleanupError)
+    async def cleanup_error(_: Request, exc: CleanupError) -> JSONResponse:
+        return JSONResponse(
+            status_code=getattr(exc, "status", 500),
+            content={"error_code": exc.code, "message": exc.message},
+        )
+
+    from .materials.storage import StorageError
+
+    @app.exception_handler(StorageError)
+    async def resource_error(_: Request, exc: StorageError) -> JSONResponse:
+        status = 403 if exc.code == "local_resources_admin_only" else 404 if exc.code == "local_resource_not_found" else 409
+        return JSONResponse(status_code=status, content={"error_code": exc.code,
+            "message": "本地资源操作暂未完成，请检查存储空间、权限或作业状态。"})
 
     @app.exception_handler(TeachingError)
     async def teaching_error(_: Request, exc: TeachingError) -> JSONResponse:

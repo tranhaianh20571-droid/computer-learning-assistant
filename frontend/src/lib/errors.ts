@@ -4,6 +4,7 @@
  */
 
 export const ERROR_TEXT: Record<string, string> = {
+  TASK_STORAGE_BUSY: "服务暂时繁忙，正在准备恢复。",
   MODEL_TIMEOUT: "模型响应超时，可重试。",
   MODEL_CONNECTION_ERROR: "模型服务连接失败，可重试。",
   MODEL_RATE_LIMITED: "模型服务暂时限流，请稍后重试。",
@@ -49,11 +50,20 @@ export const ERROR_TEXT: Record<string, string> = {
   LESSON_UNLOCK_REQUIRED: "未确认大纲，暂不能开始学习。",
   DRAFT_REVISION_MISMATCH: "草稿已在其他窗口更新，已加载服务端最新版本。",
   CONTEXT_BUDGET_EXCEEDED: "上下文超出预算，请缩小范围或补充资料。",
+  OUTPUT_INVALID: "模型返回的内容不符合要求，可重试生成。",
+  ROUTE_STRUCTURE_INVALID: "路线结构不完整，可重试生成。",
+  INVALID_OUTLINE_STRUCTURE: "大纲结构不完整，可重试生成。",
+  INVALID_PREREQUISITE: "先修关系不合法，可重试生成。",
+  DAG_CYCLE: "先修关系存在循环，可重试生成。",
+  DISCLOSURE_REQUIRED: "需要重新准备当前模型后继续生成。",
+  DISCLOSURE_EXPIRED: "本次模型使用已过期，可以使用当前模型继续生成。",
+  DISCLOSURE_REVOKED: "本次模型使用已被撤销，请检查模型设置。",
+  DISCLOSURE_GRANT_INVALID: "本次模型使用授权已失效，请检查模型设置。",
 };
 
 export function errText(e: unknown): string {
   const code = (e as { code?: string })?.code;
-  return (code && (ERROR_TEXT[code] || ERROR_TEXT[code.toLowerCase()])) || (e as Error)?.message || "操作失败";
+  return (code && (ERROR_TEXT[code] || ERROR_TEXT[code.toUpperCase()] || ERROR_TEXT[code.toLowerCase()])) || (e as Error)?.message || "操作失败";
 }
 
 export type Me = {

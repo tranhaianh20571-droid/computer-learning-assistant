@@ -206,9 +206,9 @@ class TestConfigAccessControl:
             configs.create(
                 actor_id="user_1",
                 is_admin=False,
-                kind="search",
-                protocol="tavily_hikari",
-                endpoint="https://search.example.test",
+                kind="ocr",
+                protocol="paddleocr",
+                endpoint="https://ocr.example.test",
                 model_name="",
                 credentials={"api_key": FAKE_KEY},
                 owner_scope="admin",

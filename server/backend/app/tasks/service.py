@@ -173,6 +173,16 @@ class TaskService:
             if existing is not None:
                 # 幂等：返回同一有效任务
                 return {"task_id": existing.task_id, "status": existing.status, "deduped": True}
+            from ..cleanup.budget import current_budget, HEAVY_KINDS
+            budget = getattr(self, "resource_budget", None) or current_budget()
+            if budget and kind in HEAVY_KINDS:
+                if sess.bind.dialect.name == "postgresql":
+                    from sqlalchemy import text
+                    sess.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 61021004})
+                pending = sess.scalar(select(func.count()).select_from(LearningTaskRow).where(
+                    LearningTaskRow.kind.in_(HEAVY_KINDS), LearningTaskRow.status == "queued"))
+                if pending >= 20:
+                    raise LeaseError("LANE_CAPACITY_FULL", "local heavy queue full")
 
             task_id = f"task_{uuid.uuid4().hex[:12]}"
             now = utcnow()
@@ -346,6 +356,10 @@ class TaskService:
             if row is None:
                 raise LeaseError("TASK_NOT_FOUND", "task not found")
             now = utcnow()
+            if row.owner_user_id.startswith("guest_"):
+                self._terminal(sess, row, status="cancelled", error_code="TASK_CANCELLED", now=now)
+                sess.commit()
+                raise LeaseError("TASK_CANCELLED", "guest access retired")
             if row.status not in ("queued", "leased", "running"):
                 raise LeaseError("TASK_NOT_CLAIMABLE", f"status={row.status}")
             if row.deadline_at and self._as_utc(row.deadline_at) <= now:
@@ -358,6 +372,7 @@ class TaskService:
                 self._terminal(sess, row, status="cancelled", error_code="TASK_CANCELLED", now=now)
                 sess.commit()
                 raise LeaseError("TASK_CANCELLED", "cancel requested")
+            self._resource_capacity(sess, row)
 
             attempt = row.attempt + 1
             attempt_id = f"att_{uuid.uuid4().hex[:12]}"
@@ -403,6 +418,7 @@ class TaskService:
         lease_owner: str,
         lease_seconds: int = 60,
         capacity: Optional[LaneCapacity] = None,
+        task_ids: Optional[list[str]] = None,
     ) -> Lease:
         """按 lane 领取最旧排队任务（切片 2 T06 调度隔离）。
 
@@ -444,6 +460,7 @@ class TaskService:
                     .where(
                         LearningTaskRow.status == "queued",
                         LearningTaskRow.lane == lane,
+                        LearningTaskRow.task_id.in_(task_ids) if task_ids is not None else True,
                     )
                     .order_by(LearningTaskRow.created_at)
                     .limit(16)
@@ -481,6 +498,7 @@ class TaskService:
             if row is None:
                 sess.commit()
                 raise LeaseError("NO_QUEUED_TASK", f"no claimable task in lane {lane}")
+            self._resource_capacity(sess, row)
 
             attempt = row.attempt + 1
             attempt_id = f"att_{uuid.uuid4().hex[:12]}"
@@ -518,6 +536,23 @@ class TaskService:
                 owner_user_id=row.owner_user_id,
             )
 
+    def _resource_capacity(self, session, row):
+        from ..cleanup.budget import current_budget, HEAVY_KINDS
+        budget = getattr(self, "resource_budget", None) or current_budget()
+        if not budget or row.kind not in (*HEAVY_KINDS, "lesson_first_prepare", "lesson_plan_refine"):
+            return
+        if session.bind.dialect.name == "postgresql":
+            from sqlalchemy import text
+            session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 61021004})
+        if not budget.permits_heavy():
+            raise LeaseError("LANE_CAPACITY_FULL", "local resource pressure")
+        if row.kind in HEAVY_KINDS:
+            active = session.scalar(select(func.count()).select_from(LearningTaskRow).where(
+                LearningTaskRow.kind.in_(HEAVY_KINDS), LearningTaskRow.task_id != row.task_id,
+                LearningTaskRow.status.in_(ACTIVE_STATUSES), LearningTaskRow.lease_until > utcnow()))
+            if active >= budget.snapshot()["heavy_limit"]:
+                raise LeaseError("LANE_CAPACITY_FULL", "local heavy capacity full")
+
     def validate_lease(
         self, lease: Lease, *, actor_id: Optional[str] = None,
         session: Optional[Session] = None,
@@ -545,6 +580,8 @@ class TaskService:
         if row is None:
             raise LeaseError("TASK_NOT_FOUND", "task not found")
         now = utcnow()
+        if row.owner_user_id.startswith("guest_"):
+            raise LeaseError("TASK_CANCELLED", "guest access retired")
         if actor_id is not None and actor_id != row.owner_user_id:
             raise AccessDeniedError("not_owner")
         if lease.owner_user_id is not None and lease.owner_user_id != row.owner_user_id:

@@ -1,0 +1,58 @@
+.memory-designed { padding: 12px 0 24px; }
+.memory-designed [hidden] { display: none !important; }
+.memory-page-head { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 32px; }
+.memory-page-head h1 { font-size: 26px; line-height: 1.4; font-weight: 600; margin: 0; }
+.memory-designed .memory-clear { border-color: #ddd; color: #686868; background: transparent; }
+.memory-designed .memory-clear:hover { background: #fff; color: #a63c35; border-color: #d5aaa5; }
+.memory-enable-row { display: flex; justify-content: space-between; align-items: center; gap: 32px; padding: 24px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+.memory-enable-copy { min-width: 0; }
+.memory-enable-copy h2 { font-size: 15px; line-height: 1.65; font-weight: 600; margin: 0 0 8px; }
+.memory-enable-copy p { color: var(--ink2); font-size: 13px; line-height: 1.9; max-width: 560px; margin: 0; }
+.memory-switch-control { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.memory-switch-control > span { font-size: 12px; color: var(--ink2); white-space: nowrap; }
+.capabilities-page .memory-designed button.memory-switch { flex: none; width: 44px; height: 26px; min-height: 26px; padding: 3px; border-radius: 20px; border: 0; display: flex; align-items: center; background: #171717; }
+.memory-switch > span { width: 20px; height: 20px; border-radius: 50%; background: #fff; transform: translateX(18px); transition: transform 180ms; }
+.capabilities-page .memory-designed button.memory-switch[aria-checked="false"] { background: #b8b8b8; }
+.memory-switch[aria-checked="false"] > span { transform: translateX(0); }
+.memory-existing-note { font-size: 12px; line-height: 1.9; color: #757575; margin: 16px 0 0; }
+.memory-profile-section { margin-top: 36px; }
+.memory-section-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; min-height: 34px; }
+.memory-section-head h2 { font-size: 18px; line-height: 1.6; font-weight: 600; margin: 0; }
+.memory-designed .memory-refresh { border-color: transparent; background: transparent; padding: 5px 0 5px 12px; color: #666; }
+.memory-designed .memory-refresh:hover { color: #171717; }
+.memory-designed .memory-refresh svg { width: 15px; height: 15px; }
+.memory-profile-sheet { background: #fff; border-top: 1px solid #d9d9d9; border-bottom: 1px solid #e5e5e5; padding: 0 24px; }
+.memory-profile-part { padding: 24px 0; }
+.memory-profile-part + .memory-profile-part { border-top: 1px solid #ececec; }
+.memory-part-title { display: flex; align-items: center; gap: 12px; }
+.memory-part-title h3 { font-size: 15px; line-height: 1.6; font-weight: 600; margin: 0; }
+.memory-part-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: none; background: #f3f3f3; border-radius: 4px; color: #666; }
+.memory-part-icon svg { width: 17px; height: 17px; }
+.memory-profile-part p { margin: 10px 0 0 42px; max-width: 680px; font-size: 14px; color: #515151; line-height: 1.95; overflow-wrap: anywhere; }
+.memory-profile-continuation { padding: 20px 0; }
+.memory-empty { font-size: 14px; color: var(--ink2); padding: 28px 0; margin: 0; }
+.memory-feedback-section { margin-top: 36px; }
+.memory-feedback-form { display: grid; grid-template-columns: minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr) auto; align-items: center; gap: 12px; }
+.memory-feedback-form select { width: 100%; min-width: 0; font-size: 13px; }
+.memory-designed .memory-feedback-form .btn { min-height: 44px; }
+.memory-operation-status { display: flex; align-items: center; gap: 6px; color: #626262; font-size: 12px; min-height: 24px; margin-top: 16px; }
+.memory-operation-status svg { width: 14px; height: 14px; }
+@media (max-width: 600px) {
+  .memory-designed { padding-top: 8px; }
+  .memory-page-head { gap: 16px; margin-bottom: 24px; }
+  .memory-page-head h1 { font-size: 24px; }
+  .memory-page-head .memory-clear { font-size: 12px; padding: 6px 10px; }
+  .memory-enable-row { align-items: flex-start; flex-wrap: wrap; gap: 16px; padding: 20px 0; }
+  .memory-switch-control { margin-left: auto; }
+  .capabilities-page .memory-designed button.memory-switch { width: 48px; height: 28px; min-height: 28px; padding: 4px; }
+  .memory-switch > span { transform: translateX(20px); }
+  .memory-profile-section,.memory-feedback-section { margin-top: 28px; }
+  .memory-profile-sheet { padding: 0 16px; }
+  .memory-profile-part p { margin-left: 0; }
+  .memory-feedback-form { grid-template-columns: 1fr 1fr; }
+  .memory-feedback-form select:first-child { grid-column: 1 / -1; }
+  .memory-feedback-form .btn { grid-column: 1 / -1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .memory-switch > span { transition: none; }
+}

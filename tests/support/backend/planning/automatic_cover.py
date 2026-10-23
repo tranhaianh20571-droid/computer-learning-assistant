@@ -61,6 +61,14 @@ def preflight(service, kind, ident, owner):
             "cover": service._cover_view(sess, state) if state else {"status": "not_generated", "asset_id": None}}
 
 
+def _automatic_config(sess, owner):
+    """Newest enabled image model for this owner; ``None`` keeps the local fallback."""
+    return sess.scalar(select(ServiceConfigRow).where(ServiceConfigRow.owner_user_id == owner,
+        ServiceConfigRow.owner_scope == "user", ServiceConfigRow.kind == "image_generation",
+        ServiceConfigRow.protocol == "openai_image", ServiceConfigRow.is_active.is_(True))
+        .order_by(ServiceConfigRow.updated_at.desc(), ServiceConfigRow.config_id.desc()).limit(1))
+
+
 def _config(sess, owner, config_id, version):
     row = sess.get(ServiceConfigRow, config_id, with_for_update=True) if config_id else None
     if (not row or not row.is_active or row.kind != "image_generation" or row.protocol != "openai_image"
@@ -83,7 +91,8 @@ def _membership(service, sess, root_id, course_id, owner):
 
 def enqueue(service, kind, ident, owner, *, authorized=False, config_id=None, config_version=None,
             title_hash=None, scope="exact_target", authorization_scope=None, course_topic_hashes=None,
-            idempotency_key=None, use_current_config=False, parent_grant_id=None, root_id=None, regenerate=False):
+            idempotency_key=None, use_current_config=False, parent_grant_id=None, root_id=None, regenerate=False,
+            automatic=False):
     scope = authorization_scope or scope
     with service.db.session() as sess:
         target = service.target(sess, kind, ident, owner)
@@ -92,6 +101,18 @@ def enqueue(service, kind, ident, owner, *, authorized=False, config_id=None, co
         policy = resolve(sess, kind, ident, owner)
         if not policy["cover_eligible"]:
             return suppressed(policy)
+        if automatic and not authorized:
+            # ADR-034 automatic mode: the operator opted in and configured an image model, so the
+            # grant is derived here instead of from a per-cover dialog. Revocation is still
+            # re-checked on every reuse, send and publication (see _reusable_cover / validate).
+            if not getattr(service, "cover_automatic_authorization", False):
+                return None
+            row = _automatic_config(sess, owner)
+            if row is None:
+                return None
+            config_id, config_version = row.config_id, row.config_version
+            title_hash = topic_hash(target.title_ref)
+            authorized = True
         if not authorized or not config_id or config_version is None or not title_hash:
             raise error("disclosure_required", "请先确认知识主题与图片模型")
         if scope not in ("exact_target", "route_and_confirmed_courses") or scope != "exact_target" and kind != "route":

@@ -10,41 +10,65 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Computed, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from ..auth.models import UserRow  # noqa: F401 - owner FK metadata
 from ..logging_audit.models import Base
 
-CONFIG_KINDS = ("content_model", "tts", "ocr", "search", "image_generation")
-PROTOCOLS = ("openai_image", "openai", "anthropic", "gemini", "minimax", "paddleocr", "tavily_hikari")
+CONFIG_KINDS = ("content_model", "tts", "ocr", "search", "image_generation", "video_generation", "document_parser", "web_reader", "video_reader")
+PROTOCOLS = ("openai_image", "openai", "openai_responses", "anthropic", "gemini", "minimax", "paddleocr", "anysearch", "minimax_video", "seedance", "somark", "paddleocr_vl", "firecrawl", "bilinote")
 CAPABILITIES = ("text", "image", "tool_call", "json_schema", "streaming", "cancel")
 CAPABILITY_STATES = ("unknown", "available", "unavailable")
-CONTENT_CATEGORIES = ("material", "query", "generated_text", "image", "audio_text")
+CONTENT_CATEGORIES = ("material", "query", "generated_text", "image", "audio_text", "character_media")
 
 # 协议 → 允许的配置类型
 PROTOCOL_KIND = {
+    "firecrawl": "web_reader",
+    "bilinote": "video_reader",
+    "openai_responses": "content_model",
+    "paddleocr_vl": "document_parser",
+    "somark": "document_parser",
+    "minimax_video": "video_generation",
+    "seedance": "video_generation",
     "openai_image": "image_generation",
     "openai": "content_model",
     "anthropic": "content_model",
     "gemini": "content_model",
     "minimax": "tts",
     "paddleocr": "ocr",
-    "tavily_hikari": "search",
+    "anysearch": "search",
 }
 
 # 各协议默认探测能力集
 PROTOCOL_CAPABILITIES = {
+    "firecrawl": ("connection",),
+    "bilinote": ("connection",),
+    "openai_responses": CAPABILITIES,
+    "paddleocr_vl": ("connection",),
+    "somark": ("connection",),
+    "minimax_video": ("video_generate",),
+    "seedance": ("video_generate",),
     "openai_image": ("image_generate",),
     "openai": CAPABILITIES,
     "anthropic": CAPABILITIES,
     "gemini": CAPABILITIES,
     "minimax": ("text",),
     "paddleocr": ("text", "image"),
-    "tavily_hikari": ("text",),
+    "anysearch": ("text",),
 }
 
-ADMIN_KINDS = ("ocr", "search")
-USER_KINDS = ("content_model", "tts", "image_generation")
+ADMIN_KINDS = ("ocr",)
+USER_KINDS = ("content_model", "tts", "image_generation", "video_generation", "search", "document_parser", "web_reader", "video_reader")
+SOMARK_ENDPOINT = "https://somark.cn/api/v1"
+PADDLE_VL_ENDPOINT = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+PADDLE_VL_MODEL = "PaddleOCR-VL-1.6"
+DOCUMENT_DESTINATIONS = {"somark": (SOMARK_ENDPOINT, ""),
+                         "paddleocr_vl": (PADDLE_VL_ENDPOINT, PADDLE_VL_MODEL)}
+ANYSEARCH_ENDPOINT = "https://api.anysearch.com"
+ACTIVE_SEARCH_PREDICATE = "owner_scope = 'user' AND kind = 'search' AND protocol = 'anysearch' AND is_active"
+ACTIVE_SEARCH_OWNER_EXPRESSION = "CASE WHEN kind = 'search' AND protocol = 'anysearch' AND is_active THEN owner_user_id ELSE NULL END"
+ACTIVE_SEARCH_OWNER_CHECK = "NOT (kind = 'search' AND protocol = 'anysearch' AND is_active) OR (owner_scope = 'user' AND owner_user_id IS NOT NULL AND owner_user_id <> '')"
 
 
 def utcnow() -> datetime:
@@ -55,15 +79,36 @@ def empty_capability_status(protocol: str) -> dict:
     return {cap: "unknown" for cap in PROTOCOL_CAPABILITIES.get(protocol, ("text",))}
 
 
+class SearchConfigOwnerRow(Base):
+    """Serialization row for a trusted search owner, not an auth user or grant."""
+
+    __tablename__ = "search_config_owners"
+    __table_args__ = (
+        CheckConstraint("owner_user_id <> ''", name="ck_search_config_owners_nonempty"),
+    )
+
+    owner_user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
 class ServiceConfigRow(Base):
     __tablename__ = "service_configs"
     __table_args__ = (
         Index("idx_service_configs_owner", "owner_user_id"),
         Index("idx_service_configs_kind", "owner_scope", "kind", "is_active"),
+        Index("uq_service_configs_personal_search", "owner_user_id", unique=True,
+              postgresql_where=text(ACTIVE_SEARCH_PREDICATE), sqlite_where=text(ACTIVE_SEARCH_PREDICATE)),
+        CheckConstraint(ACTIVE_SEARCH_OWNER_CHECK, name="ck_service_configs_search_owner"),
     )
 
     config_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_user_id: Mapped[str | None] = mapped_column(String(64))
+    # A generated FK enforces search ownership without rewriting legacy owners
+    # or imposing a new FK on unrelated capability configurations.
+    active_search_owner_id: Mapped[str | None] = mapped_column(
+        String(64), Computed(ACTIVE_SEARCH_OWNER_EXPRESSION, persisted=True),
+        ForeignKey("search_config_owners.owner_user_id", name="fk_service_configs_search_owner"),
+    )
+    search_test_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     owner_scope: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
     kind: Mapped[str] = mapped_column(String(30), nullable=False)
     protocol: Mapped[str] = mapped_column(String(30), nullable=False)
@@ -72,6 +117,10 @@ class ServiceConfigRow(Base):
     encrypted_credentials: Mapped[str] = mapped_column(Text, nullable=False, default="")
     credential_mask: Mapped[str] = mapped_column(String(64), nullable=False, default="****")
     capability_status: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    reasoning_settings: Mapped[str] = mapped_column(Text, nullable=False,
+        default='{"mode":"default","show_summary":true}', server_default='{"mode":"default","show_summary":true}')
+    reasoning_validation: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
+    reasoning_test_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)

@@ -25,9 +25,12 @@ from backend.tasks.service import LearningTaskRow, LeaseError, TaskAttemptRow, T
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
+    from backend.auth.models import UserRow
+    from backend.teaching.learning_models import LessonBlueprintRow
     db = Database(f"sqlite+pysqlite:///{(tmp_path / 'chat.sqlite').as_posix()}")
-    for model in (LearningTaskRow, AgentBudgetRow, TaskAttemptRow, TaskStateRow, TaskEventRow,
-                  ConversationRow, MessageRow, PlanningTaskStateRow, ContextManifestRow, PromptBindingRow):
+    for model in (UserRow, LearningTaskRow, AgentBudgetRow, TaskAttemptRow, TaskStateRow, TaskEventRow,
+                  ConversationRow, MessageRow, PlanningTaskStateRow, ContextManifestRow, PromptBindingRow,
+                  LessonBlueprintRow):
         model.__table__.create(db.engine)
     events = PgTaskEventStore(db)
     tasks = TaskService(db, events)
@@ -91,6 +94,58 @@ def test_testmodel_nonstream_and_idempotency(env):
         assert task.status == "succeeded"
         assert sess.get(AgentBudgetRow, result["task_id"]).logical_requests == 1
     assert service.events.get_events(result["task_id"])[-1].status == "succeeded"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("search_state", ["succeeded", "empty", "failed", "no_config", "disabled"])
+def test_realtime_question_calls_model_in_all_search_states(env, streaming, search_state):
+    from common_fixtures import SyntheticSearchAdapter
+    service, db, _, state, conv_id = env
+    observed = []
+
+    def observe(messages, info):
+        observed.append((str(messages), info.instructions))
+
+    def model(messages, info):
+        observe(messages, info)
+        return ModelResponse(parts=[TextPart("synthetic current answer")])
+
+    async def stream_model(messages, info):
+        observe(messages, info)
+        yield "synthetic current answer"
+
+    state["model"] = FunctionModel(model, stream_function=stream_model)
+    search = SyntheticSearchAdapter(fail="timeout" if search_state == "failed" else None)
+    if search_state == "empty":
+        search.search = lambda *args, **kwargs: {"results": []}
+    state["search"] = None if search_state == "no_config" else search
+    if search_state == "disabled":
+        def forbidden(*args):
+            pytest.fail("disabled search constructed an adapter")
+        service.search_adapter_factory = forbidden
+    options = dict(actor_id="user_owner", content="今天的最新数据库版本是什么？",
+                   use_search=search_state != "disabled", idempotency_key="realtime")
+    if streaming:
+        meta, events = service.stream_answer(conv_id, **options)
+        emitted = list(events)
+        assert emitted[-1]["type"] == "done"
+        assert emitted[-1]["content"] == "synthetic current answer"
+        task_id = meta["task_id"]
+    else:
+        result = service.send_message(conv_id, **options)
+        assert result["message"]["content"] == "synthetic current answer"
+        assert result["external_result_count"] == (1 if search_state == "succeeded" else 0)
+        task_id = result["task_id"]
+    assert len(observed) == 1
+    body, instructions = observed[0]
+    expected = search_state if search_state in ("succeeded", "empty", "failed") else "skipped"
+    assert f'"state": "{expected}"' in body
+    assert f'"mode": "{"with_evidence" if search_state == "succeeded" else "offline"}"' in body
+    assert "do not claim current facts were verified" in instructions
+    assert ("synthetic snippet" in body) == (search_state == "succeeded")
+    assert service.get_conversation(conv_id, actor_id="user_owner")["wait_state"] is None
+    with db.session() as sess:
+        assert sess.get(LearningTaskRow, task_id).status == "succeeded"
 
 
 def test_actual_prompt_history_and_context_reach_native_model(env):
@@ -221,21 +276,47 @@ def test_message_and_success_event_share_transaction(env, monkeypatch):
         assert sess.scalars(select(TaskEventRow).where(TaskEventRow.status == "succeeded")).all() == []
 
 
-def test_search_wait_and_offline_resume_without_generation_increment(env):
+def test_search_failure_automatically_continues_without_generation_increment(env):
     service, db, _, state, conv_id = env
+    from backend.search.contracts import SearchProviderError
     class FailingSearch:
         def search(self, *args, **kwargs):
-            raise TimeoutError("synthetic timeout")
+            raise SearchProviderError("SEARCH_TIMEOUT")
     state["search"] = FailingSearch()
-    with pytest.raises(WaitStateSignal):
-        send(env, use_search=True)
-    assert state["factory_tasks"] == []
-    with db.session() as sess:
-        assert sess.scalar(select(LearningTaskRow)).status == "partial"
-    result = service.resume_message(conv_id, actor_id="user_owner", decision="offline_continue")
+    result = send(env, use_search=True)
     assert result["message"]["content"] == "synthetic answer"
     assert result["generation"] == 1
-    assert service.resume_message(conv_id, actor_id="user_owner", decision="offline_continue")["deduped"]
+    assert result["external_result_count"] == 0
+    with db.session() as sess:
+        assert sess.scalar(select(LearningTaskRow)).status == "succeeded"
+    assert service.get_conversation(conv_id, actor_id="user_owner")["wait_state"] is None
+    with pytest.raises(PlanningError):
+        service.resume_message(conv_id, actor_id="user_owner", decision="offline_continue")
+
+
+@pytest.mark.parametrize("invalid", ["cancelled", "expired"])
+def test_legacy_search_resume_never_revives_invalid_partial_task(env, invalid):
+    service, db, _, _, conv_id = env
+    from datetime import timedelta
+    result = send(env, use_search=False)
+    with db.session() as sess:
+        for answer in sess.scalars(select(MessageRow).where(MessageRow.role == "assistant")):
+            sess.delete(answer)
+        task = sess.get(LearningTaskRow, result["task_id"])
+        task.status = "partial"
+        task.cancel_requested = invalid == "cancelled"
+        if invalid == "expired":
+            task.deadline_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        state = sess.get(TaskStateRow, task.task_id)
+        state.status = "partial"
+        state.error_code = "AWAITING_SEARCH_DECISION"
+    with pytest.raises(PlanningError) as failure:
+        service.resume_message(conv_id, actor_id="user_owner", decision="offline_continue")
+    assert failure.value.code == "TASK_CANCELLED"
+    assert answers(env) == []
+    with db.session() as sess:
+        assert sess.get(LearningTaskRow, result["task_id"]).status == "partial"
+        assert sess.get(ConversationRow, conv_id).generation == 1
 
 
 def test_bounded_buffer_close_wakes_blocked_producer():

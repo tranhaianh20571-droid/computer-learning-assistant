@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { TeachingBuffer } from "../lib/teachingBuffer";
 
-export function useTeachingBuffer(conversation: string, ws: any, previews: Record<string, any>, current: number, playing = true, audioRequired = false) {
+export function useTeachingBuffer(conversation: string, ws: any, previews: Record<string, any>, current: number, playing = true, audioRequired = false, followupPlaying = false, playbackVersion=0) {
   const store = useRef(new TeachingBuffer());
   const initial = useRef(true);
   const [, render] = useState(0);
   useEffect(() => {
-    store.current = new TeachingBuffer(); store.current.setPaused(!playing); initial.current = true;
+    store.current = new TeachingBuffer(); store.current.setPaused(!playing&&!followupPlaying); initial.current = true;
     render(n => n+1);
-  }, [conversation]);
-  useEffect(() => { store.current.setPaused(!playing); render(n => n+1); }, [playing]);
+  }, [conversation,playbackVersion]);
+  useEffect(() => { store.current.setPaused(!playing&&!followupPlaying); render(n => n+1); }, [playing,followupPlaying]);
   useEffect(() => {
     if (!ws || ws.conversation_id !== conversation) return;
     const valid = new Set<string>();
@@ -19,16 +19,15 @@ export function useTeachingBuffer(conversation: string, ws: any, previews: Recor
       const key = draft.followup ? `followup:${draft.conversation_generation}` : `step:${draft.step_no}`;
       valid.add(key);
       const draftValue: any = { text: draft.text || "", board: draft.board?{...draft.board,board_scope:draft.board_scope}:null, beats: draft.beats || [],
-        epoch: `${draft.generation}:${draft.attempt}`, active: draft.followup || draft.step_no===current,
+        epoch: `${draft.generation}:${draft.attempt}`, active: draft.followup ? followupPlaying : draft.step_no===current&&playing&&ws.session_state==="active",
         final: false, step_no: draft.step_no, followup: Boolean(draft.followup) };
-      if (!audioRequired || draft.followup || draft.step_no!==current || !store.current.entries.has(key))
-        draftValue.revealReady = !audioRequired || draft.followup || draft.step_no!==current;
+      draftValue.revealReady = draft.followup ? false : !audioRequired || draft.step_no!==current;
       store.current.receive(key, draftValue);
     }
     for (const step of ws.steps || []) {
       const key = `step:${step.step_no}`; valid.add(key);
       const stepValue: any = { text: step.text, board: step.board, beats: step.board?.beats || [],
-        active: step.step_no===current, final: true, step_no: step.step_no, followup: false };
+        active: step.step_no===current&&playing&&ws.session_state==="active", final: true, step_no: step.step_no, followup: false };
       if (!audioRequired || step.step_no!==current || !store.current.entries.has(key))
         stepValue.revealReady = !audioRequired || step.step_no!==current;
       store.current.receive(key, stepValue, initial.current && step.step_no<current);
@@ -43,8 +42,14 @@ export function useTeachingBuffer(conversation: string, ws: any, previews: Recor
       if (reply.role !== "assistant") continue;
       const key = `followup:${reply.generation}`; valid.add(key);
       const board = reply.generation===ws.generation ? ws.followup_board : null;
-      store.current.receive(key, { text: reply.content, board, beats: board?.beats || [], active: true,
-        final: true, followup: true, step_no: 0 }, initial.current);
+      const latest=reply.generation===ws.generation&&ws.session_state==="awaiting_resume";
+      const value:any={text:reply.content,board,beats:board?.beats||[],active:latest&&followupPlaying,
+        final:true,followup:true,step_no:0};
+      if(!latest||!ws.tts_authorized||!store.current.entries.has(key))value.revealReady=!latest||!ws.tts_authorized;
+      store.current.receive(key,value,initial.current&&!latest);
+      if(initial.current&&latest&&ws.channel_checkpoint){
+        store.current.restoreCursor(key,ws.channel_checkpoint.visible_chars||0);
+      }
     }
     for (const key of store.current.entries.keys()) {
       // Publication and workspace polling are separate requests. Keep the cursor
@@ -56,7 +61,7 @@ export function useTeachingBuffer(conversation: string, ws: any, previews: Recor
     }
     initial.current = false;
     render(n => n+1);
-  }, [ws, previews, current, conversation, audioRequired]);
+  }, [ws, previews, current, conversation, audioRequired,followupPlaying,playing]);
   useEffect(() => {
     let frame = 0, previous = 0;
     const tick = (now: number) => {
@@ -75,6 +80,7 @@ export function useTeachingBuffer(conversation: string, ws: any, previews: Recor
       return {visible_chars:entry?.shown||0,text_complete:Boolean(entry?.final && entry.shown>=Array.from(entry.text).length)};
     },
     audioClock:(key:string,chars:number|null)=>store.current.audioClock(key,chars),
+    restoreCursor:(key:string,chars:number)=>{store.current.restoreCursor(key,chars);render(n=>n+1);},
     audioGate:(key:string,blocked:boolean)=>{store.current.audioGate(key,blocked);render(n=>n+1);},
     flush: () => { for (const [key,entry] of store.current.entries) if (entry.active) store.current.flush(key); render(n => n+1); } };
 }

@@ -1,8 +1,12 @@
 """Bounded planning dispatcher; durable opt-in survives page and process exits."""
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock, Thread
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, and_
+from sqlalchemy.orm import aliased
 from ..tasks.service import LearningTaskRow, LeaseError
+from ..logging_audit.models import TaskStateRow
+from ..slice1.errors import Slice1Error
+from .retry_policy import AUTO_RETRY_LIMIT, AUTO_RETRY_ERRORS
 from .models import PlanningTaskStateRow, utcnow
 from .errors import PlanningError
 
@@ -41,21 +45,48 @@ class PlanningBackground:
             if not available:
                 return
             with self.planning.db.session() as sess:
+                newer = aliased(PlanningTaskStateRow)
+                superseded = select(newer.task_id).where(
+                    newer.owner_user_id == PlanningTaskStateRow.owner_user_id,
+                    newer.target_id == PlanningTaskStateRow.target_id,
+                    or_(newer.created_at > PlanningTaskStateRow.created_at,
+                        and_(newer.created_at == PlanningTaskStateRow.created_at,
+                            newer.task_id > PlanningTaskStateRow.task_id)),
+                ).exists()
                 ids = list(sess.scalars(select(LearningTaskRow.task_id).join(PlanningTaskStateRow,
-                    PlanningTaskStateRow.task_id == LearningTaskRow.task_id).where(
+                    PlanningTaskStateRow.task_id == LearningTaskRow.task_id).join(TaskStateRow,
+                    TaskStateRow.task_id == LearningTaskRow.task_id).where(
                     PlanningTaskStateRow.background_enabled.is_(True), PlanningTaskStateRow.abandoned_at.is_(None),
                     PlanningTaskStateRow.wait_state.is_(None), LearningTaskRow.cancel_requested.is_(False),
-                    LearningTaskRow.status.in_(["queued", "leased", "running"]),
-                    or_(LearningTaskRow.status == "queued", LearningTaskRow.lease_until <= utcnow()),
+                    ~superseded,
+                    or_(
+                        and_(LearningTaskRow.status.in_(["queued", "leased", "running"]),
+                            or_(LearningTaskRow.status == "queued", LearningTaskRow.lease_until <= utcnow())),
+                        and_(PlanningTaskStateRow.auto_retry_count < AUTO_RETRY_LIMIT,
+                            LearningTaskRow.deadline_at > utcnow(),
+                            or_(LearningTaskRow.status == "partial",
+                                and_(LearningTaskRow.status == "failed", TaskStateRow.error_code.in_(AUTO_RETRY_ERRORS)))),
+                    ),
                     ~LearningTaskRow.task_id.in_(list(self.pending)))
                     .order_by(LearningTaskRow.created_at).limit(available)))
             for ident in ids:
                 self.pending[ident] = self.pool.submit(self._run, ident)
 
     def _run(self, ident):
+        owner = self.planning.tasks.get_task(ident)["owner_user_id"]
         try:
+            current = self.planning.get_planning_state(ident, actor_id=owner)
+            if current["confirmed"]:
+                return
+            if current["task_status"] in ("failed", "partial"):
+                current = self.planning.workspace.resume(ident, owner, automatic=True, dispatch=False)
+                if current["task_status"] != "queued":
+                    self.planning.workspace.suspend_automatic(ident, owner, None)
+                    return
             self.planning.run_task(ident)
-        except (LeaseError, PlanningError):
+        except (PlanningError, Slice1Error) as exc:
+            self.planning.workspace.suspend_automatic(ident, owner, exc.code)
+        except LeaseError:
             # Another worker won the claim or the task was cancelled/expired.
             pass
 

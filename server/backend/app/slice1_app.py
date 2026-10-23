@@ -26,6 +26,7 @@ class Slice1State:
             db,
             encryption_key=encryption_key,
             on_config_changed=self._on_config_changed,
+            audit=audit,
         )
         self.capabilities = CapabilityTestService(self.configs)
         self.connectors = ConnectorService(db, audit)
@@ -35,6 +36,10 @@ class Slice1State:
         )
 
     def _on_config_changed(self, config_id: str, actor_id: str, action: str) -> None:
+        # Search changes already revoke grants and audit atomically in ConfigService.
+        view = self.configs.get(config_id, actor_id=actor_id, is_admin=True)
+        if view["kind"] in ("search", "document_parser"):
+            return
         # 配置端点/凭据变更或停用后，旧外发授权立即失效。
         self.disclosures.revoke_for_config(config_id, reason=action)
         try:
@@ -70,6 +75,12 @@ def create_slice1_app(state: Optional[Slice1State] = None, slice0_state: Optiona
         state = Slice1State(slice0_state.db, slice0_state.audit)
     app.state.slice1 = state
 
+    from .characters.service import CharacterService
+    from .characters.media import CharacterMediaService
+    from .materials.storage import MaterialStorage
+    state.characters = CharacterService(state.db, state.configs, state.audit, MaterialStorage())
+    state.character_media = CharacterMediaService(state.characters, slice0_state.tasks, state.disclosures)
+
     def resolve_user(request: Request):
         # 登录态优先；无有效会话时以访客身份继续（auth/guest.py）
         from .auth.guest import resolve_user_or_guest
@@ -86,7 +97,22 @@ def create_slice1_app(state: Optional[Slice1State] = None, slice0_state: Optiona
         )
     )
 
+    from .characters.router import create_character_router
+    app.include_router(create_character_router(state.characters, state.character_media, resolve_user))
+
+    from .market_link import MarketError
+    from .market_router import create_market_router
+
+    market_router = create_market_router(state.characters, resolve_user, auth=slice0_state.auth)
+    state.market_receiver = market_router.reception
+    app.include_router(market_router)
+
     from fastapi.responses import JSONResponse
+
+    @app.exception_handler(MarketError)
+    async def market_error(_: Request, exc: MarketError) -> JSONResponse:
+        return JSONResponse(status_code=exc.status,
+                            content={"error_code": exc.code, "message": exc.message})
 
     @app.exception_handler(Slice1Error)
     async def slice1_error(_: Request, exc: Slice1Error) -> JSONResponse:

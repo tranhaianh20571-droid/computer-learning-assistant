@@ -1,43 +1,51 @@
-# 项目协作规则
+# Repository Guidelines
 
-本文件适用于本仓库下的所有实现、文档和测试工作。开始任务前先阅读本文件，以及与改动相关的架构、规范和测试说明。
+本文件是本仓库的中文版贡献与协作指南。开始工作前阅读 [README](README.md)、[文档导航](文档/README.md)、[测试规范](文档/规范/testing-spec.md)和[日志与审计规范](文档/规范/logging-and-audit-spec.md)。
 
-## 必读基线
+## 项目结构
 
-- [日志与审计规范](文档/规范/logging-and-audit-spec.md)：日志字段、任务事件、审计、脱敏、留存和告警规则。
-- [通用测试与验收归档规范](文档/规范/testing-spec.md)：测试真源、镜像契约、合成夹具、证据归档与索引时效约定。
+- `frontend/src/`：React、TypeScript 产品界面；静态资源位于 `frontend/public/`。
+- `server/backend/app/`：FastAPI 生产代码；装配入口为 `assembler.py`，启动目标为 `app.main:app`。
+- `tests/`：唯一可执行测试真源；`support/backend/` 是受哈希校验守护的生产镜像。`server/backend/tests/` 仅作模板参考。
+- `deploy/`：部署配置；`文档/ui/`：设计原型；`文档/测试归档/`：执行结果；`实验/`：受 Git 忽略的私人实验材料。
+- `文档/历史/` 和实验源码快照不作为当前启动、规范或测试入口。
 
-## 日志与审计要求
+## 开发与检查命令
 
-1. 运行日志使用一行一个 UTF-8 JSON 对象。必须包含 `schema_version`、UTC `timestamp`、`level`、`event`、`service` 和 `environment`；有处理链时带 `trace_id`/`span_id`，任务相关时带 `request_id`、`task_id` 和 `attempt`。
-2. 运行日志、用户可见的 `task_events`、安全 `audit_logs` 和指标/trace 分开设计、存储和授权。任务事件要有单调 `sequence`；SSE 断线按 `Last-Event-ID` 补取，过期返回 `410 events_expired`。
-3. 审计记录采用追加式写入。登录失败、审批、停用、会话撤销、能力配置、外发确认、连接器、越权访问、删除、清理和恢复的成功与失败都要记录；普通应用账号不能修改既有审计记录，审计查询本身也要留痕。
-4. 生产字段采用允许名单。**内容 trace 通道**（ADR-022）：提示词、模型回答、用户问题三项内容只允许进入独立的内容通道事件（受 `CONTENT_TRACE_ENABLED` 开关控制，独立输出口与留存策略）；通道之外（运行日志、任务事件、审计、聚合指标）仍禁止正文。**任何通道都禁止**记录请求/响应正文（除上述三项）、教材、OCR/搜索内容、图像/音频字节、密码、API Key、令牌、Cookie、Authorization 头、邮箱、完整文件名、本地路径和带查询参数的 URL。内容字段与用户输入、网页内容和供应商错误必须限长、清理控制字符并通过 JSON 编码。
-5. 供应商错误映射到受控错误码，不把原始异常直接展示或写入日志。OpenTelemetry/Langfuse 不可用时核心任务按既定边界继续，观测丢弃和指标递增；安全审计的写入失败必须可见并按契约处理。
-6. `文档/ui/index.html` 当前是无网络演示。不得把 `App.toast`、浏览器控制台、`App.S` 或演示用 `U.audit` 数组当作生产日志；不得为了记录日志而把真实密钥写入浏览器或新增真实外发请求。服务端内容 trace 的合法去处是内容通道与 OTLP 后端（Langfuse，ADR-022）；浏览器控制台仍然不是。
+| 工作目录 | 命令 | 用途 |
+| --- | --- | --- |
+| `frontend/` | `npm ci`、`npm run dev` | 安装锁定依赖，启动 Vite |
+| `frontend/` | `npm run build`、`npm run lint` | TypeScript/生产构建，Oxlint 检查 |
+| `server/backend/` | `uv sync --frozen` | 安装 Python 工作区依赖 |
+| `server/backend/` | `uv run uvicorn app.main:app --host 127.0.0.1 --port 8000` | 启动完整后端 |
+| `server/backend/` | `uv run ruff check app/main.py` | 示例：检查指定 Python 文件 |
 
-## 实施与修改边界
+前端默认端口为 5173。先准备本地 PostgreSQL 和受忽略的 `server/.env`；启动或测试不得隐式迁移业务数据库。
 
-- 权威指针：生产入口=`server/backend/app/assembler.py`（`uvicorn app.main:app` 即全量路由）；测试真源=根 `tests/`；镜像=`tests/support/backend/`（test\_mirror\_sync 守护）；决策记录=架构正文附录；规范=`文档/规范/`。
-- 先调查现有代码和文档，再修改；保持已确认的数据安全边界、版本关系、删除墓碑、任务租约和 UI 行为。
-- 普通实现细节可自行选择；如果要改变接口契约、事件状态码、审计不可变性、敏感数据边界或扩大修改范围，先更新相关规范并记录差异。
-- 不把计划中的后端模块、数据库表或测试结果写成已实现事实。不存在后端目录时先建立契约和测试骨架，具体路径以实际工程为准。
-- 不提交临时截图脚本、调试输出、密钥、个人路径、缓存、构建产物或完整生产日志。
+## 编码与命名
 
-## 回归范围与验收
+Python 使用四空格缩进、类型注解和 `snake_case`；React/TypeScript 通常使用两空格，组件采用 `PascalCase`，Hooks 采用 `useXxx`。遵循相邻代码格式与现有抽象；Python 检查遵循 `server/backend/pyproject.toml` 的 Ruff 配置。避免无关重构、整库格式化及依赖锁文件无故变动。
 
-- 按影响范围与风险选择回归，不以“新增一个功能”作为必须全量回归的条件。局部改动执行专项与受影响模块回归；跨模块改动补充完整业务链路验证；共享基础能力变更以及阶段验收、发布前执行全量自动化回归与对应专项。具体判定见 [测试规范](文档/规范/testing-spec.md#31-回归范围选择)。
-- 选择范围时检查调用方、共享依赖和下游流程，不能只测试新增代码；影响范围无法可靠确定时扩大回归，必要时执行全量。
-- 纯文档改动执行差异、链接和规则一致性等静态检查；涉及接口、权限或验收契约的变更，仍须按实际影响验证实现。
-- 执行记录写明影响范围、选择理由、命令、结果与未验证项。专项通过不得写成全量通过；全量自动化通过不能替代浏览器交互、真实供应商和服务端权限隔离等专项证据。
+## 测试要求
 
-## 完成功能后的检查与 GitHub 推送
+后端使用 pytest，前端使用 Node 单元脚本和 Playwright 浏览器专项。命名采用 `test_*.py`、`*_unit.mjs`、`*_browser.mjs`。从根目录运行受影响专项，例如：
 
-功能实现并完成测试后，按顺序执行：
+```powershell
+./server/.venv/Scripts/python.exe tests/run_native_regression.py tests/test_slice2_contracts.py tests/test_mirror_sync.py -q --tb=short
+```
 
-1. 查看 `git diff` 和 `git status --short`，确认改动只属于任务范围；删除临时脚本和调试文件。
-2. 检查 `.gitignore` 是否覆盖 `.backup/`、`.mimocode/`、系统文件、测试输出、缓存、密钥文件和本地环境文件；用 `git check-ignore -v <path>` 验证关键路径。不要为了让文件进入提交而强制添加密钥或缓存。
-3. 扫描待提交文件，确认没有 API Key、令牌、Cookie、邮箱、绝对本地路径、教材正文、模型提示词和完整供应商响应；确认测试夹具均为合成数据。
-4. 按“回归范围与验收”选择并运行与改动匹配的测试，确认文档中的验收编号和执行记录准确。失败、跳过或未执行的检查不能标记为通过。
-5. 提交前再次查看暂存区：`git diff --cached --stat` 和 `git diff --cached --check`。提交信息使用清楚的动词和范围，例如 `docs: add logging and audit handoff rules`。
-6. 用户已明确要求上传 GitHub 时，确认远程和分支后推送：`git remote -v`、`git branch --show-current`、`git push origin <branch>`。推送前不得改变远程历史或使用强制推送；推送后检查 `git status --short` 和远程提交是否可见。
+该入口创建并清理独立 PostgreSQL schema；必须显式传入范围。**只有用户明确要求时才执行全量，不得分批变相全量。** 覆盖受影响调用方、下游和权限边界；生产镜像修改须同步并校验。UI 改动检查桌面与手机交互；纯文档只做静态检查。
+
+运行方法维护于 [tests/README.md](tests/README.md)，结果集中到测试归档。分别记录通过、失败、跳过、警告和未验证项；合成测试不替代真实供应商或浏览器验收。
+
+## 提交与 Pull Request
+
+沿用 `feat(planning): ...`、`fix(ui): ...`、`chore: ...` 等类型和范围式提交信息。提交前检查 `git diff`、`git status --short`、`git diff --cached --check`，移除临时文件并扫描敏感信息；保留他人未提交改动。
+
+PR 说明问题、改动、验证范围和限制，关联相关 Issue，UI 变更附截图。仅在用户明确要求上传 GitHub 后确认远程和分支并推送，禁止强制推送。
+
+## 安全与变更边界
+
+凭据只放受忽略配置，不提交密钥、教材正文、完整供应商响应或个人路径。日志使用受控 JSON；提示词、模型回答和用户问题仅按 ADR-022 进入独立内容通道，审计保持追加式写入。
+
+保留属主、版本、删除墓碑和任务租约围栏；修改接口、状态码、审计或敏感数据边界时，先更新相关规范并记录差异。计划能力和未执行检查不得描述为已实现或已通过。

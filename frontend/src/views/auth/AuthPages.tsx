@@ -1,119 +1,203 @@
-import { useState } from "react";
-import { api } from "../../api";
-import { errText, STATUS_LABEL } from "../../lib/errors";
+import { useEffect, useRef, useState } from "react";
+import { api, characterApi } from "../../api";
+import { errText } from "../../lib/errors";
 import Field from "../../ui/Field";
+import { openExternalPage, reserveExternalWindow } from "../../lib/externalWindow";
 
 /**
- * 认证整页（.auth 双栏，无侧栏，参考 Google 登录式布局）：
- * 注册 → 验证邮箱 → 登录 → 找回密码。onDone/onErr 由 App 注入；
- * 登录成功后由 App 恢复会话并跳转 /home。
+ * 市集账号注册：账号只在市集网站创建。
+ * 点「注册账号」打开市集，保留绑定上下文，完成注册后本机自动进入。
  */
 
-export const AUTH_LEFT = (
-  <aside className="auth-l">
-    <div className="brand"><span className="wm">学伴</span><span className="sub">CS · STUDY</span></div>
-    <h1>一个邀请制的计算机学习空间</h1>
-    <p>在这里定学习目标、生成路线与课程大纲，然后跟着短步骤的讲解一步步学。首版只对项目成员开放。</p>
-    <ol className="how">
-      <li><span className="n">01</span><span><b>提交申请</b> · 邮箱和一句长密码</span></li>
-      <li><span className="n">02</span><span><b>验证邮箱</b> · 点开邮件里的链接</span></li>
-      <li><span className="n">03</span><span><b>等待审批</b> · 由项目所有者人工处理</span></li>
-      <li><span className="n">04</span><span><b>进入学习空间</b> · 两步都完成后才开放</span></li>
-    </ol>
-    <div className="foot">Chrome / Edge 最新版及上一个大版本</div>
-  </aside>
-);
+type RegisterStatus = "idle" | "opening" | "waiting" | "blocked";
 
-export function RegisterView({ onDone, onErr }: any) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
-  return (
-    <form className="od-stack" style={{ ["--od-gap" as any]: "18px" }} onSubmit={(e) => e.preventDefault()}>
-      <span className="kicker">申请加入</span>
-      <h2 className="h1">注册账号</h2>
-      <p className="muted">创建账户后需验证邮箱并等待管理员审批。</p>
-      <Field label="邮箱" type="email" value={email} onChange={setEmail} autoComplete="email" />
-      <Field label="密码" type="password" value={password} onChange={setPassword} help="至少 15 个字符" autoComplete="new-password" />
-      <Field label="显示名（可选）" type="text" value={name} onChange={setName} autoComplete="nickname" />
-      <div className="row">
-        <button className="btn btn-pri" type="submit"
-          onClick={async () => {
-            try {
-              const r = await api.register(email, password, name);
-              onDone(`注册成功。验证令牌：${r.verify_token}（演示环境直接展示，生产走邮件）`);
-            } catch (e) { onErr(errText(e)); }
-          }}
-        >
-          提交注册
-        </button>
-      </div>
-      <span className="auth-switch">已有账号？<a href="#/login">登录</a></span>
-    </form>
-  );
+function useMarketRegister(onBound: () => void, onErr: (message: string) => void, purpose: "login" | "receive" = "login") {
+  const [status, setStatus] = useState<RegisterStatus>("idle");
+  const [url, setUrl] = useState("");
+  const alive = useRef(true);
+  const timer = useRef<number | null>(null);
+
+  useEffect(() => {
+    // React 18 StrictMode mounts, cleans up, then mounts again. Without resetting
+    // this flag the remount keeps alive=false forever, so the awaited result is
+    // discarded and the page hangs on "正在准备注册页…".
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      if (timer.current) window.clearTimeout(timer.current);
+    };
+  }, []);
+
+  function poll(code: string, deadline: number) {
+    timer.current = window.setTimeout(async () => {
+      if (!alive.current) return;
+      if (Date.now() >= deadline) {
+        setStatus("idle");
+        onErr(purpose === "receive" ? "授权连接已过期，请重新开启接收。" : "注册连接已过期，请重新点击注册账号。");
+        return;
+      }
+      try {
+        const result: any = await characterApi.marketBindStatus(code, purpose);
+        if (!alive.current) return;
+        if (result?.bound) {
+          setStatus("idle");
+          onBound();
+          return;
+        }
+      } catch (error) {
+        if (!alive.current) return;
+        const code = (error as { code?: string }).code;
+        if (code && code !== "MARKET_UNREACHABLE") {
+          setStatus("idle");
+          onErr("连接本机失败，请重新点击注册账号；已注册的账号也可直接登录。");
+          return;
+        }
+      }
+      poll(code, deadline);
+    }, 2500);
+  }
+
+  function start() {
+    if (status !== "idle") return;
+    onErr("");
+    setStatus("opening");
+    // Open synchronously inside the click: window.open after an await is treated as
+    // a non-user gesture and silently blocked by the browser, which looked like a hang.
+    const popup = reserveExternalWindow();
+    const fail = (message: string) => {
+      try { popup?.close(); } catch { /* already closed */ }
+      setStatus("idle");
+      onErr(message);
+    };
+    void (async () => {
+      try {
+        const result: any = await characterApi.marketBindStart(purpose);
+        if (!alive.current) { try { popup?.close(); } catch { /* ignore */ } return; }
+        if (!result?.url || !result?.code) {
+          fail("市集没有返回注册地址，请重试。");
+          return;
+        }
+        setUrl(result.url);
+        const opened = await openExternalPage(result.url, popup, false);
+        if (!opened && window.desktopBrowser) { setStatus("idle"); setUrl(""); return; }
+        setStatus(opened ? "waiting" : "blocked");
+        poll(result.code, Date.now() + 10 * 60 * 1000);
+      } catch (error) {
+        if (!alive.current) { try { popup?.close(); } catch { /* ignore */ } return; }
+        fail(errText(error));
+      }
+    })();
+  }
+
+  return { start, status, url };
 }
 
-export function VerifyView({ onDone, onErr }: any) {
-  const [token, setToken] = useState("");
-  return (
-    <div className="od-stack" style={{ ["--od-gap" as any]: "18px" }}>
-      <span className="kicker">验证邮箱</span>
-      <h2 className="h1">确认你的邮箱</h2>
-      <ul className="track" aria-label="注册步骤">
-        <li className="done"><span className="n">STEP 1</span><b>提交申请</b></li>
-        <li className="now"><span className="n">STEP 2</span><b>验证邮箱</b></li>
-        <li><span className="n">STEP 3</span><b>等待审批</b></li>
-      </ul>
-      <Field label="验证令牌" type="text" value={token} onChange={setToken} />
-      <div className="row">
-        <button className="btn btn-pri"
-          onClick={async () => {
-            try {
-              const r = await api.verifyEmail(token);
-              onDone(`邮箱已验证，当前状态：${STATUS_LABEL[r.status] || r.status}`);
-            } catch (e) { onErr(errText(e)); }
-          }}
-        >
-          验证
-        </button>
-        <span className="auth-switch">注册成功后令牌会显示在注册页提示里。</span>
-      </div>
-      <span className="auth-switch">已验证？<a href="#/login">去登录</a></span>
+function RegisterWaiting({ status, url }: { status: RegisterStatus; url: string }) {
+  if (status === "idle") return null;
+  if (status === "opening") return <p className="muted" role="status">正在打开市集…</p>;
+  if (status === "blocked") {
+    return <div className="od-stack" style={{ ["--od-gap" as any]: "10px" }} role="status">
+      <p className="muted">浏览器拦截了新窗口，请手动打开市集：</p>
+      <a className="btn btn-pri" href={url} target="_blank" rel="noreferrer">打开市集</a>
+      <p className="muted">完成注册后会自动回到学伴。</p>
+    </div>;
+  }
+  return <p className="muted" role="status">
+    已打开市集，点击市集中的「注册账号」，完成后会自动进入学伴。
+    {url && <> 没有打开？<a href={url} target="_blank" rel="noreferrer">点这里</a></>}
+  </p>;
+}
+
+/** 深链接 #/register 的入口：直接给出打开注册页的按钮，不展示中间步骤页。 */
+export function RegisterView({ onDone, onErr }: any) {
+  const register = useMarketRegister(() => onDone("账号已创建并绑定这台电脑，正在进入学伴。"), onErr);
+  return <div className="od-stack" style={{ ["--od-gap" as any]: "18px" }}>
+    <span className="kicker">注册</span>
+    <h2 className="h1">注册市集账号</h2>
+    <p className="muted">账号在市集网站创建，完成后会自动绑定这台电脑。</p>
+    {register.status === "idle"
+      ? <div className="row"><button className="btn btn-pri" type="button" onClick={register.start}>打开市集</button></div>
+      : <RegisterWaiting status={register.status} url={register.url} />}
+    <span className="auth-switch">已有账号？<a href="#/login">登录</a></span>
+  </div>;
+}
+
+export function MarketReceiveView({ onErr }: { onErr: (message: string) => void }) {
+  const [done, setDone] = useState(false);
+  const receive = useMarketRegister(() => setDone(true), onErr, "receive");
+  return <div className="od-stack" style={{ ["--od-gap" as any]: "18px" }}>
+    <span className="kicker">市集接收</span>
+    <h2 className="h1">开启账号接收</h2>
+    <p className="muted">在市集选择要接收的账号。卡片只会存入该账号的本地空间，不会切换本机登录账号。</p>
+    {done ? <div role="status">
+      <p>已开启后台接收，本机未登录或切换账号也可继续接收。</p>
+      <a className="btn btn-pri" href={receive.url.split("#")[0]} target="_blank" rel="noreferrer">返回市集</a>
+    </div> : <>
+      <button className="btn btn-pri" type="button" disabled={receive.status !== "idle"} onClick={receive.start}>
+        {receive.status === "idle" ? "开启账号接收" : "等待市集授权…"}
+      </button>
+      {receive.status !== "idle" && <p className="muted" role="status">
+        请在市集完成账号授权。<a href={receive.url || undefined} target="_blank" rel="noreferrer">打开市集</a>
+      </p>}
+    </>}
+    <a href="#/login">返回本机登录</a>
+  </div>;
+}
+
+export function VerifyView({ onErr }: any) {
+  return <div className="od-stack" style={{ ["--od-gap" as any]: "18px" }}>
+    <span className="kicker">验证邮箱</span>
+    <h2 className="h1">邮箱验证在市集完成</h2>
+    <p className="muted">注册时会向你的邮箱发送 6 位验证码，在网页上填写即可。验证通过后账号会自动绑定这台电脑。</p>
+    <div className="row">
+      <button className="btn btn-pri" type="button" onClick={() => { onErr(""); location.hash = "/register"; }}>去注册</button>
+      <a className="btn" href="#/login">去登录</a>
     </div>
-  );
+  </div>;
 }
 
 export function LoginView({ onDone, onErr }: any) {
   const [email, setEmail] = useState(() => localStorage.getItem("slice3.rememberEmail") || "");
   const [password, setPassword] = useState("");
   const [rememberMe, setRememberMe] = useState(() => localStorage.getItem("slice3.rememberLogin") === "1");
+  const [busy, setBusy] = useState(false);
+  const register = useMarketRegister(async () => {
+    try { await onDone("账号已创建并绑定这台电脑，正在进入学伴。"); }
+    catch { onErr("绑定已完成，但本机会话恢复失败，请点登录重试。"); }
+  }, onErr);
+
   return (
-    <form className="od-stack" style={{ ["--od-gap" as any]: "18px" }} onSubmit={(e) => e.preventDefault()}>
+    <form className="od-stack" style={{ ["--od-gap" as any]: "18px" }} onSubmit={async e => {
+      e.preventDefault();
+      if (busy) return;
+      setBusy(true);
+      try {
+        await characterApi.marketLogin(email, password, rememberMe);
+        localStorage.setItem("slice3.rememberEmail", email);
+        localStorage.setItem("slice3.rememberLogin", rememberMe ? "1" : "0");
+        await onDone("已登录");
+      } catch (error) { onErr(errText(error)); }
+      finally { setBusy(false); }
+    }}>
       <span className="kicker">登录</span>
       <h2 className="h1">回到你的学习空间</h2>
+      <p className="muted">让好奇落笔，让理解慢慢生长。</p>
       <Field label="邮箱" type="email" value={email} onChange={setEmail} autoComplete="email" />
       <Field label="密码" type="password" value={password} onChange={setPassword} autoComplete="current-password" />
-      <label className="checkline">
+      <div className="auth-options"><label className="checkline">
         <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} />
-        <span>记住登录状态（本设备保留 14 天）</span>
+        <span title="本设备保留 14 天">记住登录状态</span>
       </label>
-      <div className="row" style={{ justifyContent: "flex-end", gap: "var(--s4)" }}>
         <button className="linkbtn" type="button" onClick={() => (location.hash = "/reset")}>找回密码</button>
-        <button className="btn btn-pri" type="submit"
-          onClick={async () => {
-            try {
-              await api.login(email, password, rememberMe);
-              // 只记住邮箱和偏好；密码与会话令牌永不落浏览器
-              localStorage.setItem("slice3.rememberEmail", email);
-              localStorage.setItem("slice3.rememberLogin", rememberMe ? "1" : "0");
-              onDone("已登录");
-            } catch (e) { onErr(errText(e)); }
-          }}
-        >
-          登录
-        </button>
       </div>
-      <span className="auth-switch">还没有账号？<a href="#/register">申请加入</a></span>
+      <button className="btn btn-pri" type="submit" disabled={busy}>{busy ? "正在登录…" : "登录"}</button>
+      <a className="linkbtn" href="#/market-receive">仅开启市集接收</a>
+      <RegisterWaiting status={register.status} url={register.url} />
+      <span className="auth-switch">还没有账号？
+        <button className="linkbtn" type="button" onClick={() => void register.start()} disabled={register.status !== "idle"}>
+          {register.status === "idle" ? "注册账号" : "等待注册…"}
+        </button>
+      </span>
     </form>
   );
 }
@@ -131,8 +215,8 @@ export function ResetView({ onDone, onErr }: any) {
         <button className="btn"
           onClick={async () => {
             try {
-              const r = await api.resetRequest(email);
-              onDone(r.reset_token ? `重置令牌：${r.reset_token}` : "若邮箱存在将收到重置邮件。");
+              await api.resetRequest(email);
+              onDone("若邮箱存在，将收到重置邮件。");
             } catch (e) { onErr(errText(e)); }
           }}
         >
@@ -140,7 +224,7 @@ export function ResetView({ onDone, onErr }: any) {
         </button>
       </div>
       <Field label="重置令牌" type="text" value={token} onChange={setToken} />
-      <Field label="新密码" type="password" value={password} onChange={setPassword} help="至少 15 个字符" />
+      <Field label="新密码" type="password" value={password} onChange={setPassword} help="至少 8 个字符" />
       <div className="row">
         <button className="btn btn-pri"
           onClick={async () => {

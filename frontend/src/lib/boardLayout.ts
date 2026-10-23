@@ -1,17 +1,19 @@
 /** Deterministic three-column pages. Typed semantics are never rewritten. */
 export type Block = { id: string; type: string; title?: string; span?: number; formula?:string; format?:string; plain_text?:string; [key: string]: any };
 export type Placement = { group: string; id: string; column: number; span: number; x: number; y: number; width: number; height: number;
-  formulaBody?: {x:number;y:number;width:number;height:number};codeBody?:{x:number;y:number;width:number;height:number} };
+  formulaBody?: {x:number;y:number;width:number;height:number};codeBody?:{x:number;y:number;width:number;height:number};
+  figureBody?:{x:number;y:number;width:number;height:number} };
 export type GroupAnchor = {page:number;column:number;span:number;y:number};
 export type GroupPlacement = GroupAnchor & {id:string;height:number;block_ids:string[]};
 export type BoardPage = { elements:any[];placements:Placement[];groups:GroupPlacement[];height:number };
 export type LayoutOptions = {pageHeight?:number;groups?:{id:string;block_ids:string[]}[];anchors?:Record<string,GroupAnchor>;
-  formulas?:Record<string,FormulaMeasurement>;responsive?:boolean};
+  formulas?:Record<string,FormulaMeasurement>;responsive?:boolean;theme?:"paper"|"ink"};
 const INK = "#252927", ACCENT = "#31588b", PAPER = "#fcfcfb";
 import {wrapText,wrapGraphText,graphTextWidth,revealLines} from "./boardText.ts";
 import {graphLayout,graphMinimumWidth} from "./graphLayout.ts";
 import {boardGroups} from "./boardGroups.ts";
 import type {FormulaMeasurement} from "./formula.ts";
+import {semanticBlock} from "./semanticBoard.ts";
 export {wrapText} from "./boardText.ts";
 
 export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds: Set<string>,
@@ -19,7 +21,8 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
   const width=Math.max(options.responsive?240:640, Math.round(availableWidth)), margin=14, gap=20;
   const columns=options.responsive?(width<640?1:width<1100?2:3):3;
   const columnWidth=(width-2*margin-(columns-1)*gap)/columns;
-  const topStart=18+wrapText(title.replace(/\s+/g," "),width-2*margin,18).length*27;
+  const titleFont=options.theme==="ink"?24:18;
+  const topStart=18+wrapText(title.replace(/\s+/g," "),width-2*margin,titleFont).length*titleFont*1.5;
   const pageHeight=Math.max(topStart+120,options.pageHeight||600);
   const bottom=pageHeight-24;
   const pages:BoardPage[]=[];
@@ -42,6 +45,8 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
     if(options.responsive&&block.type==="code"){
       span=columns;
     }
+    if(["array","stack","layers"].includes(block.type))span=columns;
+    if(block.type==="figure")span=columns;
     return Math.min(columns,span);
   };
   newPage();
@@ -50,7 +55,13 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
   for(const group of groups){
     const members=group.block_ids.map(id=>byId.get(id)).filter((block):block is Block=>Boolean(block));
     if(!members.length)continue;
-    const span=Math.max(...members.map(spanFor));
+    const savedAnchor=options.anchors?.[group.id];
+    const currentPage=pages.indexOf(page!);
+    const anchor=savedAnchor&&(savedAnchor.page>currentPage||
+      savedAnchor.page===currentPage&&savedAnchor.column>=column)?savedAnchor:undefined;
+    const naturalSpan=Math.max(...members.map(spanFor));
+    // Appending a wide graph must not reflow already-presented paragraphs.
+    const span=anchor&&anchor.column+anchor.span<=columns?anchor.span:naturalSpan;
     const bw=span*columnWidth+(span-1)*gap;
     const rendered:{block:Block;elements:any[];height:number;formulaBody?:{x:number;y:number;width:number;height:number}}[]=[];
     for(const block of members){
@@ -72,9 +83,10 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
     if (block.type==="text") y+=text(block.text,0,y,bw);
     else if (block.type==="code") {
       if (block.language) y+=text(block.language,10,y,bw-20,12,ACCENT)+6;
-      const h=options.responsive?String(block.code).replace(/\r\n/g,"\n").split("\n").length*21+18:text(block.code,10,y+8,bw-20,14);
+      const h=options.responsive?(block.execution_height||String(block.code).replace(/\r\n/g,"\n").split("\n").length*21+18):text(block.code,10,y+8,bw-20,14);
       if(options.responsive)formulaBody={x:10,y:y+8,width:bw-20,height:h};
       local.unshift({type:"rectangle",id:`${block.id}_code_bg`,x:0,y,width:bw,height:h+16,
+        customData:{blockId:block.id,elementRole:"code-frame"},
         strokeColor:"#d7ddd9",backgroundColor:"#f0f3f1",fillStyle:"solid",roughness:0});
       y+=h+16;
     } else if (block.type==="formula") {
@@ -82,19 +94,33 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
       formulaBody={x:0,y,width:options.formulas?.[block.id]?.widths?.[span-1]||bw,height};
       y+=height;
     }
+    else if(block.type==="figure"){
+      const height=block.graphic.kind==="surface"?400:block.graphic.kind==="circuit"?Math.max(300,Math.min(600,block.graphic.inputs.length*66+40)):340;
+      formulaBody={x:0,y,width:bw,height};
+      y+=height;
+    }
     else if (block.type==="table") {
       const rows=[block.columns,...block.rows],cellWidth=bw/block.columns.length;
+      let cellOrder=0;
+      const gridTop=y;
+      const rowEnds:number[]=[];
       rows.forEach((row:string[],ri:number)=>{
         const height=Math.max(...row.map(cell=>wrapText(cell,cellWidth-16,14).length))*21+16;
-        const rowStart=local.length;
         row.forEach((cell:string,ci:number)=>{
-          add("rectangle",{x:ci*cellWidth,y,width:cellWidth,height,
-            strokeColor:"#c5cec8",backgroundColor:ri===0?"#eaf0ed":PAPER,fillStyle:"solid"});
-          text(cell,ci*cellWidth+8,y+8,cellWidth-16,14);
+          text(cell,ci*cellWidth+8,y+8,cellWidth-16,14,INK,`${block.id}_cell_${ri}_${ci}`);
+          const element=local[local.length-1];
+          element.customData={...element.customData,tableRow:ri,tableColumn:ci,tableCellOrder:cellOrder++,
+            cellId:`${block.id}:r${ri}:c${ci}`,elementRole:"cell-text"};
         });
-        for(const element of local.slice(rowStart))element.customData={...element.customData,tableRow:ri};
         y+=height;
+        rowEnds.push(y);
       });
+      const edges=[[[0,gridTop],[bw,gridTop]],[[bw,gridTop],[bw,y]],[[bw,y],[0,y]],[[0,y],[0,gridTop]],
+        ...rowEnds.slice(0,-1).map(ey=>[[0,ey],[bw,ey]]),
+        ...Array.from({length:block.columns.length-1},(_,i)=>[[(i+1)*cellWidth,gridTop],[(i+1)*cellWidth,y]])];
+      edges.forEach(([start,end],index)=>add("line",{x:start[0],y:start[1],width:Math.abs(end[0]-start[0]),height:Math.abs(end[1]-start[1]),
+        points:[[0,0],[end[0]-start[0],end[1]-start[1]]],strokeColor:"#8d9e91",
+        customData:{blockId:block.id,elementRole:"table-frame",edgeOrder:index,edgeCount:edges.length,cellCount:cellOrder}},`${block.id}_grid_${index}`));
     } else if (block.type==="graph") {
       if(block.diagram==="sequence") {
         const nodes=block.nodes,edges=block.edges||[],laneW=bw/nodes.length;
@@ -116,7 +142,7 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
             text:wrapGraphText(node.label,laneW-20,13).join("\n"),fontSize:13,fontFamily:3,lineHeight:1.5,strokeColor:INK});
           add("line",{x:positions[node.id],y:y+headerH,width:1,height:timelineHeight,
             points:[[0,0],[0,timelineHeight]],strokeColor:"#acb9af",strokeStyle:"dashed"});
-          for(const element of local.slice(start))element.customData={...element.customData,graphStage:i};
+          for(const element of local.slice(start))element.customData={...element.customData,graphStage:i,nodeId:node.id};
         });
         y+=headerH+12;
         edges.forEach((edge:any,i:number)=>{
@@ -129,7 +155,7 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
             add("rectangle",{x:labelX-2,y:y-1,width:caption.labelWidth+4,height:caption.height+2,strokeColor:"transparent",backgroundColor:PAPER,fillStyle:"solid"});
             add("text",{x:labelX,y,width:caption.labelWidth,height:caption.height,text:caption.lines.join("\n"),fontSize:12,fontFamily:3,lineHeight:1.5,strokeColor:ACCENT});
           }
-          for(const element of local.slice(start))element.customData={...element.customData,graphStage:nodes.length+i};
+          for(const element of local.slice(start))element.customData={...element.customData,graphStage:nodes.length+i,edgeIndex:i};
           y+=messageHeights[i];
         });
         y+=16;
@@ -140,6 +166,10 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
         customData:{...element.customData,blockId:block.id}})));
       y+=graph.height;
       }
+    } else if (["array","stack","layers"].includes(block.type)) {
+      const rendered=semanticBlock(block,bw,y);
+      local.push(...rendered.elements);
+      y+=rendered.height;
     } else if (block.type==="chart") {
       const labels=block.labels,series=block.values;
       y+=text(block.is_example?"教学示例数据":`数据依据：${block.source}`,0,y,bw,12,ACCENT)+8;
@@ -150,7 +180,9 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
           row.forEach((v:number,ci:number)=>{
             const intensity=Math.round(245-130*Math.abs(v)/maximum);
             add("rectangle",{x:52+ci*cellW,y:y+ri*42,width:cellW,height:42,
-              backgroundColor:`rgb(${intensity},${Math.min(255,intensity+10)},245)`,fillStyle:"solid",strokeColor:"#fff"});
+              backgroundColor:options.theme==="ink"
+                ?`rgb(${32+Math.round(32*Math.abs(v)/maximum)},${68+Math.round(30*Math.abs(v)/maximum)},${53+Math.round(24*Math.abs(v)/maximum)})`
+                :`rgb(${intensity},${Math.min(255,intensity+10)},245)`,fillStyle:"solid",strokeColor:"#fff"});
             text(String(v),56+ci*cellW,y+ri*42+10,cellW-8,12);
           });
         });y+=series.length*42+8;
@@ -183,7 +215,6 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
       rendered.push({block,elements:local,height:Math.max(28,y)+12,...(formulaBody?{formulaBody}:{})});
     }
     const groupHeight=rendered.reduce((total,item)=>total+item.height+12,0)-12;
-    const anchor=options.anchors?.[group.id];
     let top:number;
     if(anchor && anchor.column+span<=columns && anchor.span===span){
       while(pages.length<=anchor.page)newPage();
@@ -208,7 +239,7 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
     let positionY=top!;
     for(const item of rendered){
       page!.placements.push({group:group.id,id:item.block.id,column,span,x,y:positionY,width:bw,height:item.height,
-        ...(item.formulaBody?{[item.block.type==="code"?"codeBody":"formulaBody"]:{...item.formulaBody,x:x+item.formulaBody.x,y:positionY+item.formulaBody.y}}:{})});
+        ...(item.formulaBody?{[item.block.type==="figure"?"figureBody":item.block.type==="code"?"codeBody":"formulaBody"]:{...item.formulaBody,x:x+item.formulaBody.x,y:positionY+item.formulaBody.y}}:{})});
       if(visibleIds.has(item.block.id)){
         page!.elements.push(...item.elements.map(element=>({...element,x:element.x+x,y:element.y+positionY})));
       }
@@ -220,11 +251,20 @@ export function layoutBoard(blocks: Block[], availableWidth: number, visibleIds:
 
   pages.forEach((item,index)=>{
     const decoration:any[]=[{type:"text",id:"page_title",x:margin,y:12,width:width-2*margin,height:54,
-      text:wrapText(title.replace(/\s+/g," "),width-2*margin,18).join("\n"),fontSize:18,fontFamily:3,lineHeight:1.5,strokeColor:INK}];
+      text:wrapText(title.replace(/\s+/g," "),width-2*margin,titleFont).join("\n"),fontSize:titleFont,fontFamily:3,lineHeight:1.5,strokeColor:INK}];
     // Invisible corners keep auto-fit steady while only the first block is visible.
     decoration.push({type:"rectangle",id:`page_bounds_${index}`,x:0,y:0,width,height:item.height,
-      strokeColor:PAPER,backgroundColor:"transparent",roughness:0});
+      strokeColor:PAPER,backgroundColor:"transparent",roughness:0,opacity:0});
     item.elements=[...decoration,...item.elements];
+    if(options.theme==="ink")item.elements=item.elements.map(element=>{
+      const colors:Record<string,string>={"#252927":"#f1f3e9","#31588b":"#c3dbc3","#fcfcfb":"#17382d",
+        "#d7ddd9":"#537462","#f0f3f1":"#204537","#c5cec8":"#799582","#eaf0ed":"#294d3d","#8d9e91":"#a4b9a2",
+        "#eef3ef":"#244b3c","#dce9f8":"#315d49","#899d90":"#7e9e89",
+        "#acb9af":"#6e8e7b","#8b663a":"#e1c58b","#56836b":"#bce5ce","#805c89":"#c0dce8",
+        "#9da9a0":"#91ad99"};
+      return {...element,strokeColor:colors[element.strokeColor]||element.strokeColor,
+        backgroundColor:colors[element.backgroundColor]||element.backgroundColor};
+    });
   });
   return {pages,width};
 }

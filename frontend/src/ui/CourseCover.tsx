@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ImagePlus, RefreshCw } from "lucide-react";
+import { ImagePlus } from "lucide-react";
 import { api } from "../api";
 import { errText } from "../lib/errors";
 
@@ -9,7 +9,6 @@ export default function CourseCover({ kind, id, title, onOpen }: {
   const [cover, setCover] = useState<any>(null);
   const [src, setSrc] = useState("");
   const [failed, setFailed] = useState(false);
-  const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const objectUrl = useRef("");
@@ -41,16 +40,8 @@ export default function CourseCover({ kind, id, title, onOpen }: {
     return () => { cancelled = true; };
   }, [cover?.image_url]);
   useEffect(() => () => { if (objectUrl.current) URL.revokeObjectURL(objectUrl.current); }, []);
-  const generate = async () => {
-    if (generating) return;
-    setGenerating(true); setError("");
-    try { const result = await api.authorizeCover(kind, id, cover?.status === "succeeded" || terminal || failed); if (result) setRefreshKey(value => value + 1); }
-    catch (failure) { setError(errText(failure)); }
-    finally { setGenerating(false); }
-  };
   const terminal = ["failed", "expired", "cancelled", "awaiting_confirmation"].includes(cover?.status);
   const fallback = failed || terminal || cover?.method === "procedural" || ["not_generated", "unavailable", "deferred"].includes(cover?.status);
-  const procedural = cover?.actual_method === "procedural" || cover?.method === "procedural";
   if (cover?.cover_eligible === false || cover?.status === "suppressed") return null;
   const missing = cover?.status === "not_generated";
   const art = src ? <img src={src} alt={`${title}的水墨封面`} onError={() => {
@@ -66,10 +57,7 @@ export default function CourseCover({ kind, id, title, onOpen }: {
     </div>;
   return <div className="ink-cover-block" data-cover-state={src ? "ready" : fallback ? "fallback" : missing ? "not-generated" : "pending"}>
     {onOpen ? <button className="ink-cover-art" onClick={onOpen} aria-label={`打开课程 ${title}`}>{art}</button> : <div className="ink-cover-art">{art}</div>}
-    {(missing || terminal || failed || procedural) && <div className="cover-actions">
-      <button type="button" className="btn btn-sm" disabled={generating} onClick={generate} title="选择图片模型并确认外发范围"><ImagePlus size={16} />{generating ? "正在确认…" : terminal ? "重新确认封面" : "生成封面"}</button>
-      {failed && <button type="button" className="btn btn-sm" title="重新加载封面" aria-label="重新加载封面" onClick={() => setRefreshKey(value => value + 1)}><RefreshCw size={16} /></button>}
-    </div>}
+    {failed && <button type="button" className="btn btn-sm" title="重新加载封面" aria-label="重新加载封面" onClick={() => setRefreshKey(value => value + 1)}><ImagePlus size={16} />重新加载封面</button>}
     {terminal && cover?.error_code && <p className="help" role="status">{errText({ code: cover.error_code })}</p>}
     {error && <p className="help" role="alert">{error}</p>}
   </div>;

@@ -44,6 +44,7 @@ def serve():
     import uvicorn
 
     evidence = Path(os.environ["TEST_OUTPUT"]) / "native-model-calls.jsonl"
+    evidence.touch()
 
     def record(role, info):
         with evidence.open("a", encoding="utf8") as stream:
@@ -54,7 +55,11 @@ def serve():
         translated, options = _request(messages, info)
         schema = info.model_request_parameters.output_object
         props = schema.json_schema.get("properties", {}) if schema else {}
-        adapter = InterviewAdapter(scope="course", followups=2)
+        if "action" in props or "operations" in props:
+            from test_planning_dialogue_cover import FeatureAdapter
+            adapter = FeatureAdapter()
+        else:
+            adapter = InterviewAdapter(scope="course", followups=2)
         record("intake" if "ready_to_plan" in props else "planning", info)
         return ModelResponse(parts=[TextPart(adapter.generate(translated, **options)["content"])])
 
@@ -76,10 +81,18 @@ def serve():
             await asyncio.sleep(0.02)
             yield answer[offset:offset + 12]
 
+    if Path(os.environ.get("NATIVE_BROWSER_SCRIPT","")).name=="persona_native_browser.mjs":
+        from app.slice1.capability_refresh import CapabilityRefresher
+        CapabilityRefresher.register=lambda *args:None
     app = create_app()
     learning = next(route.app for route in app.routes
         if getattr(route, "path", None) in ("", "/") and hasattr(route, "app"))
     state = learning.state.slice3
+    auth = learning.state.slice0.auth
+    admin = auth.ensure_bootstrap_admin("synthetic-browser-admin@example.com", "synthetic-password-12345")
+    other = auth.register("synthetic-browser-member@example.com", "synthetic-password-12345")
+    auth.verify_email(other["verify_token"])
+    auth.approve(admin["user_id"], other["user_id"])
     state.planning.model_adapter_factory = lambda *args: FunctionModel(planning, model_name="synthetic-native-browser-planning")
     from app.agents.task_binding import bind_task_deps
     from app.slice1.errors import error
@@ -115,6 +128,38 @@ def serve():
     state.planning.search_adapter_factory = lambda *args: SyntheticSearchAdapter()
     state.chat.search_adapter_factory = lambda *args: None
     state.teaching.tts_adapter_factory = lambda *args: None
+    if Path(os.environ.get("NATIVE_BROWSER_SCRIPT", "")).name == "planning_search_native_browser.mjs":
+        from planning_search_browser_fixture import configure
+        configure(state, record)
+    if Path(os.environ.get("NATIVE_BROWSER_SCRIPT","")).name=="persona_native_browser.mjs":
+        from test_persona_workflows import synthetic_reply,SKILL
+        from app.characters.distillation_models import CharacterBuildStageRow
+        from app.agents.model_routing import task_role_config
+        def persona_factory(owner,task_id):
+            with state.db.session() as session:
+                stage=session.get(CharacterBuildStageRow,task_id).stage_key
+            view=task_role_config(state.teaching.configs,owner,task_id)
+            def generate(messages,info):
+                translated,_=_request(messages,info)
+                payload=json.loads(next(item["content"] for item in reversed(translated) if item["role"]=="user"))
+                record("persona",info)
+                if stage.startswith("build_skill_part_"):
+                    return ModelResponse(parts=[TextPart(SKILL+"\n\n"+stage)])
+                if stage.startswith("merge_skill_part_") or stage.startswith("repair_") and "_part_" in stage:
+                    return ModelResponse(parts=[TextPart(payload["original"])])
+                if stage in ("build_skill","merge_skill","fast_skill"):
+                    return ModelResponse(parts=[TextPart(SKILL)])
+                return ModelResponse(parts=[TextPart(json.dumps(synthetic_reply(stage,payload,
+                    info.model_request_parameters.output_object.json_schema["properties"])))])
+            model=FunctionModel(generate,model_name="synthetic-persona")
+            model.agent_deps=bind_task_deps(state.db,model,actor_id=owner,task_id=task_id)
+            return model
+        from app.search.service import SearchService
+        from test_anysearch_service import Adapter
+        state.distillation.model_factory=persona_factory
+        state.distillation.search_factory=lambda owner,task:SearchService(state.db,state.teaching.configs,
+            owner_user_id=owner,task_id=task,adapter_factory=lambda *_:Adapter())
+        state.distillation._read_source=lambda *_:"Synthetic full source text without real biography."
     uvicorn.run(app, host="127.0.0.1", port=int(os.environ["TEST_PORT"]), access_log=False)
 
 
@@ -154,6 +199,23 @@ def main():
             FRONTEND_HOST=f"http://127.0.0.1:{frontend_port}", TEST_FRONTEND=f"http://127.0.0.1:{frontend_port}",
             TEST_BACKEND=f"http://127.0.0.1:{backend_port}", TEST_OUTPUT=str(output),
             TEST_PYTHON=sys.executable, PYTHONPATH=str(ROOT / "server" / "backend"))
+        env["MATERIALS_STORAGE_DIR"] = str(output / "objects")
+        env["BACKUP_STORAGE_DIR"] = str(output / "backups")
+        memory_config = output / ".env.memory"
+        memory_config.write_text(
+            "HINDSIGHT_API_LLM_BASE_URL='https://memory.synthetic.test/v1'\n"
+            "HINDSIGHT_API_LLM_MODEL='synthetic-content'\n"
+            "HINDSIGHT_API_LLM_API_KEY='synthetic-content-key'\n"
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL='https://embedding.synthetic.test/v1'\n"
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL='synthetic-embedding'\n"
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY='synthetic-embedding-key'\n"
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS='1024'\n"
+            "HINDSIGHT_API_RERANKER_PROVIDER='typesafe'\n"
+            "HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL='https://rerank.synthetic.test'\n"
+            "HINDSIGHT_API_RERANKER_TYPESAFE_MODEL='synthetic-jev'\n"
+            "HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY='synthetic-rerank-key'\n",
+            encoding="utf8")
+        env["MEMORY_CONFIG_FILE"] = str(memory_config)
         import shutil
         node = env.get("TEST_NODE") or shutil.which("node")
         if not node or not env.get("PW_ROOT"):
@@ -184,7 +246,7 @@ def main():
             streams.append(stream)
             processes.append(subprocess.Popen(command, cwd=ROOT / "frontend" if name == "frontend" else ROOT,
                 env=env, stdout=stream, stderr=subprocess.STDOUT))
-        for endpoint in (env["TEST_BACKEND"] + "/api/auth/guest", env["TEST_FRONTEND"]):
+        for endpoint in (env["TEST_BACKEND"] + "/healthz", env["TEST_FRONTEND"]):
             deadline = time.monotonic() + 45
             while True:
                 if any(proc.poll() is not None for proc in processes):
@@ -206,9 +268,11 @@ def main():
         roles = {item["role"] for item in calls}
         print(json.dumps({"native_roles": sorted(roles), "calls": len(calls), "browser_exit": result.returncode}), flush=True)
         if result.returncode == 0:
-            expected = {"teaching"} if script.name == "teaching_assessment_browser.mjs" else {
+            expected = {"chat", "chat_stream"} if script.name=="source_imports_native_browser.mjs" else {"persona"} if script.name=="persona_native_browser.mjs" else set() if script.name in ("auth_memory_browser.mjs", "personal_memory_settings_native.mjs", "text_pptx_native_browser.mjs", "local_resources_native_browser.mjs") else {"intake", "planning"} if script.name in ("settings_registration_browser.mjs", "planning_search_native_browser.mjs") else {"teaching"} if script.name == "teaching_assessment_browser.mjs" else {
                 "intake", "planning", "teaching", "chat", "chat_stream"}
             assert expected <= roles
+            if script.name == "text_pptx_native_browser.mjs":
+                assert not calls, "local parsing must not make model calls"
         return result.returncode
     finally:
         for proc in reversed(processes):
@@ -233,10 +297,15 @@ def main():
 
 
 def expire_authorization(conversation_id):
+    """Expire the content root grants of one owned conversation.
+
+    ADR-035 automatic teaching records its authorization per task, so the fixture expires the
+    grants reached through this conversation's teaching tasks rather than a single lesson row.
+    """
     from datetime import timedelta
     from sqlalchemy import select, text
     from app.logging_audit.db import Database
-    from app.teaching.authorization import LessonAuthorizationRow
+    from app.tasks.service import LearningTaskRow
     from app.slice1.models import DisclosureGrantRow
     from app.planning.models import utcnow
     db = Database()
@@ -245,14 +314,16 @@ def expire_authorization(conversation_id):
             schema = sess.scalar(text("select current_schema()"))
             if not schema.startswith("course_library_validation_") or len(schema) != 58:
                 raise RuntimeError("refusing authorization fixture outside owned browser schema")
-            rows = sess.scalars(select(LessonAuthorizationRow).where(
-                LessonAuthorizationRow.conversation_id == conversation_id)).all()
-            if not rows:
+            grants = sess.scalars(select(DisclosureGrantRow).join(
+                LearningTaskRow, DisclosureGrantRow.task_id == LearningTaskRow.task_id).where(
+                LearningTaskRow.subject_id.like(conversation_id + ":%"),
+                DisclosureGrantRow.content_category != "audio_text",
+                DisclosureGrantRow.revoked_at.is_(None))).all()
+            if not grants:
                 raise RuntimeError("owned conversation authorization missing")
-            for row in rows:
-                root = sess.get(DisclosureGrantRow, row.content_root_grant_id)
-                root.expires_at = utcnow() - timedelta(seconds=1)
-        print(json.dumps({"expired": True}))
+            for grant in grants:
+                grant.expires_at = utcnow() - timedelta(seconds=1)
+        print(json.dumps({"expired": True, "grants": len(grants)}))
     finally:
         db.dispose()
 

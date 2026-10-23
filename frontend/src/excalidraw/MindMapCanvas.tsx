@@ -130,6 +130,15 @@ export default function MindMapCanvas({ elements, height = 460, ariaLabel = "思
   useEffect(() => {
     if (!fitted.current && nodes.length && size.width > 0 && size.height > 0) { fit(true); fitted.current = true; }
   }, [nodes, size]);
+  const previousSize = useRef({ width: 0, height: 0 });
+  useEffect(() => {
+    const previous = previousSize.current;
+    if (fitted.current && previous.width > 0 && previous.height > 0) {
+      setView(value => ({ ...value, x: value.x + (size.width - previous.width) / 2,
+        y: value.y + (size.height - previous.height) / 2 }));
+    }
+    previousSize.current = size;
+  }, [size]);
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;

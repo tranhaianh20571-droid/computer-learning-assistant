@@ -55,10 +55,11 @@ def _register_pending(client: TestClient) -> str:
     email = f"pending.{uuid.uuid4().hex[:8]}@example.com"
     r = client.post("/api/auth/register", json={"email": email, "password": PASSWORD})
     assert r.status_code == 201, r.text
-    vtoken = r.json().get("verify_token")
-    if vtoken:
-        rv = client.post("/api/auth/verify-email", json={"token": vtoken})
-        assert rv.status_code == 200, rv.text
+    assert r.json()["status"] == "approved"
+    from backend.auth.models import UserRow
+    # Legacy moderation records can still be read by administrators.
+    with client.app.state.slice0.db.session() as session:
+        session.get(UserRow, r.json()["user_id"]).status = "pending_approval"
     return email
 
 
@@ -94,11 +95,9 @@ class TestCourseList:
         data = client.get("/api/planning/courses", headers=auth_headers(t2)).json()["data"]
         assert all(c["title"] != "A 独有的课程" for c in data)
 
-    def test_guest_gets_own_empty_list(self, env) -> None:
-        # 访客模式：无会话返回访客自己的（空）课程列表，不泄露他人课程
+    def test_anonymous_course_list_rejected(self, env) -> None:
         r = env["client"].get("/api/planning/courses")
-        assert r.status_code == 200, r.text
-        assert r.json()["data"] == []
+        assert r.status_code == 401, r.text
 
     def test_invalid_bearer_rejected(self, env) -> None:
         r = env["client"].get("/api/planning/courses", headers=auth_headers("not-a-real-token"))

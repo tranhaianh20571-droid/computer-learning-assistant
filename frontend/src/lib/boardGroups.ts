@@ -1,6 +1,17 @@
 /** Local knowledge groups from existing semantic beats, with legacy adjacency fallback. */
 export type BoardGroup = { id: string; block_ids: string[] };
+export function orderedBoardBlocks<T extends {id:string;layout_group?:string}>(blocks:T[], beats:{block_ids?:string[];cues?:{block_id:string}[]}[]=[]):T[] {
+  // Composed stages already carry the immutable order of earlier segments.
+  if(blocks.some(block=>block.layout_group))return blocks;
+  const byId=new Map(blocks.map(block=>[block.id,block])),ordered=new Map<string,T>();
+  for(const beat of beats)for(const id of [...(beat.cues||[]).map(cue=>cue.block_id),...(beat.block_ids||[])]){
+    const block=byId.get(id);if(block&&!ordered.has(id))ordered.set(id,block);
+  }
+  for(const block of blocks)if(!ordered.has(block.id))ordered.set(block.id,block);
+  return [...ordered.values()];
+}
 export function boardGroups(blocks: any[], beats: {block_ids?:string[]}[] = []): BoardGroup[] {
+  blocks=orderedBoardBlocks(blocks,beats);
   const ids=new Set(blocks.map(block=>block.id));
   const parent=new Map<string,string>(blocks.map(block=>[block.id,block.id]));
   const root=(id:string):string=>{const p=parent.get(id)||id;return p===id?id:root(p);};
@@ -11,20 +22,21 @@ export function boardGroups(blocks: any[], beats: {block_ids?:string[]}[] = []):
   const groupedBeats=new Set(beats.flatMap(beat=>beat.block_ids||[]).filter(id=>ids.has(id)));
   const groups:BoardGroup[]=[];
   let pending:BoardGroup|null=null;
+  let previousKey="";
   const flush=()=>{if(pending)groups.push(pending);pending=null;};
   for(const block of blocks){
-    if(block.layout_group){
+    if(block.layout_group||groupedBeats.has(block.id)){
       flush();
-      let group=groups.find(item=>item.id===block.layout_group);
-      if(!group){group={id:block.layout_group,block_ids:[]};groups.push(group);}
+      const key=block.layout_group?`layout:${block.layout_group}`:`beat:${root(block.id)}`;
+      let group=previousKey===key?groups.at(-1):undefined;
+      if(!group){
+        group={id:block.layout_group?`${block.layout_group}:${block.id}`:`beat:${block.id}`,block_ids:[]};
+        groups.push(group);
+      }
+      previousKey=key;
       group.block_ids.push(block.id);continue;
     }
-    if(groupedBeats.has(block.id)){
-      flush();const id=`beat:${root(block.id)}`;
-      let group=groups.find(item=>item.id===id);
-      if(!group){group={id,block_ids:[]};groups.push(group);}
-      group.block_ids.push(block.id);continue;
-    }
+    previousKey="";
     // Four legacy definitions followed by a diagram form one knowledge group.
     // A new titled paragraph starts its own topic; images follow their text.
     if(block.type==="text" && block.title && pending)flush();
@@ -40,10 +52,7 @@ export function boardGroups(blocks: any[], beats: {block_ids?:string[]}[] = []):
   for (const group of groups) {
     const beatGroup = group.id.startsWith("beat:");
     const previous = compacted.at(-1);
-    if (beatGroup && previous?.id.startsWith("beats:") && previous.block_ids.length + group.block_ids.length <= 5) {
-      previous.block_ids.push(...group.block_ids);
-    } else if (beatGroup && previous?.id.startsWith("beat:") && previous.block_ids.length + group.block_ids.length <= 5) {
-      previous.id = `beats:${previous.id.slice(5)}+${group.id.slice(5)}`;
+    if (beatGroup && previous?.id.startsWith("beat:") && previous.block_ids.length + group.block_ids.length <= 5) {
       previous.block_ids.push(...group.block_ids);
     } else {
       compacted.push({...group,block_ids:[...group.block_ids]});

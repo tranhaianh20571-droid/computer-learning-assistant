@@ -58,6 +58,7 @@ class PlanningRetrievalService:
         material_ids: list[str],
         query: str,
         budget: Optional[dict] = None,
+        source_sections: Optional[list[dict]] = None,
     ) -> RetrievalResult:
         """组装检索上下文：owner 过滤 + 选定材料 + 可用区域 + 预算裁剪。"""
         b = {**CONTEXT_BUDGET_DEFAULTS, **(budget or {})}
@@ -65,15 +66,28 @@ class PlanningRetrievalService:
         if not material_ids:
             result.truncation_reasons.append("no_material_selected")
             return result
-        if self.text_resolver is None:
+        if self.text_resolver is None and self.db is None:
             result.truncation_reasons.append("text_resolver_unavailable")
         hits = self.index.search(
             owner_user_id=owner_user_id, query=query, material_ids=list(material_ids)
-        )
+        ) if query.strip() else []
+        if self.db is not None:
+            from ..materials.corpus import search_corpus
+            attachment_hits, reasons = search_corpus(
+                self.db, owner_user_id, material_ids, query, source_sections)
+            result.truncation_reasons.extend(reasons)
+        else:
+            attachment_hits = []
+        hits = attachment_hits + hits
         # 只保留区域可用的命中（OCR 来源区域不可用时天然被过滤）
         kept = 0
         chars = 0
         for hit in hits:
+            if source_sections is not None and not any(
+                    section["id"].startswith(hit["material_id"] + "/")
+                    and section["page_no"] <= hit.get("page_no", 0) <= section["end_page"]
+                    for section in source_sections):
+                continue
             region_id = hit.get("region_id")
             if region_id and not self.index.region_is_available(region_id):
                 continue
@@ -81,14 +95,22 @@ class PlanningRetrievalService:
                 result.truncation_reasons.append("max_retrieval_chunks")
                 break
             remaining = max(0, int(b["max_retrieval_chars"]) - chars)
-            excerpt = self._excerpt(hit, owner_user_id, max_chars=remaining)
+            if "attachment_text" in hit:
+                text = hit["attachment_text"]
+                excerpt = {"chunk_id": hit["chunk_id"], "material_id": hit["material_id"],
+                    "page_no": hit["page_no"], "text": text[:remaining], "truncated": len(text) > remaining,
+                    **{key: hit[key] for key in ("title", "section_id", "content_hash", "offset", "end_offset",
+                                                 "unit", "line_start", "line_end", "source_start", "source_end")
+                       if key in hit}}
+            else:
+                excerpt = self._excerpt(hit, owner_user_id, max_chars=remaining)
             if excerpt is not None:
                 if excerpt.pop("truncated") and "max_retrieval_chars" not in result.truncation_reasons:
                     result.truncation_reasons.append("max_retrieval_chars")
                 if excerpt["text"]:
                     result.excerpts.append(excerpt)
                     chars += len(excerpt["text"])
-            elif self.text_resolver is not None and "excerpt_unavailable" not in result.truncation_reasons:
+            elif (self.text_resolver is not None or self.db is not None) and "excerpt_unavailable" not in result.truncation_reasons:
                 result.truncation_reasons.append("excerpt_unavailable")
             result.refs.append({
                 "chunk_id": hit["chunk_id"],
@@ -96,17 +118,35 @@ class PlanningRetrievalService:
                 "page_no": hit["page_no"],
                 "region_id": region_id,
                 "source": "material",
+                **{key: hit[key] for key in ("section_id", "content_hash", "offset", "end_offset",
+                                             "unit", "line_start", "line_end", "source_start", "source_end")
+                   if key in hit},
             })
             kept += 1
         result.chars_total = chars
+        if result.excerpts and "text_resolver_unavailable" in result.truncation_reasons:
+            result.truncation_reasons.remove("text_resolver_unavailable")
         return result
+
+    def _attachment_hits(self, owner_user_id, material_ids, query):
+        if self.db is None:
+            return []
+        from ..materials.corpus import search_corpus
+        return search_corpus(self.db, owner_user_id, material_ids, query)[0]
 
     def _excerpt(self, hit: dict, owner_user_id: str, max_chars: int) -> Optional[dict]:
         """经注入的 resolver 取受限正文片段（不落库）；无 resolver 时不取正文。"""
         if self.text_resolver is None:
-            return None
-        text = self.text_resolver(hit)
-        if text is None:
+            if self.db is None:
+                return None
+            from ..materials.models import TextChunkRow, MaterialRow
+            with self.db.session() as session:
+                text = session.scalar(select(TextChunkRow.private_text).join(MaterialRow).where(
+                    TextChunkRow.chunk_id == hit["chunk_id"], MaterialRow.owner_user_id == owner_user_id,
+                    MaterialRow.deleted_at.is_(None)))
+        else:
+            text = self.text_resolver(hit)
+        if not text:
             return None
         limit = max(0, max_chars)
         return {"chunk_id": hit["chunk_id"], "text": text[:limit], "truncated": len(text) > limit}
@@ -184,6 +224,15 @@ def validate_material_ownership(db: Database, owner_user_id: str, material_ids: 
             .scalars()
             .all()
         )
+        from ..materials.models import DocumentAttachmentRow
+        attachments = set(sess.scalars(select(DocumentAttachmentRow.material_id).where(
+            DocumentAttachmentRow.material_id.in_(material_ids),
+            DocumentAttachmentRow.owner_user_id == owner_user_id)))
+        from ..materials.source_models import ImportedSourceRow
+        attachments.update(sess.scalars(select(ImportedSourceRow.material_id).where(
+            ImportedSourceRow.material_id.in_(material_ids), ImportedSourceRow.owner_user_id == owner_user_id)))
+        if any(row.material_id in attachments and row.status != "parsed" for row in rows):
+            raise error("invalid_field", "请等待附件识别完成，或移除失败附件。", status=409)
         return [r.material_id for r in rows]
 
 

@@ -1,6 +1,6 @@
 """Version-bound learning plans, private assessments and attempts (ADR-029)."""
 from datetime import datetime
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from ..logging_audit.models import Base
 from .models import utcnow
@@ -89,3 +89,86 @@ class AssessmentAttemptRow(Base):
     answers_json: Mapped[str] = mapped_column(Text, nullable=False)
     feedback_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class FeynmanSessionRow(Base):
+    __tablename__ = "feynman_sessions"
+    __table_args__ = (UniqueConstraint("conversation_id", "checkpoint_id", name="uq_feynman_checkpoint"),
+        Index("idx_feynman_owner", "owner_user_id"),)
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(64), ForeignKey("conversations.conversation_id", ondelete="CASCADE"))
+    owner_user_id: Mapped[str] = mapped_column(String(64))
+    checkpoint_id: Mapped[str] = mapped_column(String(64))
+    after_step_no: Mapped[int] = mapped_column(Integer)
+    source_hash: Mapped[str] = mapped_column(String(64))
+    context_json: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(String(24), default="preparing")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    probe_count: Mapped[int] = mapped_column(Integer, default=0)
+    result: Mapped[str] = mapped_column(String(24), default="")
+    task_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class FeynmanTurnRow(Base):
+    __tablename__ = "feynman_turns"
+    __table_args__ = (UniqueConstraint("session_id", "turn_no", name="uq_feynman_turn"),)
+    turn_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), ForeignKey("feynman_sessions.session_id", ondelete="CASCADE"))
+    turn_no: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(16), default="question")
+    published: Mapped[bool] = mapped_column(Boolean, default=False)
+    question: Mapped[str] = mapped_column(Text, default="")
+    criteria_json: Mapped[str] = mapped_column(Text, default="[]")
+    answer: Mapped[str] = mapped_column(Text, default="")
+    request_key: Mapped[str] = mapped_column(String(128), default="")
+    feedback: Mapped[str] = mapped_column(Text, default="")
+    public_text: Mapped[str] = mapped_column(Text, default="")
+    evaluation_json: Mapped[str] = mapped_column(Text, default="{}")
+    playback_json: Mapped[str] = mapped_column(Text, default="{}")
+    audio_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("audio_assets.audio_id"))
+    audio_task_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SegmentCoverageRow(Base):
+    __tablename__ = "segment_coverage"
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="CASCADE"), primary_key=True)
+    step_no: Mapped[int] = mapped_column(Integer, primary_key=True)
+    text_version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    audio_id: Mapped[str] = mapped_column(String(64), primary_key=True, default="")
+    client_seq: Mapped[int] = mapped_column(BigInteger, default=0)
+    intervals_json: Mapped[str] = mapped_column(Text, default="[]")
+    visible_chars: Mapped[int] = mapped_column(Integer, default=0)
+    board_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class TaughtKnowledgeRow(Base):
+    __tablename__ = "taught_knowledge"
+    record_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(64), index=True)
+    course_id: Mapped[str] = mapped_column(String(64), index=True)
+    lesson_id: Mapped[str] = mapped_column(String(64))
+    content_version_id: Mapped[str] = mapped_column(String(64))
+    plan_hash: Mapped[str] = mapped_column(String(64))
+    checkpoint_id: Mapped[str] = mapped_column(String(64))
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="CASCADE"))
+    after_step_no: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(200))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    source_json: Mapped[str] = mapped_column(Text, default="[]")
+    scope_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    scope_capability_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ChannelPresentationRow(Base):
+    __tablename__ = "channel_presentations"
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="CASCADE"), primary_key=True)
+    channel_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    client_seq: Mapped[int] = mapped_column(BigInteger, default=0)
+    text_hash: Mapped[str] = mapped_column(String(64))
+    audio_id: Mapped[str] = mapped_column(String(64), default="")
+    visible_chars: Mapped[int] = mapped_column(Integer, default=0)
+    position_ms: Mapped[int] = mapped_column(Integer, default=0)
+    paused: Mapped[bool] = mapped_column(Boolean, default=True)

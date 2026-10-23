@@ -8,7 +8,7 @@ from .models import PlanningTaskStateRow, LearningRouteRow, CourseRow, load_json
 from .locking import planning_target
 from .errors import error
 
-AUTO_RETRY_ERRORS = {"MODEL_TIMEOUT", "MODEL_CONNECTION_ERROR", "MODEL_PROVIDER_ERROR", "MODEL_RATE_LIMITED", "TASK_EXPIRED"}
+from .retry_policy import AUTO_RETRY_LIMIT, automatic_retry_eligible, missing_courses
 
 
 class PlanningWorkspace:
@@ -34,8 +34,8 @@ class PlanningWorkspace:
             raise error("task_not_found", status=404)
         return row
 
-    def resume(self, ident, owner, *, automatic=False):
-        # Target -> task -> planning is the publication/abandon lock order.
+    def resume(self, ident, owner, *, automatic=False, dispatch=True):
+        # Target -> task -> planning -> draft is the publication/abandon lock order.
         with self.db.session() as sess:
             original = self._owned(sess, ident, owner)
             _, confirmed = planning_target(sess, original.target_kind, original.target_id, owner)
@@ -49,33 +49,77 @@ class PlanningWorkspace:
             sess.refresh(row)
             if row.abandoned_at or task.cancel_requested or task.status == "cancelled":
                 raise error("TASK_CANCELLED", status=409)
-            if row.wait_state or task.status in ("succeeded", "partial"):
+            if row.wait_state or task.status in ("succeeded", "leased", "running"):
                 return self.planning.get_planning_state(ident, actor_id=owner)
+            from .models import PlanningDraftRow
+            draft = sess.get(PlanningDraftRow, row.draft_id, with_for_update=True) if row.draft_id else None
+            content = load_json_field(draft.content_json, {}) if draft else {}
             event = sess.get(TaskStateRow, ident)
             now = utcnow()
             expired = task.deadline_at is not None and task.deadline_at <= now
-            retryable = task.status in ("failed", "expired") or (task.status == "queued" and expired)
-            if retryable:
-                code = "TASK_EXPIRED" if expired or task.status == "expired" else event.error_code
-                if automatic and (row.auto_retry_count >= 1 or code not in AUTO_RETRY_ERRORS):
+            retryable = task.status in ("failed", "expired", "partial") or (task.status == "queued" and expired)
+            if automatic:
+                latest = sess.scalar(select(PlanningTaskStateRow.task_id).where(
+                    PlanningTaskStateRow.owner_user_id == owner,
+                    PlanningTaskStateRow.target_id == row.target_id,
+                ).order_by(PlanningTaskStateRow.created_at.desc(), PlanningTaskStateRow.task_id.desc()).limit(1))
+                if latest != ident:
                     return self.planning.get_planning_state(ident, actor_id=owner)
+                if retryable and (row.auto_retry_count >= AUTO_RETRY_LIMIT or not automatic_retry_eligible(
+                        task, row, event.error_code if event else None, content)):
+                    return self.planning.get_planning_state(ident, actor_id=owner)
+            if task.status == "partial" and not missing_courses(content):
+                return self.planning.get_planning_state(ident, actor_id=owner)
+            if self.planning.authorization is not None:
+                self.planning.authorization.prepare(sess, task, row, owner,
+                    allow_refresh=not automatic or (task.status == "queued" and task.attempt == 0))
+            if retryable:
+                signals = load_json_field(row.scope_signals_json, {})
+                if draft and missing_courses(content):
+                    expected = signals.get("structure_revision")
+                    if automatic and expected is not None and expected != draft.revision:
+                        raise error("DRAFT_REVISION_MISMATCH", status=409)
+                    signals["refine_draft"] = {"draft_id": draft.draft_id, "revision": draft.revision}
+                    signals["structure_revision"] = draft.revision
+                    row.scope_signals_json = json.dumps(signals)
                 if automatic:
                     row.auto_retry_count += 1
                 task.generation += 1
+                if not (draft and missing_courses(content)):
+                    row.process_json = "{}"
                 task.status = "queued"
                 task.lease_token = task.lease_owner = task.lease_until = None
-                task.deadline_at = now + timedelta(hours=1)
+                # Only an explicit action may establish a new task deadline.
+                if not automatic:
+                    task.deadline_at = now + timedelta(hours=1)
                 task.updated_at = now
                 self._event(sess, task, "retry_scheduled")
             row.background_enabled = True
-        self.planning.background.start()
-        self.planning.background.wake.set()
+        if dispatch:
+            self.planning.background.start()
+            self.planning.background.wake.set()
         return self.planning.get_planning_state(ident, actor_id=owner)
 
-    def _event(self, sess, task, status):
+    def suspend_automatic(self, ident, owner, code):
+        """Surface a controlled reauthorization/conflict failure without another model run."""
+        from ..logging_audit.contracts import normalize_error_code
+        with self.db.session() as sess:
+            original = self._owned(sess, ident, owner)
+            planning_target(sess, original.target_kind, original.target_id, owner, mutable=True)
+            task = sess.get(LearningTaskRow, ident, with_for_update=True)
+            row = self._owned(sess, ident, owner, lock=True)
+            if task.status not in ("failed", "partial") or row.abandoned_at or task.cancel_requested:
+                return
+            row.background_enabled = False
+            if code is not None:
+                task.status = "failed"
+                self._event(sess, task, "failed", error_code=normalize_error_code(code))
+
+    def _event(self, sess, task, status, *, error_code=None):
         state = sess.get(TaskStateRow, task.task_id, with_for_update=True)
-        code = "TASK_CANCELLED" if status == "cancelled" else None
-        self.planning.events._append(sess, state, event_name="task." + status, stage="generate",
+        code = "TASK_CANCELLED" if status == "cancelled" else error_code
+        event_name = "task.stage.failed" if status == "failed" else "task." + status
+        self.planning.events._append(sess, state, event_name=event_name, stage="generate",
             status=status, error_code=code, generation=task.generation, attempt=task.attempt)
         state.status = status
         state.error_code = code
@@ -115,6 +159,7 @@ class PlanningWorkspace:
                 row.background_enabled = False
                 row.wait_state = None
                 row.answer_draft_json = "[]"
+                row.process_json = "{}"
                 row.answer_draft_revision += 1
         return {"task_id": ident, "abandoned": True, "task_ids": ids}
 
@@ -145,9 +190,16 @@ class PlanningWorkspace:
                 if len(free) > 1000 or (question["kind"] == "single" and len(selections) > 1):
                     raise error("invalid_field", status=400)
                 seen.add(ident_q)
+                time_answer={}
+                if question.get("kind")=="time_budget":
+                    from .intake import validate_time_answer
+                    if selections or free or answer.get("skipped"):
+                        raise error("invalid_field", "学习时间安排不可跳过。")
+                    time_answer["time_budget"]=validate_time_answer(answer.get("time_budget",{}),partial=True)
                 clean.append({"question_id": ident_q, "selections": selections,
                     "free_text": "".join(c for c in free if c >= " " or c in "\n\t"),
-                    "skipped": bool(answer.get("skipped")), "editing_free": bool(answer.get("editing_free"))})
+                    "skipped": bool(answer.get("skipped")), "editing_free": bool(answer.get("editing_free")),
+                    **time_answer})
             row.answer_draft_json = json.dumps(clean, ensure_ascii=False)
             row.answer_draft_revision += 1
             return {"revision": row.answer_draft_revision, "answers": clean}

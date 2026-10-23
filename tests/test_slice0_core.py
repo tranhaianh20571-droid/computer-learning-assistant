@@ -103,7 +103,7 @@ class TestAccountLifecycle:
 
     def test_short_password_rejected(self, svc):
         with pytest.raises(AuthError):
-            svc["auth"].register(_email("short"), "tooshort")
+            svc["auth"].register(_email("short"), "shortpw")
 
     def test_disable_revokes_sessions(self, svc):
         auth = svc["auth"]
@@ -288,12 +288,8 @@ class TestSlice0HTTP:
         r = client.post("/api/auth/register", json={"email": email, "password": _pw(), "display_name": "u"})
         assert r.status_code == 201
         uid = r.json()["user_id"]
-        token = r.json()["verify_token"]
-        r = client.post("/api/auth/verify-email", json={"token": token})
-        assert r.json()["status"] == "pending_approval"
-
-        r = client.post("/api/auth/admin/approve", json={"user_id": uid}, headers=ah)
-        assert r.status_code == 200
+        assert r.json()["status"] == "approved"
+        assert "verify_token" not in r.json()
 
         r = client.post("/api/auth/login", json={"email": email, "password": _pw()})
         assert r.status_code == 200
@@ -313,9 +309,9 @@ class TestSlice0HTTP:
         assert r.status_code == 200
         assert "data: " in r.text
 
-        # 跨账户/管理员访问他人任务 → 403
+        # 跨账户资源隐藏为 404，即使调用者是管理员。
         r = client.get(f"/api/tasks/{tid}/status", headers=ah)
-        assert r.status_code == 403
+        assert r.status_code == 404
 
         r = client.post("/api/auth/admin/disable", json={"user_id": uid}, headers=ah)
         assert r.status_code == 200

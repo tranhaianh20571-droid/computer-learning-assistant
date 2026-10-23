@@ -144,6 +144,8 @@ ALLOWED_FIELDS: FrozenSet[str] = frozenset(
         "platform",
         # Agent 轮次低基数计数（方案 S4：模型请求次数）
         "requests",
+        "retry_count",
+        "result_count",
         "first_chunk_ms",
         # 内容 trace 通道（ADR-022：仅内容事件可用；其余通道出现即被 sanitize 拒绝）
         "model_prompt",
@@ -282,6 +284,14 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "OCR 输出结构无效",
         ),
         ErrorCodeSpec(
+            "LOCAL_PARSE_INVALID", TaskStage.PARSE, False, True, AlertLevel.NONE,
+            "本地文本解析失败",
+        ),
+        ErrorCodeSpec(
+            "PPTX_SLIDE_TOO_LARGE", TaskStage.PARSE, False, True, AlertLevel.NONE,
+            "单张幻灯片及依赖超过提交上限",
+        ),
+        ErrorCodeSpec(
             "FIGURE_CROP_FAILED", TaskStage.FIGURE_CROP, True, True, AlertLevel.WARNING,
             "图块裁切失败",
         ),
@@ -293,6 +303,20 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "SEARCH_TIMEOUT", TaskStage.SEARCH, True, True, AlertLevel.WARNING,
             "联网搜索超时",
         ),
+        *[ErrorCodeSpec(code, TaskStage.SEARCH, retryable, True, AlertLevel.WARNING, description)
+          for code, retryable, description in (
+              ("SEARCH_CONNECTION_ERROR", True, "搜索连接失败"),
+              ("SEARCH_RATE_LIMITED", True, "搜索限流"),
+              ("SEARCH_CREDENTIAL_INVALID", False, "个人搜索凭据不可用"),
+              ("SEARCH_QUOTA_EXCEEDED", False, "个人搜索额度不足"),
+              ("SEARCH_PROVIDER_UNAVAILABLE", True, "搜索供应商不可用"),
+              ("SEARCH_OUTPUT_INVALID", False, "搜索响应契约无效"),
+              ("SEARCH_RESPONSE_TOO_LARGE", False, "搜索响应超过上限"),
+              ("SEARCH_REQUEST_REJECTED", False, "搜索请求被拒绝"),
+              ("SEARCH_CONFIG_UNAVAILABLE", False, "个人搜索配置未经有效探测"),
+              ("SEARCH_BUDGET_EXCEEDED", False, "搜索预算耗尽"),
+              ("SEARCH_INTERRUPTED", False, "搜索执行已中断，不可重放"),
+          )],
         ErrorCodeSpec(
             "MODEL_NOT_CONFIGURED", TaskStage.GENERATE, False, True, AlertLevel.NONE,
             "模型未配置",
@@ -329,6 +353,8 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "CLEANUP_OVERDUE", TaskStage.CLEANUP, True, False, AlertLevel.CRITICAL,
             "在线清理逾期",
         ),
+        ErrorCodeSpec("LOCAL_RESOURCE_FAILED", TaskStage.CLEANUP, True, True, AlertLevel.WARNING,
+            "本地资源维护失败"),
         ErrorCodeSpec(
             "TASK_LEASE_EXPIRED", TaskStage.SAVE, False, False, AlertLevel.WARNING,
             "任务租约过期，结果只能写诊断",
@@ -388,6 +414,22 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "路线结构无效（至少一门课程）",
         ),
         ErrorCodeSpec(
+            "PLANNING_TIME_BUDGET_EXCEEDED", TaskStage.GENERATE, False, True, AlertLevel.NONE,
+            "核心路径超出用户时间预算，需要裁剪或拆分扩展路径",
+        ),
+        ErrorCodeSpec(
+            "PLANNING_COVERAGE_GAP", TaskStage.GENERATE, False, True, AlertLevel.NONE,
+            "范围契约中的必需区域未被任何课程覆盖",
+        ),
+        ErrorCodeSpec(
+            "PLANNING_PREREQUISITE_GAP", TaskStage.GENERATE, False, True, AlertLevel.NONE,
+            "0 基础学习者的必要前置未进入计划或桥接",
+        ),
+        ErrorCodeSpec(
+            "PLANNING_REVIEW_REQUIRED", TaskStage.SAVE, False, True, AlertLevel.NONE,
+            "规划体检存在关键缺口，需要用户确认后才能使用",
+        ),
+        ErrorCodeSpec(
             "DUPLICATE_IDEMPOTENCY_KEY", TaskStage.SAVE, False, True, AlertLevel.NONE,
             "幂等键与既有请求冲突",
         ),
@@ -427,6 +469,7 @@ ERROR_CODES: Mapping[str, ErrorCodeSpec] = {
             "播放位置保存的 client_seq 已过期（单调校验拒绝旧请求）",
         ),
         ErrorCodeSpec("TASK_EXPIRED", TaskStage.SAVE, True, True, AlertLevel.WARNING, "任务总截止已过"),
+        ErrorCodeSpec("TASK_STORAGE_BUSY", TaskStage.SAVE, True, False, AlertLevel.WARNING, "任务存储暂忙"),
         ErrorCodeSpec("TASK_DEADLINE_EXCEEDED", TaskStage.SAVE, True, True, AlertLevel.WARNING, "原生执行期限围栏拒绝"),
         ErrorCodeSpec("WORKER_RECOVERY_FAILED", TaskStage.SAVE, False, True, AlertLevel.CRITICAL, "有界终态恢复写入失败"),
         ErrorCodeSpec("WORKER_RECOVERY_EXHAUSTED", TaskStage.SAVE, False, True, AlertLevel.CRITICAL, "终态恢复上限耗尽"),
@@ -664,6 +707,32 @@ EVENT_REGISTRY: Mapping[str, EventSpec] = {
             description="能力配置变更",
         ),
         EventSpec(
+            "search.request.completed", (LogEventType.RUNTIME,),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms"}),
+            frozenset({"task_id", "attempt", "config_id", "config_version", "capability", "query_id", "requests", "retry_count", "result_count", "trace_id", "span_id"}),
+            user_visible=False, description="搜索请求完成，不含搜索正文",
+        ),
+        EventSpec(
+            "search.request.failed", (LogEventType.RUNTIME,),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms", "error_code"}),
+            frozenset({"task_id", "attempt", "config_id", "config_version", "capability", "query_id", "requests", "retry_count", "trace_id", "span_id"}),
+            user_visible=False, description="搜索请求失败，受控错误码",
+        ),
+        EventSpec(
+            "search.execution.completed", (LogEventType.RUNTIME,),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms", "reason"}),
+            frozenset({"task_id", "attempt", "config_id", "config_version", "capability", "query_id", "requests", "retry_count", "result_count", "error_code", "trace_id", "span_id"}),
+            user_visible=False, description="搜索阶段终止及共享预算摘要",
+        ),
+        EventSpec(
+            "search.execution",
+            (LogEventType.AUDIT,),
+            _COMMON_REQUIRED | frozenset({"actor_id", "object_type", "object_id", "result"}),
+            frozenset({"target_actor_id", "reason", "trace_id"}),
+            user_visible=False,
+            description="搜索后台执行或拒绝，不表示用户确认",
+        ),
+        EventSpec(
             "external.disclosure.confirmed",
             (LogEventType.AUDIT,),
             _COMMON_REQUIRED
@@ -781,11 +850,15 @@ EVENT_REGISTRY: Mapping[str, EventSpec] = {
             _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms", "error_code"}),
             frozenset({"trace_id", "task_id", "config_id", "config_version", "first_chunk_ms"}),
             user_visible=False, description="逐次供应商 HTTP 请求耗时，无内容字段"),
+        EventSpec("model.output.validation", (LogEventType.RUNTIME,),
+            _COMMON_REQUIRED | frozenset({"stage", "status", "reason", "error_code"}),
+            frozenset({"task_id", "attempt", "config_id", "config_version", "capability"}),
+            user_visible=False, description="受控输出约束重试/保守修复，不含原始校验消息或正文"),
         EventSpec(
             "model.call.completed",
             (LogEventType.RUNTIME, LogEventType.METRIC),
             _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms"}),
-            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "capability", "reason", "requests"}),
+            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "config_version", "capability", "reason", "requests"}),
             user_visible=False,
             description="模型/生成调用成功（聚合指标，无内容字段）",
         ),
@@ -793,7 +866,7 @@ EVENT_REGISTRY: Mapping[str, EventSpec] = {
             "model.call.failed",
             (LogEventType.RUNTIME, LogEventType.METRIC),
             _COMMON_REQUIRED | frozenset({"stage", "status", "duration_ms", "error_code"}),
-            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "capability", "reason", "requests"}),
+            frozenset({"trace_id", "task_id", "attempt", "mode", "config_id", "config_version", "capability", "reason", "requests"}),
             user_visible=False,
             description="模型/生成调用失败（聚合指标，无内容字段）",
         ),

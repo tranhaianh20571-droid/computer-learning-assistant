@@ -54,7 +54,12 @@ def env(database: Database):
     slice0 = Slice0State(database, PgAuditLog(database))
     app.state.slice0 = slice0
     client = TestClient(app)
-    return {"client": client, "state": state, "container": container, "database": database}
+    try:
+        yield {"client": client, "state": state, "container": container, "database": database}
+    finally:
+        # The dispatcher thread is global; stop it before the next module reuses the DB.
+        state.planning.background.close()
+        client.close()
 
 
 def _setup_route(env) -> tuple[str, str]:
@@ -137,11 +142,12 @@ class TestPlanningWorker:
 
         # 任务事件序列：retrieve/search 阶段成功事件（经事件补取接口读取）
         events_resp = env["client"].get(
-            f"/tasks/{task_id}/events.json",
-            headers={"X-Actor-Id": user_id},
+            f"/api/tasks/{task_id}/sse",
+            headers=auth_headers(token),
         )
         assert events_resp.status_code == 200
-        stages = {e["stage"] for e in events_resp.json()["events"]}
+        stages = {json.loads(line.removeprefix("data: "))["stage"]
+            for line in events_resp.text.splitlines() if line.startswith("data: ")}
         assert "retrieve" in stages and "search" in stages and "generate" in stages
 
     def test_task_creation_idempotent(self, env) -> None:
@@ -172,20 +178,19 @@ class TestPlanningWorker:
 
         body = _run_with_intake(env["client"], token, task_id)
         assert body["task_status"] == "partial"
-        assert body["wait_state"] == "awaiting_search_decision"
+        assert "wait_state" not in body
 
         state = env["client"].get(
             f"/api/planning/tasks/{task_id}", headers=auth_headers(token)
         ).json()
-        assert state["wait_state"] == "awaiting_search_decision"
+        assert state["wait_state"] is None
 
-        # 决策：离线继续 → 任务走通（不伪造外部结果）
+        # New search failures do not create a learner-facing decision state.
         r = env["client"].post(
             f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(token),
             json={"decision": "offline_continue"},
         )
-        assert r.status_code == 200, r.text
-        assert r.json()["task_status"] == "partial"
+        assert r.status_code == 409
         # manifest 无 external 引用
         from sqlalchemy import select
 
@@ -215,16 +220,15 @@ class TestPlanningWorker:
                   "planning_scope": "route", "target_route_id": route_id},
         ).json()["task_id"]
         body = _run_with_intake(env["client"], token, task_id)
-        assert body["wait_state"] == "awaiting_search_decision"
+        assert "wait_state" not in body
 
-        # 适配器恢复后重试
+        # Recovery affects future tasks, not a completed task's search slot.
         search.fail = None
         r = env["client"].post(
             f"/api/planning/tasks/{task_id}/decision", headers=auth_headers(token),
             json={"decision": "retry"},
         )
-        assert r.status_code == 200, r.text
-        assert r.json()["task_status"] == "partial"
+        assert r.status_code == 409
 
     def test_scope_ambiguity_waits_then_decision(self, env) -> None:
         _, token, route_id = _setup_route(env)
@@ -610,3 +614,131 @@ def test_empty_refinement_prompt_stops_before_model(env):
     with pytest.raises(PlanningError) as exc:
         env["state"].planning._refine_course_units(None, None, None, {"template": ""})
     assert exc.value.code == "PROMPT_UNAVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# v3 质量门：覆盖契约 → 体检 → 用户确认
+# ---------------------------------------------------------------------------
+
+COVERAGE_OK_PAYLOAD = {
+    "scope_contract": {
+        "target_outcome": "能独立完成一个可上线的网页应用",
+        "in_scope": ["环境配置", "HTML", "CSS", "JavaScript", "部署"],
+        "out_of_scope": ["后端服务"],
+        "assumptions": ["无编程基础"],
+        "time_budget": {"weeks": 8, "hours_per_week": 6, "total_hours": 48},
+    },
+    "coverage_areas": [
+        {"area": "环境配置", "depth": "基础", "search_query": "前端开发环境配置", "required": True},
+        {"area": "HTML", "depth": "基础", "search_query": "HTML 语义化", "required": True},
+        {"area": "CSS", "depth": "核心", "search_query": "CSS 布局", "required": True},
+        {"area": "JavaScript", "depth": "核心", "search_query": "JavaScript 入门", "required": True},
+        {"area": "部署", "depth": "核心", "search_query": "前端部署上线", "required": True},
+    ],
+    "prerequisite_policy": {
+        "assumed_general": ["电脑操作"],
+        "bridge_required": ["终端", "开发者工具"],
+        "notes": "0 基础从环境开始",
+    },
+    "status": "ready",
+}
+
+ROUTE_QUALITY_OK = {
+    "title": "前端开发基础路线",
+    "stages": [{"title": "起步", "courses": [
+        {"title": "开发环境与 HTML", "goal": "能配置环境并写语义化页面", "units": [{
+            "title": "环境与语义化", "lessons": [
+                {"title": "终端与编辑器配置", "goal": "能配置本地环境", "estimated_minutes": 50, "path_role": "core"},
+                {"title": "开发者工具与调试", "goal": "能用开发者工具排查问题", "estimated_minutes": 50, "path_role": "core"},
+                {"title": "HTML 语义化", "goal": "能写语义化页面", "estimated_minutes": 50, "path_role": "core"},
+            ],
+        }], "prerequisites": []},
+        {"title": "CSS 与 JavaScript", "goal": "能完成响应式布局与交互", "units": [{
+            "title": "样式与交互", "lessons": [
+                {"title": "CSS 盒模型与布局", "goal": "能完成响应式排版", "estimated_minutes": 50, "path_role": "core"},
+                {"title": "JavaScript 语法与 DOM", "goal": "能实现页面交互", "estimated_minutes": 50, "path_role": "core"},
+            ],
+        }], "prerequisites": []},
+        {"title": "部署上线", "goal": "能把项目发布到公网", "units": [{
+            "title": "发布", "lessons": [
+                {"title": "构建与托管平台部署", "goal": "能完成公网发布", "estimated_minutes": 50, "path_role": "core"},
+            ],
+        }], "prerequisites": []},
+    ]}],
+    "prerequisites": [{"from_index": 0, "to_index": 1}, {"from_index": 1, "to_index": 2}],
+    "coverage_map": [
+        {"area": "环境配置", "course_titles": ["开发环境与 HTML"]},
+        {"area": "HTML", "course_titles": ["开发环境与 HTML"]},
+        {"area": "CSS", "course_titles": ["CSS 与 JavaScript"]},
+        {"area": "JavaScript", "course_titles": ["CSS 与 JavaScript"]},
+        {"area": "部署", "course_titles": ["部署上线"]},
+    ],
+    "assumptions": ["无编程基础"],
+}
+
+REVIEW_BLOCKED_PAYLOAD = {
+    "verdict": "blocked",
+    "dimensions": {
+        "coverage": "fail", "prerequisites": "pass", "sequencing": "pass",
+        "actionability": "pass", "specificity": "pass", "transparency": "pass",
+    },
+    "issues": [{
+        "dimension": "coverage", "severity": "critical",
+        "message": "部署模块缺少独立验收，无法确认上线能力。",
+        "node_path": "stage_0.course_2",
+    }],
+    "repairs": [],
+    "acknowledgement_required": True,
+}
+
+
+class QualityAwareAdapter(SyntheticModelAdapter):
+    """按提示词区分覆盖规划/路线/评审输出，模拟 v3 全链路。"""
+
+    def generate(self, messages, **options):
+        self.generate_calls.append(options)
+        import json
+
+        text = "\n".join(str(message.get("content", "")) for message in messages)
+        if "覆盖设计器" in text:
+            payload = COVERAGE_OK_PAYLOAD
+        elif "独立的学习规划评审" in text:
+            payload = REVIEW_BLOCKED_PAYLOAD
+        elif "课程名称：" in text:
+            payload = OUTLINE_OK_PAYLOAD
+        else:
+            payload = ROUTE_QUALITY_OK
+        if "response_format" in options:
+            return {"content": json.dumps(payload, ensure_ascii=False)}
+        if "tools" in options:
+            return {"content": "", "tool_arguments": json.dumps(payload, ensure_ascii=False)}
+        return {"content": f"```json\n{json.dumps(payload, ensure_ascii=False)}\n```"}
+
+
+def test_quality_gate_requires_acknowledgement_before_confirm(env) -> None:
+    user_id, token, route_id = _setup_route(env)
+    env["container"]["model"] = QualityAwareAdapter()
+    env["container"]["search"] = SyntheticSearchAdapter()
+    task_id = env["client"].post("/api/planning/tasks", headers=auth_headers(token), json={
+        "idempotency_key": uuid.uuid4().hex, "task_kind": "route_generate",
+        "planning_scope": "route", "target_route_id": route_id,
+        "constraints": {"time_budget": {"weeks": 8, "hours_per_week": 6}},
+    }).json()["task_id"]
+    body = run_route_generate(env["client"], token, task_id)
+    assert body["task_status"] == "succeeded", body
+    assert body["quality"]["review"]["acknowledgement_required"] is True
+    draft = env["state"].drafts.get_draft(body["draft"]["draft_id"], actor_id=user_id)
+    assert draft["coverage"]["coverage_ratio"] == 1.0
+    assert draft["review"]["verdict"] == "blocked"
+    response = env["client"].post(f"/api/planning/drafts/{draft['draft_id']}/confirm",
+        headers=auth_headers(token), json={"revision": draft["revision"], "idempotency_key": uuid.uuid4().hex})
+    assert response.status_code == 409
+    error = response.json()
+    assert error.get("error_code") == "PLANNING_REVIEW_REQUIRED" or (
+        isinstance(error.get("detail"), dict)
+        and error["detail"].get("error_code") == "PLANNING_REVIEW_REQUIRED"
+    )
+    response = env["client"].post(f"/api/planning/drafts/{draft['draft_id']}/confirm",
+        headers=auth_headers(token), json={"revision": draft["revision"], "idempotency_key": uuid.uuid4().hex,
+                                           "acknowledge_issues": True})
+    assert response.status_code == 200, response.text

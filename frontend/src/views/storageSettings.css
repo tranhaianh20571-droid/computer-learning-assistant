@@ -1,0 +1,35 @@
+.storage-settings{max-width:880px;color:var(--text,#242424)}
+.storage-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
+.storage-heading h2{font-size:22px;margin:0 0 8px}.storage-heading p{color:#666;margin:0;font-size:14px}
+.storage-settings button{display:inline-flex;align-items:center;justify-content:center;gap:8px}
+.storage-settings h3{font-size:17px;margin:24px 0 16px}
+.storage-settings h4{font-size:14px}.storage-settings p{font-size:14px;line-height:1.65}
+.storage-summary{display:flex;gap:40px;border-block:1px solid #dedede;padding:20px 0;margin-bottom:24px;flex-wrap:wrap}
+.storage-summary>div{display:flex;align-items:flex-start;gap:12px;font-size:13px;min-width:180px}
+.storage-summary strong{display:block;font-size:21px;font-weight:600;margin:6px 0}
+.storage-summary small,.storage-settings td small{display:block;color:#6b6b6b;font-size:12px}
+.storage-table-wrap{overflow-x:auto}.storage-settings table{border-collapse:collapse;width:100%;font-size:14px;text-align:left}
+.storage-settings caption{text-align:left;font-size:16px;font-weight:600;padding:12px 0}
+.storage-settings th{font-size:12px;color:#666;font-weight:500;background:#f6f7f7}
+.storage-settings th,.storage-settings td{padding:12px 10px;border-bottom:1px solid #e8e8e8;white-space:nowrap}
+.storage-settings th:nth-child(n+2),.storage-settings td:nth-child(n+2){text-align:right}
+.storage-actions{display:flex;flex-wrap:wrap;gap:10px;margin:20px 0}
+.storage-policy,.storage-location,.storage-jobs{border-top:1px solid #ddd;margin-top:28px;padding-bottom:20px}
+.storage-check{display:flex;align-items:center;gap:10px;font-size:14px;margin:14px 0}
+.storage-check input{width:16px;height:16px;accent-color:#21725f}
+.storage-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 24px;margin:24px 0}
+.storage-fields label,.storage-destination{display:flex;flex-direction:column;gap:8px;font-size:13px}
+.storage-fields input,.storage-destination input{height:38px;border:1px solid #bbb;border-radius:4px;padding:6px 10px;min-width:0;width:100%;box-sizing:border-box;background:#fff;color:#222}
+.storage-location dl{font-size:13px}.storage-location dt{color:#666;margin-top:16px}
+.storage-location dd{margin:6px 0 18px;overflow-wrap:anywhere}.storage-location p{overflow-wrap:anywhere}
+.storage-resource-row{cursor:pointer}.storage-resource-row:hover{background:#f6f7f7}
+.capabilities-page .storage-settings .storage-resource-info{display:block;text-align:left;background:transparent;border:0;padding:0;color:inherit;font:inherit;cursor:pointer}
+.capabilities-page .storage-settings .storage-delete{background:transparent;border:1px solid #dedede;width:40px;height:40px;min-height:40px;padding:0;border-radius:4px;color:#a62a2a;cursor:pointer;flex-shrink:0}
+.storage-delete svg{display:block;flex-shrink:0}
+.storage-delete:hover:not(:disabled){background:#fff0f0;border-color:#d7aaaa}
+.storage-delete:disabled{opacity:.5;cursor:wait}
+.storage-resource-info:focus-visible,.storage-delete:focus-visible{outline:2px solid #2463cf;outline-offset:3px}
+.storage-jobs>div{display:flex;gap:12px;flex-wrap:wrap;justify-content:space-between;border-bottom:1px solid #eee;padding:12px 0;font-size:13px}
+.storage-error{color:#a62a2a}.storage-note{color:#666}
+@media(max-width:600px){.storage-fields{grid-template-columns:1fr}.storage-summary{gap:22px}.storage-heading h2{font-size:20px}
+.storage-settings th,.storage-settings td{padding:10px 6px}.storage-actions .btn{font-size:13px}}

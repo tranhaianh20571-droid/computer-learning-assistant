@@ -10,12 +10,12 @@ from pydantic import BaseModel, EmailStr, Field
 
 from ..logging_audit.audit import AuditWriteError
 from .guest import resolve_user_or_guest
-from .service import AuthError, AuthService
+from .service import AuthError, AuthService, MIN_PASSWORD_LEN, MAX_PASSWORD_LEN
 
 
 class RegisterIn(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=15, max_length=128)
+    password: str = Field(min_length=MIN_PASSWORD_LEN, max_length=MAX_PASSWORD_LEN)
     display_name: str = Field(default="", max_length=100)
 
 
@@ -35,7 +35,7 @@ class PasswordResetRequestIn(BaseModel):
 
 class PasswordResetIn(BaseModel):
     token: str
-    new_password: str = Field(min_length=15, max_length=128)
+    new_password: str = Field(min_length=MIN_PASSWORD_LEN, max_length=MAX_PASSWORD_LEN)
 
 
 class ApproveIn(BaseModel):
@@ -70,10 +70,12 @@ def create_auth_router(service: AuthService) -> APIRouter:
     @router.post("/register", status_code=201)
     def register(body: RegisterIn, request: Request) -> dict:
         try:
-            return service.register(
+            result = service.register(
                 body.email, body.password, body.display_name,
                 trace_id=getattr(request.state, "trace_id", None),
+                open_registration=True,
             )
+            return result
         except AuthError as exc:
             raise HTTPException(status_code=exc.status, detail={"error_code": exc.code, "message": exc.message})
 
@@ -87,7 +89,8 @@ def create_auth_router(service: AuthService) -> APIRouter:
     @router.post("/login")
     def login(body: LoginIn, request: Request, response: Response) -> dict:
         try:
-            info, raw_token = service.login(body.email, body.password, trace_id=getattr(request.state, "trace_id", None))
+            info, raw_token = service.login(body.email, body.password,
+                trace_id=getattr(request.state, "trace_id", None), open_registration=True)
         except AuthError as exc:
             raise HTTPException(status_code=exc.status, detail={"error_code": exc.code, "message": exc.message})
         resp = {
@@ -174,25 +177,17 @@ def create_auth_router(service: AuthService) -> APIRouter:
 
     @router.get("/guest")
     def guest(request: Request) -> dict:
-        """访客会话引导：有效登录态返回真实用户，否则签发/复用访客 Cookie。
-
-        前端在 /me 返回 401 后先调用本接口，确保后续并发请求共享同一访客身份
-        （Cookie 由 slice0 的 guest_cookie 中间件写入响应）。
-        """
-        user = resolve_user_or_guest(request, service)
-        return {
-            "user_id": user.user_id,
-            "email": user.email,
-            "role": user.role,
-            "is_admin": bool(user.is_admin),
-            "status": user.status,
-            "display_name": user.display_name,
-            "is_guest": bool(getattr(user, "is_guest", False)),
-        }
+        raise HTTPException(410, detail={"error_code": "SESSION_INVALID", "message": "访客入口已停用，请登录。"})
 
     @router.post("/password-reset/request")
     def reset_request(body: PasswordResetRequestIn, request: Request) -> dict:
-        return service.request_password_reset(body.email, trace_id=getattr(request.state, "trace_id", None))
+        from .mail import delivery_settings, send_token
+        delivery_settings()
+        result = service.request_password_reset(body.email, trace_id=getattr(request.state, "trace_id", None))
+        token = result.get("reset_token")
+        if token:
+            send_token(str(body.email), token, "reset")
+        return {"ok": True}
 
     @router.post("/password-reset/confirm")
     def reset_confirm(body: PasswordResetIn, request: Request) -> dict:

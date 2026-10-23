@@ -10,8 +10,12 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator, model_validator
-from .board_blocks import BoardBlock, TeachingBeat, merge_beats, presentation_blocks
+from typing import Literal
+
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from .board_blocks import BoardBlock, TeachingBeat, SourceFocus, merge_beats, presentation_blocks
+from ..characters.expression import PersonaTraits
+from .examples import TeachingExample, ExampleRejection
 
 from ..planning.errors import error
 from ..planning.outputs import BOARD_ELEMENT_WHITELIST
@@ -48,7 +52,7 @@ class BoardDeclaration(BaseModel):
     """板书声明（受限 JSON）。元素种类白名单：rect/ellipse/text/arrow/line。"""
 
     kind: str = Field(default="board")
-    format_version: int = Field(default=1, ge=1, le=2)
+    format_version: int = Field(default=1, ge=1, le=3)
     title: str = Field(min_length=1, max_length=80)
     blocks: list[BoardBlock] = Field(default_factory=list,max_length=12)
     points: list[str] = Field(default_factory=list, max_length=BOARD_MAX_POINTS)
@@ -57,6 +61,8 @@ class BoardDeclaration(BaseModel):
     nodes: list[BoardNode] = Field(default_factory=list, max_length=BOARD_MAX_NODES)
     edges: list[BoardEdge] = Field(default_factory=list, max_length=BOARD_MAX_EDGES)
     original_refs: list[OriginalRef] = Field(default_factory=list, max_length=ORIGINAL_REF_LIMIT)
+    source_focus: SourceFocus | None = None
+    _resolved_source: dict | None = PrivateAttr(default=None)
     reveal_ms: list[int] = Field(default_factory=list)  # 与 points 对齐的呈现时标
 
     @model_validator(mode="after")
@@ -73,16 +79,29 @@ class BoardDeclaration(BaseModel):
         return v
 
 
+class KnowledgeRecapCandidate(BaseModel):
+    knowledge_point_id: str = Field(min_length=1, max_length=64)
+    summary: str = Field(min_length=1, max_length=200)
+    source_step_refs: list[int] = Field(min_length=1, max_length=24)
+
+
 class StepCandidate(BaseModel):
     """单步候选：讲解文字 + 板书声明（同版本绑定）。"""
 
+    alignment_version: Literal[0, 1] = 0
     beats: list[TeachingBeat] = Field(default_factory=list,max_length=6)
     text: str = Field(min_length=STEP_MIN_CHARS, max_length=STEP_HARD_MAX_CHARS)
     title: str = Field(min_length=1, max_length=80)
     board: BoardDeclaration
     phase: str = Field(default="", max_length=24)
     covered_goal_ids: list[str] = Field(default_factory=list, max_length=4)
+    covered_scope_capability_ids: list[str] = Field(default_factory=list, max_length=240)
     lesson_finished: bool = False
+    knowledge_recap: KnowledgeRecapCandidate | None = None
+    persona_traits: PersonaTraits | None = None
+    examples: list[TeachingExample] = Field(default_factory=list, max_length=2)
+    example_rejections: list[ExampleRejection] = Field(default_factory=list, max_length=40)
+    _example_review: list[dict] = PrivateAttr(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -97,6 +116,10 @@ class StepCandidate(BaseModel):
         if self.beats and self.text != "".join(b.text for b in self.beats):
             raise ValueError("text must equal concatenated teaching beat text")
         merge_beats(self.board,self.beats)
+        if self.alignment_version == 1:
+            self.board.format_version = 3
+            from .board_alignment import scene_beats
+            scene_beats(self)
         return self
 
     @field_validator("text")
@@ -117,9 +140,11 @@ class LessonPlanCandidate(BaseModel):
 class FollowupCandidate(BaseModel):
     """追问回答：纯文字 + 可选板书。"""
 
+    alignment_version: Literal[0, 1] = 0
     beats: list[TeachingBeat] = Field(default_factory=list,max_length=6)
     answer: str = Field(min_length=1, max_length=2000)
     board: BoardDeclaration | None = None
+    code_instruction: str = Field(default="", max_length=240)
 
     @model_validator(mode="before")
     @classmethod
@@ -135,6 +160,11 @@ class FollowupCandidate(BaseModel):
         if self.beats and any(b.blocks for b in self.beats) and self.board is None:
             self.board=BoardDeclaration(title="追问板书")
         merge_beats(self.board,self.beats)
+        if self.alignment_version == 1:
+            if self.board:
+                self.board.format_version = 3
+            from .board_alignment import scene_beats
+            scene_beats(self)
         return self
 
 
@@ -242,7 +272,10 @@ def declaration_to_scene(declaration: BoardDeclaration, *, layout: dict | None =
         if el["type"] not in BOARD_ELEMENT_WHITELIST:
             raise error("BOARD_SCHEMA_INVALID", f"element type {el['type']} not allowed")
     return {
-        "presentation": {"version":2,"title":declaration.title,"blocks":presentation_blocks(declaration)},
+        "source_focus": declaration.source_focus.model_dump() if declaration.source_focus else None,
+        "pdf_focus": declaration._resolved_source,
+        "presentation": {"version":declaration.format_version if declaration.format_version >= 2 else 2,
+                         "title":declaration.title,"blocks":presentation_blocks(declaration)},
         "elements": elements,
         "reveal_ms": declaration.reveal_ms,
         "original_refs": [r.model_dump() for r in declaration.original_refs],

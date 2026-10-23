@@ -21,6 +21,10 @@ from test_v2_intake import database, env as interview_env, run, read, answer
 def env(interview_env):
     yield interview_env
     interview_env[1].planning.background.close()
+    with interview_env[1].db.session() as sess:
+        for row in sess.scalars(select(PlanningTaskStateRow).where(
+                PlanningTaskStateRow.owner_user_id == interview_env[2])):
+            row.background_enabled = False
 
 
 def endpoint(env, suffix):
@@ -40,7 +44,7 @@ def test_current_is_read_only_and_owner_scoped(env):
     run(env)
     for _ in range(3):
         result=env[0].get('/api/planning/current',headers=env[3]).json()['planning']
-        assert result['task_id']==env[4] and len(result['intake']['questions'])==4
+        assert result['task_id']==env[4] and len(result['intake']['questions'])==5
     assert len(env[5].interview_contexts)==1
     _,token=make_user(env[0],env[1].db)
     assert env[0].get('/api/planning/current',headers=auth_headers(token)).json()=={'planning':None}
@@ -85,18 +89,41 @@ def fail_task(env,code='MODEL_PROVIDER_ERROR'):
         state=sess.get(TaskStateRow,env[4]);state.error_code=code;state.status='failed'
 
 
+def test_successful_interview_starts_a_new_retry_episode(env, monkeypatch):
+    monkeypatch.setattr(env[1].planning.background, "start", lambda: None)
+    fail_task(env)
+    planning = env[1].planning
+    first = planning.workspace.resume(env[4], env[2], automatic=True, dispatch=False)
+    assert first["auto_retry_count"] == 1
+    planning.run_task(env[4])
+    assert read(env)["wait_state"] == "awaiting_intake"
+    assert read(env)["auto_retry_count"] == 0
+    with env[1].db.session() as session:
+        session.get(PlanningTaskStateRow, env[4]).auto_retry_count = 5
+    assert answer(env).status_code == 200
+    assert read(env)["auto_retry_count"] == 0
+    fail_task(env)
+    second = planning.workspace.resume(env[4], env[2], automatic=True, dispatch=False)
+    assert second["auto_retry_count"] == 1
+
+
 def test_automatic_retry_budget_is_durable_and_concurrent(env,monkeypatch):
     fail_task(env);monkeypatch.setattr(env[1].planning.background,'start',lambda:None)
     with ThreadPoolExecutor(max_workers=2) as pool:
         responses=list(pool.map(lambda _:env[1].planning.workspace.resume(env[4],env[2],automatic=True),range(2)))
     assert all(r['auto_retry_count']==1 for r in responses)
     assert read(env)['generation']==2
+    for count in range(2, 6):
+        fail_task(env)
+        snapshot = env[1].planning.workspace.resume(env[4],env[2],automatic=True)
+        assert snapshot['auto_retry_count'] == count and snapshot['task_status'] == 'queued'
     fail_task(env)
     for _ in range(3):
         env[1].planning.workspace.resume(env[4],env[2],automatic=True)
-    assert read(env)['task_status']=='failed' and read(env)['generation']==2
+    assert read(env)['task_status']=='failed' and read(env)['generation']==6
+    assert read(env)['auto_retry_count']==5 and read(env)['auto_retry_exhausted']
     env[1].planning.workspace.resume(env[4],env[2],automatic=False)
-    assert read(env)['task_status']=='queued' and read(env)['auto_retry_count']==1
+    assert read(env)['task_status']=='queued' and read(env)['auto_retry_count']==5
 
 
 def test_credentials_failure_never_auto_retries(env,monkeypatch):

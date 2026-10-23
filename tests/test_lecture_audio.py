@@ -43,7 +43,7 @@ def prepared(env,monkeypatch,subtitle=True,on_synthesize=None):
             def synthesize(self,text):
                 calls.append(text)
                 if on_synthesize:on_synthesize(configs,view,user)
-                return {"audio_hex":b"synthetic-audio".hex(),"subtitle":[{"text":text,"begin_ms":0,"end_ms":1000}] if subtitle else None}
+                return {"audio_hex":b"synthetic-audio".hex(),"subtitle":[{"text":text[:3] if subtitle=="partial" else text,"begin_ms":0,"end_ms":1000}] if subtitle else None}
             def close(self):options["client"].close()
         return Adapter()
     monkeypatch.setattr("backend.teaching.tts_config.build_adapter",build)
@@ -110,13 +110,18 @@ def test_config_change_during_synthesis_cannot_publish(env,monkeypatch):
         assert not sess.scalar(select(AudioAssetRow.audio_id).where(AudioAssetRow.conversation_id==conv))
 
 
-def test_missing_subtitle_is_visible_and_not_playable(env,monkeypatch):
-    start,configs,view,disclosures,calls=prepared(env,monkeypatch,subtitle=False)
+@pytest.mark.parametrize("subtitle", [False, "partial"])
+def test_missing_subtitle_is_visible_and_not_playable(env,monkeypatch,subtitle):
+    start,configs,view,disclosures,calls=prepared(env,monkeypatch,subtitle=subtitle)
     client,state,user,headers=env;conv=start["conversation_id"]
     task=client.post(f"/api/teaching/{conv}/audio",headers=headers,json={"step_no":1}).json()["task_id"]
     client.post(f"/api/teaching/tasks/{task}/run",headers=headers)
     saved=client.get(f"/api/teaching/{conv}",headers=headers).json()["steps"][0]
     assert saved["audio_status"]=="invalid" and saved["audio_error"]=="subtitle_missing" and not saved["audio_ready"]
+    # Legacy early synthesis rows can carry the digest of an empty draft.
+    with state.db.session() as sess:
+        audio=sess.scalar(select(AudioAssetRow).where(AudioAssetRow.conversation_id==conv))
+        audio.text_sha256="0"*64
     monkeypatch.setattr("backend.teaching.tts_config.build_adapter",lambda protocol,**options:
         SimpleNamespace(synthesize=lambda text:{"audio_hex":b"synthetic-retry".hex(),"subtitle":[{"text":text,"begin_ms":0,"end_ms":1000}]},close=options["client"].close))
     retry=client.post(f"/api/teaching/tasks/{task}/run",headers=headers)

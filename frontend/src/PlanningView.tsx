@@ -1,20 +1,41 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import CourseCover from "./ui/CourseCover";
+import { RefreshCw } from "lucide-react";
 import { api } from "./api";
 import { usePlanningAnswerDraft } from "./hooks/usePlanningAnswerDraft";
 import MindMapCanvas, { type NodeChange, type NodeOffsets } from "./excalidraw/MindMapCanvas";
 import { applyMindMapChanges } from "./lib/mindmapEditing";
 import Dialog from "./ui/Dialog";
 import PlanningDialogue from "./ui/PlanningDialogue";
+import GenerationProgress from "./ui/GenerationProgress";
 import { planningMatchLink } from "./lib/learningLinks";
-import { ERROR_TEXT, errText } from "./lib/errors";
+import { errText } from "./lib/errors";
+
+const MODEL_PREPARATION_ERRORS = new Set(["DISCLOSURE_REQUIRED", "DISCLOSURE_EXPIRED"]);
+const MODEL_SETTINGS_ERRORS = new Set([
+  "DISCLOSURE_REVOKED", "CONFIG_NOT_FOUND", "MODEL_CREDENTIAL_INVALID", "CREDENTIAL_INVALID",
+  "MODEL_CAPABILITY_UNAVAILABLE", "CAPABILITY_UNAVAILABLE", "CONNECTOR_OFFLINE", "CONNECTOR_REVOKED",
+]);
+const REFRESH_ERRORS = new Set(["ACCESS_DENIED", "SESSION_INVALID", "USER_NOT_FOUND", "TASK_NOT_FOUND", "STATE_INVALID"]);
+
+function planningFailure(error: { code?: unknown; status?: number }) {
+  const code = typeof error?.code === "string" ? error.code.toUpperCase()
+    : error?.status === 401 ? "SESSION_INVALID" : error?.status === 403 ? "ACCESS_DENIED" : "";
+  const text: Record<string, string> = {
+    DISCLOSURE_REQUIRED: "需要重新准备当前模型后继续生成。",
+    DISCLOSURE_EXPIRED: "本次模型使用已过期，可以使用当前模型继续生成。",
+    DISCLOSURE_REVOKED: "本次规划的模型使用已被撤销，请检查模型设置。",
+    CONFIG_NOT_FOUND: "当前没有可用的内容模型，请检查模型设置。",
+    SESSION_INVALID: "当前会话已失效，请刷新页面后继续。",
+  };
+  return { code, text: text[code] || errText({ code, message: "生成未完成，请稍后重试。" }) };
+}
 
 /**
  * 课程规划工作台（v2 三态：访谈 → 生成 → 草稿）：
- * - intake：AI生成4～6题，选择／补充／跳过，完整历史由服务端保存；
+ * - intake：四至六道模型问题加一道时间预算必答题，完整历史由服务端保存；
  * - generating：任务运行横幅（长任务，请勿刷新）；内部 ID（task_id/draft_id）不外显；
  * - draft：左栏提问与反馈 + 只读画布（草稿生成后直接预览导图，不必先确认）；
- * - 等待态（范围澄清[跳过范围题时的回落] / 搜索决策）以 note 呈现。
+ * - 范围澄清保留原有访谈回落；搜索由后台自动执行和降级，不要求用户决策。
  */
 
 type Draft = {
@@ -23,6 +44,8 @@ type Draft = {
   target_id: string;
   revision: number;
   content: any;
+  coverage?: any;
+  review?: any;
   saved_state: string;
   locked?: boolean;
 };
@@ -42,6 +65,23 @@ function normalizeQaEntry(e: any): QaEntry | null {
 }
 
 /** 访谈问卷：选项卡网格（单选/多选）+ 跳过 + 自由补充 */
+function TimeBudgetChoice({label,unit,values,value,min,max,step,onChange}:{
+  label:string;unit:string;values:number[];value:any;min:number;max:number;step:number|string;onChange:(value:number|"")=>void;
+}) {
+  const [custom,setCustom]=useState(value!==undefined&&value!==""&&!values.includes(value));
+  return <div className="stack" role="group" aria-label={label}>
+    <strong>{label}</strong>
+    <div className="opt-grid">
+      {values.map(number=><button key={number} type="button" className={`opt-card${!custom&&value===number?" on":""}`}
+        aria-pressed={!custom&&value===number} onClick={()=>{setCustom(false);onChange(number);}}><b>{number}{unit}</b></button>)}
+      <button type="button" className={`opt-card other${custom?" on":""}`} aria-pressed={custom}
+        onClick={()=>{setCustom(!custom);onChange("");}}>都不太符合？自己补充</button>
+    </div>
+    {custom&&<input className="inp" type="number" required min={min} max={max} step={step}
+      aria-label={label} value={value??""} onChange={event=>onChange(event.target.value===""?"":Number(event.target.value))}/>}
+  </div>;
+}
+
 function IntakeForm({ intake, onDecide, busy, taskId, ownerId, answerDraft, answerRevision }: {
   intake: any; onDecide: (answers: any[], log: QaEntry[]) => void; busy: boolean;
   taskId: string; ownerId: string; answerDraft: any[]; answerRevision: number;
@@ -52,20 +92,38 @@ function IntakeForm({ intake, onDecide, busy, taskId, ownerId, answerDraft, answ
   const freetext: Record<string,string> = Object.fromEntries(saved.answers.filter(a=>a.editing_free||a.free_text).map(a=>[a.question_id,a.free_text||'']));
   const skipped: Record<string,boolean> = Object.fromEntries(saved.answers.map(a=>[a.question_id,!!a.skipped]));
   const [submitError,setSubmitError]=useState('');
+  const timeAnswer = (qid: string) => saved.answers.find(a=>a.question_id===qid)?.time_budget || {};
+  const validTime = (value: any) => Number.isInteger(value.weeks) && value.weeks >= 1 && value.weeks <= 104
+    && typeof value.hours_per_week === "number" && Number.isFinite(value.hours_per_week)
+    && value.hours_per_week >= 0.5 && value.hours_per_week <= 80;
   const change = (qid: string, patch: any) => {
+    setSubmitError("");
     const old = saved.answers.find(a=>a.question_id===qid) || {question_id:qid,selections:[],free_text:''};
     saved.update([...saved.answers.filter(a=>a.question_id!==qid), {...old,...patch}]);
   };
   const toggle = (qid: string, key: string, kind: string) => {
     const values=sel[qid]||[];
-    change(qid,{skipped:false,selections:kind==='multi'?(values.includes(key)?values.filter(x=>x!==key):[...values,key]):[key]});
+    change(qid,{skipped:false,
+      selections:values.includes(key)?values.filter(x=>x!==key):kind==='multi'?[...values,key]:[key],
+      ...(kind === "single" ? { editing_free:false, free_text:"" } : {})});
   };
 
   const submit = async () => {
+    if (questions.some(q=>q.kind==="time_budget"&&!validTime(timeAnswer(q.question_id)))) {
+      setSubmitError("请填写学习周期（1～104周）和每周投入（0.5～80小时）。");
+      return;
+    }
+    setSubmitError("");
     try { await saved.beforeSubmit(); } catch (e: any) { setSubmitError(e.message || "保存失败"); return; }
     const answers: any[] = [];
     const log: QaEntry[] = [];
     questions.forEach((q) => {
+      if (q.kind === "time_budget") {
+        const budget=timeAnswer(q.question_id);
+        answers.push({question_id:q.question_id,selections:[],skipped:false,time_budget:budget});
+        log.push({q:q.question,labels:[`${budget.weeks}周，每周${budget.hours_per_week}小时`]});
+        return;
+      }
       const selections = sel[q.question_id] || [];
       const free = (freetext[q.question_id] || "").trim() || undefined;
       const skip=skipped[q.question_id]||selections.length===0&&!free;
@@ -80,21 +138,30 @@ function IntakeForm({ intake, onDecide, busy, taskId, ownerId, answerDraft, answ
     onDecide(answers, log);
   };
 
-  const answered = questions.filter((q) => (sel[q.question_id] || []).length > 0 || freetext[q.question_id]).length;
+  const answered = questions.filter((q) => q.kind==="time_budget" ? validTime(timeAnswer(q.question_id))
+    : (sel[q.question_id] || []).length > 0 || freetext[q.question_id]).length;
 
   return (
     <div className="intake-wrap">
       <div className="intake-head">
         <span className="kicker">开始前，先了解你</span>
-        <span className="help">已展示 {intake.shown_count || questions.length} 个问题 · 共 4～6 个 · 可跳过不确定的问题</span>
+        <span className="help">已展示 {intake.shown_count || questions.length} 个问题 · 共 {intake.min_questions || 4}～{intake.max_questions || 6} 个 · {questions.some(q=>q.kind==="time_budget") ? "时间安排必答，其余可跳过" : "可跳过不确定的问题"}</span>
       </div>
       {questions.map((q) => (
         <fieldset className="q-card" key={q.question_id}>
           <legend>
             {q.question}
             {q.kind === "multi" && <span className="badge queued" style={{ marginLeft: 8 }}>多选</span>}
+            {q.kind === "time_budget" && <span className="badge queued" style={{ marginLeft: 8 }}>必答</span>}
           </legend>
-          <div className="opt-grid">
+          {q.kind === "time_budget" ? <div className="stack">
+            <TimeBudgetChoice label="学习周期（周）" unit="周" values={[4,8,16,24]}
+              value={timeAnswer(q.question_id).weeks} min={1} max={104} step={1}
+              onChange={weeks=>change(q.question_id,{skipped:false,time_budget:{...timeAnswer(q.question_id),weeks}})}/>
+            <TimeBudgetChoice label="每周投入（小时）" unit="小时" values={[2,5,10,15]}
+              value={timeAnswer(q.question_id).hours_per_week} min={0.5} max={80} step="any"
+              onChange={hours_per_week=>change(q.question_id,{skipped:false,time_budget:{...timeAnswer(q.question_id),hours_per_week}})}/>
+          </div> : <><div className="opt-grid">
             {q.options.map((o: any) => {
               const on = (sel[q.question_id] || []).includes(o.key);
               return (
@@ -112,9 +179,12 @@ function IntakeForm({ intake, onDecide, busy, taskId, ownerId, answerDraft, answ
             })}
             <button
               type="button"
-              className={`opt-card other${freetext[q.question_id] ? " on" : ""}`}
-              aria-pressed={!!freetext[q.question_id]}
-              onClick={() => change(q.question_id,{skipped:false,editing_free:true})}
+              className={`opt-card other${freetext[q.question_id] !== undefined ? " on" : ""}`}
+              aria-pressed={freetext[q.question_id] !== undefined}
+              onClick={() => change(q.question_id,{skipped:false,
+                editing_free:freetext[q.question_id] === undefined,
+                free_text:"",
+                ...(q.kind === "single" ? { selections:[] } : {})})}
             >
               都不太符合？自己补充
             </button>
@@ -129,7 +199,7 @@ function IntakeForm({ intake, onDecide, busy, taskId, ownerId, answerDraft, answ
               aria-label={`补充 ${q.question}`}
               onChange={(e) => change(q.question_id,{free_text:e.target.value,skipped:false,editing_free:true})}
             />
-          )}
+          )}</>}
           {q.skippable && (
             <button
               type="button"
@@ -153,6 +223,31 @@ function IntakeForm({ intake, onDecide, busy, taskId, ownerId, answerDraft, answ
   );
 }
 
+/** Keep required acknowledgement reachable without the optional quality summary. */
+function PlanningAcknowledgement({ review, accepted, onAccept }: {
+  review: any; accepted: boolean; onAccept: (value: boolean) => void;
+}) {
+  if (!review?.acknowledgement_required) return null;
+  const issues: any[] = Array.isArray(review.issues) ? review.issues : [];
+  return (
+    <div>
+      {issues.length > 0 && (
+        <ul className="help" style={{ margin: "6px 0", paddingLeft: 18 }}>
+          {issues.slice(0, 8).map((issue, index) => (
+            <li key={`${issue.dimension || "issue"}-${index}`}>
+              {issue.severity === "critical" ? "【关键】" : ""}{issue.message}
+            </li>
+          ))}
+        </ul>
+      )}
+        <label className="help" style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 8 }}>
+          <input type="checkbox" checked={accepted} onChange={(event) => onAccept(event.target.checked)} />
+          我已了解并接受以上缺口，仍然使用这份规划
+        </label>
+    </div>
+  );
+}
+
 export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ownerId }: {
   ownerId: string;
   onErr: (s: string) => void; onOk: (s: string) => void; needLogin: boolean; go: (p: string) => void;
@@ -168,11 +263,13 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
   const [mapEditing, setMapEditing] = useState(false);
   const [dialogueOpen, setDialogueOpen] = useState(false);
   const [dialogueBusy, setDialogueBusy] = useState(false);
+  const [acceptedIssues, setAcceptedIssues] = useState(false);
   const [selectedPlanNode, setSelectedPlanNode] = useState("");
   const [candidatePreview, setCandidatePreview] = useState<any>(null);
   const [scene, setScene] = useState<any>(null);
   const [draftScene, setDraftScene] = useState<any>(null);
   const [runError, setRunError] = useState("");
+  const [runErrorCode, setRunErrorCode] = useState("");
   const [running, setRunning] = useState(false);
   const [qaLog, setQaLog] = useState<QaEntry[]>([]);
   const alive = useRef(true);
@@ -181,26 +278,48 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
   const [abandoning, setAbandoning] = useState(false);
   const errorSeen = useRef("");
   const loadedDraft = useRef("");
+  // ADR-037: resume may fail before the worker ever runs (for example no active content model), which
+  // leaves the task "queued" forever. Hold that client-side failure so the 2s poll cannot erase it.
+  const heldError = useRef<{ taskId: string; code: string; text: string } | null>(null);
+  const resumeLock = useRef(false);
+  const resumeVersion = useRef(0);
   useEffect(() => { alive.current=true; return () => { alive.current=false; }; }, []);
 
   const clearPlanning = useCallback(() => {
     selectedTask.current="";
     setTaskId(""); setTask(null); setDraft(null); setScene(null); setDraftScene(null);
-    setRouteId(""); setTitle(""); setRunError(""); setRunning(false); setQaLog([]);
+    setRouteId(""); setTitle(""); setRunError(""); setRunErrorCode(""); setRunning(false); setQaLog([]);
     sessionStorage.removeItem("slice3.pendingTask"); sessionStorage.removeItem("slice3.pendingRoute");
     sessionStorage.removeItem("slice3.editDraft"); localStorage.removeItem("slice3.lastPlanningTask");
-    loadedDraft.current=""; errorSeen.current="";
+    loadedDraft.current=""; errorSeen.current=""; heldError.current=null;
   }, []);
 
   const hydrate = useCallback(async (latest: any) => {
     if (!alive.current || selectedTask.current !== latest.task_id) return;
     if (latest.abandoned || latest.task_status === "cancelled") { clearPlanning(); return; }
     setTask(latest); setTaskId(latest.task_id); setRouteId(latest.target_id || ""); setTitle(latest.title || "");
-    setRunning(["queued","leased","running"].includes(latest.task_status));
-    const errorKey=`${latest.task_id}:${latest.generation}:${latest.error_code}`;
-    if (["failed","expired"].includes(latest.task_status)) {
-      if(errorSeen.current!==errorKey) {errorSeen.current=errorKey;setRunError(ERROR_TEXT[latest.error_code]||latest.error_code||"生成未完成，请重试。");}
-    } else { errorSeen.current=""; setRunError(""); }
+    const failure = planningFailure({ code: latest.error_code });
+    const errorKey=`${latest.task_id}:${latest.generation}:${failure.code}`;
+    const held = heldError.current;
+    const active = ["queued","leased","running"].includes(latest.task_status) || latest.auto_retry_pending === true;
+    if (active && !held) {
+      setRunning(true);
+      errorSeen.current=""; setRunError(""); setRunErrorCode("");
+    } else if (["failed","expired"].includes(latest.task_status) && !failure.code.startsWith("SEARCH_")) {
+      heldError.current=null;
+      setRunning(false);
+      setRunErrorCode(failure.code);
+      if(errorSeen.current!==errorKey) {errorSeen.current=errorKey;setRunError(failure.text);}
+    } else if (held && held.taskId===latest.task_id) {
+      // The task is still queued because the last resume attempt failed before the worker ran:
+      // keep that actionable error instead of letting the poll erase it.
+      setRunning(false);
+      setRunErrorCode(held.code);
+      setRunError(held.text);
+    } else {
+      setRunning(["queued","leased","running"].includes(latest.task_status));
+      errorSeen.current=""; setRunError(""); setRunErrorCode("");
+    }
     if (latest.draft_id) {
       const d=await api.getDraft(latest.draft_id);
       if (!alive.current || selectedTask.current !== latest.task_id) return;
@@ -214,8 +333,15 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
   }, [clearPlanning]);
 
   const refreshTask = useCallback(async (id: string) => {
-    try { await hydrate(await api.getPlanningTask(id)); }
-    catch (e: any) { if(alive.current&&selectedTask.current===id&&e.code==='TASK_CANCELLED')clearPlanning(); }
+    if (resumeLock.current) return;
+    const version = resumeVersion.current;
+    try {
+      const latest = await api.getPlanningTask(id);
+      if (!resumeLock.current && version === resumeVersion.current) await hydrate(latest);
+    }
+    catch (e: any) {
+      if(!resumeLock.current&&version===resumeVersion.current&&alive.current&&selectedTask.current===id&&e.code==='TASK_CANCELLED')clearPlanning();
+    }
   }, [hydrate,clearPlanning]);
 
   const loadScene = useCallback(async (rid: string, kind?: string) => {
@@ -226,15 +352,25 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
   }, []);
 
   const runTask = useCallback(async (id: string, automatic = false) => {
-    selectedTask.current=id; setTaskId(id); setRunError(""); setRunning(true);
+    if (resumeLock.current) return;
+    resumeLock.current = true;
+    resumeVersion.current++;
+    selectedTask.current=id; setTaskId(id); setRunError(""); setRunErrorCode(""); setRunning(true);
+    heldError.current=null;
     sessionStorage.removeItem("slice3.editDraft");
     try { await hydrate(await api.resumePlanning(id,automatic)); }
     catch (e: any) {
       if(alive.current&&selectedTask.current===id) {
-        if(e.code==='TASK_CANCELLED')clearPlanning();
-        else {setRunError(errText(e));setRunning(false);}
+        const failure = planningFailure(e);
+        if(failure.code==='TASK_CANCELLED')clearPlanning();
+        else {
+          setRunErrorCode(failure.code);
+          const text = failure.code.startsWith("SEARCH_") ? "" : failure.text;
+          if(text)heldError.current={taskId:id,code:failure.code,text};
+          setRunError(text); setRunning(false);
+        }
       }
-    }
+    } finally { resumeLock.current = false; }
   }, [hydrate,clearPlanning]);
 
   useEffect(() => {
@@ -263,11 +399,16 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
         await hydrate(current);
         if(cancelled)return;
         sessionStorage.removeItem("slice3.pendingTask");
-        if(!current.confirmed&&!current.wait_state&&["queued","leased","running","failed","expired"].includes(current.task_status)) {
+        // 后台独立接管失败重试与缺失结构；恢复页面只启动尚未执行的排队任务。
+        if(!current.confirmed&&!current.wait_state&&current.task_status==="queued"&&!current.auto_retry_pending) {
           await runTask(current.task_id,true);
         }
       } catch(e:any) {
-        if(!cancelled){if(e.code==='TASK_CANCELLED')clearPlanning();else setRunError(errText(e));}
+        if(!cancelled){
+          const failure = planningFailure(e);
+          if(failure.code==='TASK_CANCELLED')clearPlanning();
+          else if(!failure.code.startsWith("SEARCH_")){setRunErrorCode(failure.code);setRunError(failure.text);}
+        }
       } finally {if(!cancelled)setRestoring(false);}
     })();
     return()=>{cancelled=true;};
@@ -343,6 +484,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
       const confirmed = await api.confirmDraft(draft.draft_id, {
         revision: draft.revision, idempotency_key: `web-confirm-${draft.draft_id}-${draft.revision}`,
         allow_duplicate: allowDuplicate, duplicate_fingerprint: allowDuplicate ? check?.fingerprint : undefined,
+        acknowledge_issues: acceptedIssues,
       });
       await api.putViewState(draft.draft_kind === "route" ? "route" : "course",
         `${draft.target_id}:${confirmed.version_id}`, { offsets: mapOffsets });
@@ -353,18 +495,23 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
       setDraft(null);
       setScene(null);
       setDraftScene(null);
+      setAcceptedIssues(false);
       await loadScene(draft.target_id, draft.draft_kind);
     } catch (e: any) {
       if (e?.code === "PLANNING_DUPLICATE") setDuplicate(e.detail);
-      else { setDuplicate(null); onErr(`确认失败：${e?.message || "错误"}`); }
+      else if (e?.code === "PLANNING_REVIEW_REQUIRED") {
+        setDuplicate(null);
+        setAcceptedIssues(false);
+        onErr("规划体检存在关键缺口，请先勾选确认后再使用。");
+      } else { setDuplicate(null); onErr(`确认失败：${e?.message || "错误"}`); }
     } finally { setConfirming(false); }
-  }, [draft, duplicate, confirming, loadScene, onErr, onOk, mapOffsets]);
+  }, [draft, duplicate, confirming, loadScene, onErr, onOk, mapOffsets, acceptedIssues]);
 
   const decision = useCallback(async (payload: Record<string, unknown>) => {
     if(!taskId)return;
-    setRunning(true);setRunError("");
+    setRunning(true);setRunError("");setRunErrorCode("");
     try {await hydrate(await api.decidePlanningTask(taskId,{...payload,background:true}));}
-    catch(e:any){if(alive.current&&selectedTask.current===taskId){setRunError(errText(e));setRunning(false);}}
+    catch(e:any){if(alive.current&&selectedTask.current===taskId){const failure=planningFailure(e);setRunErrorCode(failure.code);setRunError(failure.text);setRunning(false);}}
   },[taskId,hydrate]);
 
   const submitIntake = useCallback((answers: any[], log: QaEntry[]) => {
@@ -381,7 +528,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
     setMapOffsets({});
   }, []);
   useEffect(() => {
-    setDialogueOpen(false); setCandidatePreview(null);
+    setDialogueOpen(false); setCandidatePreview(null); setAcceptedIssues(false);
   }, [draft?.draft_id]);
 
   const waitState = task?.wait_state;
@@ -445,17 +592,19 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
   };
   const courses: any[] = draft?.content?.stages?.flatMap((s: any) => s.courses) || [];
   const missing = courses.filter(c => !c.units?.length);
-  const repair = async (courseIndex?: number) => {
-    if (!draft || running) return;
-    setRunning(true); setRunError("");
-    try {
-      const result = await api.refineDraft(draft.draft_id, draft.revision, courseIndex);
-      setTaskId(result.task_id);
-      await runTask(result.task_id);
-    } catch (e) { onErr(errText(e)); } finally { setRunning(false); }
-  };
+  const active = running || task?.auto_retry_pending === true;
+  const structureIncomplete = task?.structure_status === "partial" || missing.length > 0;
+  const autoRetryLimit = Math.min(5, Math.max(1, Number(task?.auto_retry_limit) || 5));
+  const autoRetryCount = Math.min(autoRetryLimit, Math.max(0, Number(task?.auto_retry_count) || 0));
+  const autoRetryHelp = task?.auto_retry_exhausted
+    ? `后台自动重试已达上限（${autoRetryCount}/${autoRetryLimit}），已保留当前规划。`
+    : active
+      ? `后台正在继续生成，自动重试最多 ${autoRetryLimit} 次；可以暂时离开。`
+      : "结构尚未完成，已保留当前规划。";
   // 导图步骤 = 蓝图/草稿已就绪且不在访谈中
   const mapStep = Boolean(routeId && hasBoard && !showIntake);
+  const qualityReview = draft?.review && Object.keys(draft.review).length ? draft.review : (task?.review || {});
+  const acknowledgementRequired = Boolean(qualityReview?.acknowledgement_required);
 
   // 导图步骤请求极简外壳（隐藏侧栏、顶栏只留菜单按钮）；离开该步骤（含路由离开）自动恢复
   useEffect(() => {
@@ -478,6 +627,28 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
     };
   }) : qaLog;
   const transcript: QaEntry[] = rawTranscript.map(normalizeQaEntry).filter(Boolean) as QaEntry[];
+  const needsModelPreparation = MODEL_PREPARATION_ERRORS.has(runErrorCode);
+  const needsModelSettings = MODEL_SETTINGS_ERRORS.has(runErrorCode);
+  const needsRefresh = REFRESH_ERRORS.has(runErrorCode);
+  const savedProgress = intake?.answers?.length
+    ? "已提交的访谈回答已保存，重新进入可恢复这次规划。"
+    : task?.answer_draft?.length
+      ? "回答草稿已保存，尚未提交；重新进入可继续填写。"
+      : task?.draft_id
+        ? "规划草稿已保存，重新进入可继续查看。"
+        : taskId ? "这次规划已保留，重新进入可恢复进度。" : "请刷新页面，核对上次规划的状态。";
+  const recoveryHelp = needsModelPreparation
+    ? "继续生成会使用你当前启用的内容模型。"
+    : needsModelSettings
+      ? "请先检查并更新模型设置，再继续生成；已撤销的同版本模型使用不会自动恢复。"
+      : needsRefresh
+        ? "请刷新核对会话与任务状态，再继续操作。"
+        : task?.auto_retry_exhausted
+          ? autoRetryHelp
+          : "后台负责可恢复失败的自动重试，最多 5 次；已保留这次规划。";
+  const progress = taskId && !task?.confirmed ? <GenerationProgress key={`${ownerId}:${taskId}`}
+    taskId={taskId} ownerId={ownerId} generation={task?.generation || 0} active={active}
+    recovery={{ count: autoRetryCount, limit: autoRetryLimit, pending: task?.auto_retry_pending === true, exhausted: task?.auto_retry_exhausted === true }} /> : null;
 
   return (
     <div className="mm-clean">
@@ -497,8 +668,8 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
       {!mapStep && (
         <div className="mm-clean-head">
           <span className="kicker">课程规划 · {routeId ? "路线" : "新任务"}</span>
-          <h1>{title || "课程规划"}</h1>
-          <div className="row" style={{ flexWrap: "wrap", gap: "var(--s3)", alignItems: "center" }}>
+          {!taskId && <h1>{title || "课程规划"}</h1>}
+          {!taskId && <div className="row" style={{ flexWrap: "wrap", gap: "var(--s3)", alignItems: "center" }}>
             <input
               className="inp"
               style={{ maxWidth: 320 }}
@@ -509,66 +680,57 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
             />
             <button className="btn btn-pri" onClick={createAndRun} disabled={needLogin || running || restoring || !!taskId}>生成路线候选</button>
             {routeId && <button className="btn btn-sm" onClick={() => go(`/route/${routeId}`)}>查看路线总览 →</button>}
-          </div>
+          </div>}
+          <p className="help">生成会使用你当前启用的内容模型。</p>
         </div>
       )}
 
-      {routeId && !task?.confirmed && <section style={{ maxWidth: 360, margin: "0 32px 16px" }} aria-label="规划封面">
-        <CourseCover kind={task?.target_kind === "course" ? "course" : "route"} id={routeId} title={title || "课程规划"} />
-      </section>}
-      {runError && (
-        <Dialog
-          title={`生成未完成 · ${runError}`}
-          kind="error"
-          onClose={() => setRunError("")}
-          actions={(
-            <>
-              <button
-                className="btn btn-pri btn-sm"
-                disabled={running || !taskId}
-                onClick={() => { setRunError(""); runTask(taskId); }}
-              >
-                重试生成
-              </button>
+      {runError && !active && (
+        <section className="planning-recovery" aria-label="规划需要处理" role="status">
+          <div><strong>{runError.startsWith("生成未完成") ? runError : `生成未完成 · ${runError}`}</strong>
+            <p>{savedProgress}</p><p className="help">{recoveryHelp}</p></div>
+          <div className="planning-recovery-actions">
+              {needsRefresh ? (
+                <button className="btn btn-pri btn-sm" onClick={() => window.location.reload()}>刷新规划</button>
+              ) : needsModelSettings ? (
+                <>
+                  <button className="btn btn-pri btn-sm" onClick={() => go("/capabilities")}>检查模型设置</button>
+                  <button className="btn btn-sm" disabled={running || !taskId} onClick={() => { void runTask(taskId, false); }}>
+                    更新设置后继续生成
+                  </button>
+                </>
+              ) : needsModelPreparation ? (
+                <button className="btn btn-pri btn-sm" disabled={active || !taskId} onClick={() => { void runTask(taskId, false); }}>
+                  使用当前模型继续生成
+                </button>
+              ) : (
+                <button type="button" className="btn btn-pri btn-sm" disabled={abandoning || restoring || !taskId}
+                  onClick={() => { void runTask(taskId, false); }}>
+                  <RefreshCw size={16} aria-hidden="true" />手动重试
+                </button>
+              )}
               <button className="btn btn-sm" onClick={() => go("/home")}>暂时离开</button>
-              <button className="btn btn-sm" disabled={abandoning} onClick={abandon}>放弃规划</button>
-            </>
-          )}
-        >
-          <p>访谈回答已保存。重新进入会恢复这次规划；自动续试最多一次，也可以手动重试或放弃。</p>
-        </Dialog>
+              <button className="btn btn-sm" disabled={abandoning || !taskId} onClick={abandon}>放弃规划</button>
+          </div>
+        </section>
       )}
 
-      {running && (
-        <div className="note note-accent" role="status" style={{ margin: "0 32px 12px" }}>
-          <span className="tag"><span className="spin" style={{ marginRight: 6 }} />生成中</span>
-          <div className="tt">正在按你的回答生成规划…</div>
-          <div>生成在后台继续，可以暂时离开，回来后会自动恢复进度。</div>
-        </div>
-      )}
+      {hasBoard && !showIntake && progress}
+      {taskId && !hasBoard && !showIntake && !task?.confirmed && <div className="planning-intake-layout">
+        <div className="planning-pending-progress">{progress}</div>
+      </div>}
 
       {showIntake && (
-        <div style={{ padding: "4px 32px 12px" }}>
+        <div className="planning-intake-layout">
+          <div className="planning-intake-questions">
           <IntakeForm key={taskId+":"+(intake.questions||[]).map((question:any)=>question.question_id).join(':')} intake={intake} onDecide={submitIntake} busy={running} taskId={taskId} ownerId={ownerId} answerDraft={task?.answer_draft||[]} answerRevision={task?.answer_draft_revision||0} />
+          </div>
         </div>
       )}
 
       {waitState === "awaiting_scope_clarification" && <div style={{padding:"12px 32px"}}>
         <button className="btn" disabled={running} onClick={()=>decision({kind:"intake",answers:[]})}>继续了解学习要求</button>
       </div>}
-      {waitState === "awaiting_search_decision" && (
-        <div style={{ padding: "12px 32px" }}>
-          <div className="note note-warn" role="alert">
-            <span className="tag">等待</span>
-            <div className="tt">联网搜索失败</div>
-            <div>可以重试搜索，或明确选择离线继续（不会伪造联网依据）。</div>
-            <div className="acts">
-              <button className="btn btn-sm" onClick={() => decision({ decision: "retry" })}>重试搜索</button>
-              <button className="btn btn-sm btn-ink" onClick={() => decision({ decision: "offline_continue" })}>离线继续</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {routeId && hasBoard && !showIntake && (
         <div className="plan-body">
@@ -594,13 +756,11 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
               <span className="kicker">反馈</span>
               {draft ? (
                 <>
+                  <PlanningAcknowledgement review={qualityReview}
+                    accepted={acceptedIssues} onAccept={setAcceptedIssues} />
                   {courses.length > 0 && <p role="status">课程结构已完成 {courses.length - missing.length}/{courses.length} 门</p>}
-                  {missing.length > 0 && <>
-                    <p className="help">部分课程的章节和讲次尚未生成。补齐会调用已配置模型。</p>
-                    <button className="btn" disabled={running} onClick={() => repair()}>{running ? "正在补齐章节…" : "补齐缺失章节与讲次"}</button>
-                    {courses.map((c, i) => !c.units?.length && <button className="btn btn-sm" key={i} disabled={running} onClick={() => repair(i)}>重试：{c.title}</button>)}
-                  </>}
-                  <button className="btn btn-pri" onClick={() => confirmDraft()} disabled={running || confirming || mapEditing || dialogueBusy || !!candidatePreview || missing.length > 0}>没问题，确认草稿</button>
+                  {structureIncomplete && <p className="help">课程结构仍在补齐，已保留当前导图。</p>}
+                  <button className="btn btn-pri" onClick={() => confirmDraft()} disabled={active || confirming || mapEditing || dialogueBusy || !!candidatePreview || structureIncomplete || (acknowledgementRequired && !acceptedIssues)}>没问题，确认草稿</button>
                   <button
                     className="btn btn-draft"
                     onClick={() => setDialogueOpen(true)}
@@ -619,7 +779,6 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
                     {task?.target_kind === "course" ? "查看课程总览 →" : "查看路线总览 →"}
                   </button>
                   <p className="help">课程已确认，规划结构已锁定。</p>
-                  <CourseCover kind={task?.target_kind === "course" ? "course" : "route"} id={routeId} title={title || "课程规划"} />
                 </>
               )}
             </div>
@@ -644,7 +803,7 @@ export default function PlanningView({ onErr, onOk, needLogin, go, onMapMode, ow
         </div>
       )}
 
-      {routeId && !hasBoard && !running && !showIntake && waitState !== "awaiting_scope_clarification" && waitState !== "awaiting_search_decision" && !runError && (
+      {routeId && !hasBoard && !active && !showIntake && waitState !== "awaiting_scope_clarification" && waitState !== "awaiting_search_decision" && !runError && (
         <div className="note note-info" style={{ margin: "8px 32px" }} role="note">
           <span className="tag">空的</span>
           <div className="tt">还没有规划内容</div>

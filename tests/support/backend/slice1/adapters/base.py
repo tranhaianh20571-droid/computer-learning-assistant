@@ -2,7 +2,7 @@
 
 - 能力探测只发固定非私人样例（`PROBE_TEXT` / 1x1 像素样例）。
 - 供应商原始异常映射到受控错误码，不写入日志、不返回给用户。
-- 公网模型地址要求 HTTPS，拒绝回环/私网/链路本地/云元数据地址。
+- 内容模型允许 HTTP/HTTPS 和非公网目标；媒体等出口保留独立限制。
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..errors import AdapterError
+from ...net_policy import allowed_address, is_literal_address
 
 PROBE_TEXT = "你好，请回复 OK"
 PROBE_IMAGE_BASE64 = (
@@ -35,6 +36,19 @@ _METADATA_HOSTS = {
     "metadata.google.internal",
     "metadata.google.internal.",
 }
+
+
+def is_metadata_address(host: str) -> bool:
+    normalized = host.lower().rstrip(".")
+    if normalized in _METADATA_HOSTS:
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return str(address) == "169.254.169.254"
 
 # 探测时被拒绝能力对应的供应商信号
 _UNSUPPORTED_MARKERS = (
@@ -63,13 +77,9 @@ def _is_private_or_loopback(host: str) -> bool:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
         return False
+    from_hostname = not is_literal_address(host)
     for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+        if not allowed_address(info[4][0], from_hostname=from_hostname):
             return True
     return False
 
@@ -83,10 +93,24 @@ def validate_endpoint(endpoint: str, *, require_https: bool = True, allow_privat
         raise AdapterError("invalid_endpoint", status=400)
     if require_https and parsed.scheme != "https":
         raise AdapterError("invalid_endpoint", status=400, detail="https_required")
-    if parsed.hostname in _METADATA_HOSTS:
+    if is_metadata_address(parsed.hostname):
         raise AdapterError("invalid_endpoint", status=400, detail="metadata_address")
     if not allow_private and _is_private_or_loopback(parsed.hostname):
         raise AdapterError("invalid_endpoint", status=400, detail="private_address")
+
+
+def validate_model_endpoint(endpoint: str, *, allow_http: bool = True) -> None:
+    """Content models allow nonpublic destinations, but never metadata services."""
+    validate_endpoint(endpoint, require_https=not allow_http, allow_private=True)
+    parsed = urlparse(endpoint)
+    if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+        raise AdapterError("invalid_endpoint", status=400)
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or 443, 0, socket.SOCK_STREAM)
+    except socket.gaierror:
+        return
+    if any(is_metadata_address(info[4][0]) for info in infos):
+        raise AdapterError("invalid_endpoint", status=400, detail="metadata_address")
 
 
 def _looks_unsupported(payload: Any) -> bool:
@@ -111,7 +135,9 @@ class AdapterBase:
         client: Optional[httpx.Client] = None,
         timeout: Optional[float] = None,
         max_response_bytes: int = MAX_RESPONSE_BYTES,
+        reasoning_settings: Optional[dict] = None,
     ) -> None:
+        self.reasoning_settings = dict(reasoning_settings or {"mode": "default", "show_summary": True})
         self.endpoint = endpoint.rstrip("/")
         self.model_name = model_name
         self.credentials = credentials or {}
@@ -233,6 +259,14 @@ class AdapterBase:
         raise AdapterError("capability_test_failed", status=400)
 
     # ---- 能力探测 ----
+    def _apply_probe_reasoning(self, payload: dict) -> None:
+        from ..reasoning import probe_settings_for
+
+        fields = probe_settings_for(self.protocol, self.endpoint, self.model_name, self.reasoning_settings)
+        if "generationConfig" in fields:
+            fields["generationConfig"] = {**payload.get("generationConfig", {}), **fields["generationConfig"]}
+        payload.update(fields)
+
     def _probe(self, capability: str) -> None:
         """子类实现：成功返回 None，不支持抛 AdapterError('unsupported_capability')。"""
         raise AdapterError("unsupported_capability", status=400)

@@ -153,7 +153,8 @@ def test_direct_recover_route_repairs_success_without_output(automatic):
     assert response.status_code == 200
     repaired = response.json()
     assert repaired["task_id"] != broken["task_id"] and repaired["artifact_recovery"]["status"] == "repairing"
-    assert automatic.service.run_step_generation(repaired["task_id"])["status"] == "succeeded"
+    result = automatic.service.run_step_generation(repaired["task_id"])
+    assert result["status"] == "succeeded", result
     assert automatic.service.get_workspace(broken["conversation_id"], actor_id=automatic.owner)["steps"]
 
 

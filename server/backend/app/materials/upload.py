@@ -16,6 +16,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from threading import RLock
 from typing import Optional
 
 from sqlalchemy import select
@@ -23,6 +24,8 @@ from sqlalchemy import select
 from ..logging_audit.db import Database
 from .errors import MaterialsError, error
 from .models import MaterialRow, MaterialUploadQuotaRow, utcnow
+
+PDFIUM_LOCK = RLock()
 
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MiB
 MAX_FILES_PER_BATCH = 10
@@ -109,20 +112,18 @@ def pdf_page_count(payload: bytes) -> int:
     """用 pypdfium2 读取页数；加密/损坏 PDF 映射到受控错误。"""
     import pypdfium2 as pdfium
 
-    try:
-        doc = pdfium.PdfDocument(payload)
-    except Exception as exc:  # noqa: BLE001 - 供应商异常不外泄
-        message = str(exc).lower()
-        if "password" in message or "encrypt" in message:
-            raise error("pdf_encrypted") from exc
-        raise error("pdf_corrupt") from exc
-    try:
-        return len(doc)
-    finally:
+    with PDFIUM_LOCK:
         try:
+            doc = pdfium.PdfDocument(payload)
+        except Exception as exc:  # noqa: BLE001 - 供应商异常不外泄
+            message = str(exc).lower()
+            if "password" in message or "encrypt" in message:
+                raise error("pdf_encrypted") from exc
+            raise error("pdf_corrupt") from exc
+        try:
+            return len(doc)
+        finally:
             doc.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def validate_one(
@@ -348,11 +349,15 @@ class MaterialService:
             return self._view(row) | {"page_count": int(pages)}
 
     def list_for_owner(self, owner_user_id: str, *, include_deleted: bool = False) -> list[dict]:
+        from .models import DocumentAttachmentRow
+        from .source_models import ImportedSourceRow
         with self.db.session() as sess:
             rows = (
                 sess.execute(
                     select(MaterialRow)
-                    .where(MaterialRow.owner_user_id == owner_user_id)
+                    .where(MaterialRow.owner_user_id == owner_user_id,
+                           ~MaterialRow.material_id.in_(select(DocumentAttachmentRow.material_id)),
+                           ~MaterialRow.material_id.in_(select(ImportedSourceRow.material_id)))
                     .order_by(MaterialRow.created_at.desc())
                 )
                 .scalars()
@@ -378,6 +383,16 @@ class MaterialService:
                 raise error("material_already_deleted")
             now = utcnow()
             row.deleted_at = now
+            from .models import DocumentAttachmentRow
+            attachment = sess.get(DocumentAttachmentRow, material_id, with_for_update=True)
+            if attachment:
+                attachment.result_json = "{}"
+            from .source_models import ImportedSourceRow
+            imported = sess.get(ImportedSourceRow, material_id, with_for_update=True)
+            if imported:
+                imported.result_json = "{}"
+            from .corpus import remove_corpus
+            remove_corpus(sess, actor_id, material_id)
             row.status = "failed"
             tombstone_id = f"tmb_{uuid.uuid4().hex[:12]}"
             sess.add(
@@ -414,6 +429,7 @@ class MaterialService:
 
             try:
                 self.storage.delete(MaterialStorage.original_key(material_id))
+                self.storage.delete_source_assets(material_id)
             except Exception:  # noqa: BLE001 - 对象缺失视为已清理
                 pass
         return view

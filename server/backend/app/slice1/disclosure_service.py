@@ -244,8 +244,9 @@ class DisclosureService:
             "revoked_at": _iso(row.revoked_at),
         }
 
-    def list_for_task(self, task_id: str, *, actor_id: str, is_admin: bool = False) -> list[dict]:
-        with self.db.session() as sess:
+    def list_for_task(self, task_id: str, *, actor_id: str, is_admin: bool = False,
+                      session: Optional[Session] = None) -> list[dict]:
+        with (self.db.session() if session is None else nullcontext(session)) as sess:
             rows = (
                 sess.execute(
                     select(DisclosureGrantRow)

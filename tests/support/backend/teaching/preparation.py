@@ -36,18 +36,20 @@ class LessonPreparation:
         self.teaching=teaching
         self.daily_limit=setting('FIRST_PREWARM_DAILY_LIMIT',20)
         self.max_courses=setting('FIRST_PREWARM_MAX_COURSES',100)
-        self.max_bytes=setting('FIRST_PREWARM_MAX_BYTES',104857600)
+        self.max_bytes=setting('FIRST_PREWARM_MAX_BYTES',268435456)
         self.ttl_days=setting('FIRST_PREWARM_TTL_DAYS',7)
         self.queue_limit=setting('FIRST_PREWARM_QUEUE_LIMIT',100)
         self.timeout=setting('FIRST_PREWARM_MODEL_TIMEOUT',180)
         self.enabled=bool(setting('FIRST_PREWARM_ENABLED',1))
         self._gc_cursor=''
         self._reconcile_cursor=''
-        self.max_entries=setting('FIRST_PREWARM_MAX_ENTRIES',self.max_courses*2)
+        self.max_entries=setting('FIRST_PREWARM_MAX_ENTRIES',50)
 
     def _model(self,owner):
         configs=self.teaching.configs
-        if configs:return configs.latest_active_for_owner(owner,'content_model')
+        if configs:
+            from ..agents.model_routing import role_config
+            return role_config(configs,owner,"teaching")
         factory=self.teaching.model_adapter_factory
         getter=getattr(factory,'config_for_owner',None)
         return getter(owner) if getter else {'config_id':'injected','config_version':1} if factory else None
@@ -65,9 +67,11 @@ class LessonPreparation:
         model=self._model(conv.owner_user_id)
         if not model:return None,None,context
         teacher=self.teaching.prompts.load_local_template('teaching_step_v1')
+        alignment=self.teaching.prompts.load_local_template('board_alignment_v1')
         key=digest({'owner':conv.owner_user_id,'context':context,'content_version':content_version,
             'plan_key':plan_key(self.teaching,conv,context),'teacher':teacher['sha256'],
-            'model':[model['config_id'],model['config_version']],'contract':1})
+            'model':[model['config_id'],model['config_version']],'contract':4,
+            'alignment':self.teaching.prompts._sha256(alignment['template'])})
         voice=self._audio(conv.owner_user_id)
         audio_key=digest([key,voice['config_id'],voice['config_version']]) if voice else ''
         return key,audio_key,context
@@ -270,7 +274,9 @@ class LessonPreparation:
             elif confirmation and not confirmation['tts_confirmed']:
                 row.audio_key=''
             service.prompts.bind_for_task(task['task_id'],'teaching_step_v1',allow_fallback=True)
+            service.prompts.bind_for_task(task['task_id'],'board_alignment_v1',allow_fallback=True)
             service.prompts.bind_for_task(task['task_id'],'lesson_blueprint_v1',allow_fallback=True)
+            service.prompts.bind_for_task(task['task_id'],'knowledge_recap_v1',allow_fallback=True)
         for object_key in garbage:self._delete_unreferenced(object_key)
         return {'status':'queued','task_id':task['task_id'],'lesson_id':target.lesson_id}
 
@@ -315,6 +321,13 @@ class LessonPreparation:
             return {'status':row.status,'lesson_id':row.lesson_id,'audio_ready':bool(row.audio_object_key),'error_code':row.error_code}
 
     def claim_for_start(self,sess,course,lesson):
+        # Generic prewarm has no frozen persona. A selected mentor must get a
+        # newly generated first segment, never cached text with a swapped face.
+        from ..characters.models import CharacterPreferenceRow, CharacterCardRow
+        preference = sess.get(CharacterPreferenceRow, course.owner_user_id)
+        card = sess.get(CharacterCardRow, preference.card_id) if preference and preference.card_id else None
+        if card and not card.deleted_at:
+            return None
         conv=SimpleNamespace(owner_user_id=course.owner_user_id,course_id=course.course_id,lesson_id=lesson.lesson_id,
             outline_version_id=course.current_outline_version_id,conversation_id='prewarm')
         key,audio_key,_=self.keys(conv)
@@ -439,6 +452,10 @@ class LessonPreparation:
                     if not cues or not audio_meta.get('audio_hex') or not all(isinstance(cue,dict) and isinstance(cue.get('begin_ms'),(int,float))
                         and isinstance(cue.get('end_ms'),(int,float)) and math.isfinite(cue['end_ms']) and 0<=cue['begin_ms']<cue['end_ms']<=120000 for cue in cues):
                         raise config_error('capability_unavailable')
+                    if candidate.alignment_version == 1:
+                        from .board_alignment import exact_subtitles
+                        if not exact_subtitles(candidate.text, cues):
+                            raise config_error('capability_unavailable')
                     audio_bytes=bytes.fromhex(audio_meta['audio_hex'])
                     object_key=f"prepared/{row.cache_id}/{task_id}.mp3";service.storage.put(object_key,audio_bytes)
                     audio_meta={'subtitle':cues,'audio_format':audio_meta.get('audio_format','mp3'),'duration_ms':int(max(cue['end_ms'] for cue in cues))}
@@ -534,6 +551,9 @@ class LessonPreparation:
     def queue_refinement(self,conv_id,owner):
         service=self.teaching
         model=self._model(owner)
+        if getattr(service,"configs",None):
+            from ..agents.model_routing import role_config
+            model=role_config(service.configs,owner,"planning")
         if not model:return {'status':'unconfigured'}
         with service.db.session() as sess:
             conv=sess.get(ConversationRow,conv_id)
@@ -645,6 +665,9 @@ class LessonPreparation:
         with self.teaching.db.session() as sess:
             conv=sess.get(ConversationRow,conv_id)
             if not conv or conv.deleted_at or conv.owner_user_id!=owner:return
+            from ..characters.models import CharacterBindingRow, ClassroomPlaybackRow
+            if sess.get(CharacterBindingRow,conv_id) or sess.get(ClassroomPlaybackRow,conv_id):
+                return
             row=self._row_for_conv(sess,conv)
             if not row or row.candidate_json=='{}':return
             step=sess.scalars(select(TeachingStepRow).where(TeachingStepRow.conversation_id==conv_id,TeachingStepRow.step_no==1,TeachingStepRow.generation==1)).first()
@@ -670,6 +693,7 @@ class LessonPreparation:
 
     def _delete_unreferenced(self,key):
         with self.teaching.db.session() as sess:
+            if self._pinned(sess,key):return
             if sess.scalar(select(func.count()).select_from(AudioAssetRow).where(AudioAssetRow.storage_key==key)):return
             if sess.scalar(select(func.count()).select_from(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.audio_object_key==key)):return
         try:self.teaching.storage.delete(key)
@@ -681,6 +705,7 @@ class LessonPreparation:
             rows=list(sess.scalars(select(PreparedFirstSegmentRow).join(CourseRow,CourseRow.course_id==PreparedFirstSegmentRow.course_id)
                 .where((PreparedFirstSegmentRow.expires_at<=utcnow())|CourseRow.deleted_at.is_not(None)).limit(500)))
             for row in rows:
+                if row.audio_object_key and self._pinned(sess,row.audio_object_key):continue
                 course=sess.get(CourseRow,row.course_id)
                 if not course or course.deleted_at or fresh(row.expires_at)<=utcnow():
                     active=sess.get(ConversationRow,row.consumed_conversation_id) if row.consumed_conversation_id else None
@@ -710,6 +735,7 @@ class LessonPreparation:
         with self.teaching.db.session() as sess:
             rows=list(sess.scalars(select(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.owner_user_id==owner,
                 PreparedFirstSegmentRow.consumed_conversation_id.is_(None)).order_by(PreparedFirstSegmentRow.created_at)))
+            rows=[row for row in rows if not row.audio_object_key or not self._pinned(sess,row.audio_object_key)]
             def size(item):return item.audio_bytes+len(item.candidate_json.encode())+len(item.context_json.encode())+len(item.plan_json.encode())
             while rows and (len(rows)>self.max_entries or len({item.course_id for item in rows})>self.max_courses or sum(size(item) for item in rows)>self.max_bytes):
                 old=rows.pop(0)
@@ -718,3 +744,10 @@ class LessonPreparation:
         for key in garbage:self._delete_unreferenced(key)
 
     def close(self):pass
+
+    def _pinned(self,sess,key):
+        from sqlalchemy import inspect
+        from ..cleanup.models import LocalResourceRow
+        if not inspect(sess.bind).has_table(LocalResourceRow.__tablename__):return False
+        return bool(sess.scalar(select(LocalResourceRow.resource_id).where(
+            LocalResourceRow.object_key==key,LocalResourceRow.pinned.is_(True)).limit(1)))

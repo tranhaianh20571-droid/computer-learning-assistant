@@ -1,11 +1,11 @@
 /** Restore the stage's board at a segment boundary without revealing future work. */
-import {boardGroups} from "./boardGroups.ts";
+import {boardGroups,orderedBoardBlocks} from "./boardGroups.ts";
 export function stageBoard(previous: {step_no:number;board_scope?:string;board:any}[], current: any,
     currentNo: number, scope: string) {
   const ready = previous.filter(segment=>segment.step_no<currentNo && segment.board_scope===scope);
   const visible = new Map<string,any>(), all = new Map<string,any>(), refs=new Map<string,any>();
   const add=(scene:any, saved:boolean)=>{
-    const blocks=scene?.presentation?.all_blocks||scene?.presentation?.blocks||[];
+    const blocks=orderedBoardBlocks(scene?.presentation?.all_blocks||scene?.presentation?.blocks||[],scene?.beats||[]);
     const groups=boardGroups(blocks,scene?.beats||[]);
     const associations=new Map<string,string>();
     for(const group of groups){

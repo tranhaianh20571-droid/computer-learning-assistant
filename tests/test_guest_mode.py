@@ -1,12 +1,4 @@
-"""访客模式（auth/guest.py）：无登录态时以访客 Cookie 主体继续使用。
-
-契约：
-- /api/auth/guest 签发 HttpOnly 访客 Cookie，同一 Cookie 映射稳定 owner；
-- 访客可创建并读取自己的资源，不同访客之间、访客与登录用户之间互相隔离；
-- /api/auth/me 语义不变：访客仍 401（前端据此展示登录入口）；
-- 无效 Bearer 仍 401；过期/失效的 session Cookie 回落为访客而不是阻断。
-全部合成数据。
-"""
+"""Guest retirement: anonymous access is denied; signed-in users remain isolated."""
 
 from __future__ import annotations
 
@@ -66,16 +58,10 @@ def _create_task(client: TestClient, title: str, **kw) -> str:
 def test_guest_bootstrap_sets_stable_cookie(app) -> None:
     client = TestClient(app)
     r1 = client.get("/api/auth/guest")
-    assert r1.status_code == 200, r1.text
-    body = r1.json()
-    assert body["is_guest"] is True and body["is_admin"] is False
-    assert body["user_id"].startswith("guest_")
-    set_cookie = r1.headers.get("set-cookie", "")
-    assert "guest_id=" in set_cookie and "httponly" in set_cookie.lower()
-
-    # 带着 Cookie 再次引导：身份不变，也不重复下发 Cookie
+    assert r1.status_code == 410, r1.text
+    assert "guest_id=" not in r1.headers.get("set-cookie", "")
     r2 = client.get("/api/auth/guest")
-    assert r2.json()["user_id"] == body["user_id"]
+    assert r2.status_code == 410
     assert "guest_id=" not in r2.headers.get("set-cookie", "")
 
 
@@ -88,35 +74,36 @@ def test_me_still_401_for_guest(app) -> None:
 def test_guest_can_create_and_read_own_route(app) -> None:
     client = TestClient(app)
     client.get("/api/auth/guest")
-    task_id = _create_task(client, "访客的路线")
-    r = client.get(f"/api/planning/tasks/{task_id}")
-    assert r.status_code == 200, r.text
+    assert client.post("/api/planning/routes", json={"title": "synthetic"}).status_code == 401
+    assert client.get("/api/planning/tasks/synthetic").status_code == 401
 
 
-def test_guests_are_isolated(app) -> None:
+def test_guests_are_isolated(app, database) -> None:
     a, b = TestClient(app), TestClient(app)
-    a.get("/api/auth/guest")
-    b.get("/api/auth/guest")
+    _, first = make_user(a, database)
+    _, second = make_user(b, database)
+    a.headers.update(auth_headers(first))
+    b.headers.update(auth_headers(second))
     task_id = _create_task(a, "A 的路线")
     assert b.get(f"/api/planning/tasks/{task_id}").status_code in (403, 404)
 
 
 def test_guest_and_user_are_isolated(app, database) -> None:
     guest = TestClient(app)
-    guest.get("/api/auth/guest")
-    task_id = _create_task(guest, "访客私有路线")
-
     user = TestClient(app)
     _, token = make_user(user, database)
-    assert user.get(f"/api/planning/tasks/{task_id}", headers=auth_headers(token)).status_code in (403, 404)
+    task_id = _create_task(user, "synthetic private route", headers=auth_headers(token))
+    guest.cookies.set("guest_id", "synthetic-old-guest")
+    assert guest.get(f"/api/planning/tasks/{task_id}").status_code == 401
 
 
 def test_logged_in_user_resolves_as_user(app, database) -> None:
     client = TestClient(app)
     user_id, token = make_user(client, database)
-    r = client.get("/api/auth/guest", headers=auth_headers(token))
+    assert client.get("/api/auth/guest", headers=auth_headers(token)).status_code == 410
+    r = client.get("/api/auth/me", headers=auth_headers(token))
     assert r.status_code == 200
-    assert r.json()["user_id"] == user_id and r.json()["is_guest"] is False
+    assert r.json()["user_id"] == user_id
 
 
 def test_invalid_bearer_still_rejected(app) -> None:
@@ -129,5 +116,4 @@ def test_stale_session_cookie_falls_back_to_guest(app) -> None:
     client = TestClient(app)
     client.cookies.set("session_token", "stale-or-revoked")
     r = client.get("/api/planning/courses")
-    assert r.status_code == 200, r.text
-    assert r.json()["data"] == []
+    assert r.status_code == 401, r.text

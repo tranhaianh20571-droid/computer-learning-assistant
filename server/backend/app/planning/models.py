@@ -87,6 +87,10 @@ class RouteVersionRow(Base):
     title_snapshot: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     content_snapshot_json: Mapped[str | None] = mapped_column(Text)
     content_fingerprint: Mapped[str | None] = mapped_column(String(80))
+    source_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
+    # v3：确认时冻结范围契约/覆盖体检，便于解释“当时假设了什么”。
+    scope_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    coverage_snapshot_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
@@ -182,6 +186,7 @@ class OutlineVersionRow(Base):
     title_snapshot: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     content_snapshot_json: Mapped[str | None] = mapped_column(Text)
     content_fingerprint: Mapped[str | None] = mapped_column(String(80))
+    source_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
     # 由路线展开大纲时记录来源（§5.1）
     source_route_version_id: Mapped[str | None] = mapped_column(String(64))
     source_route_node_id: Mapped[str | None] = mapped_column(String(64))
@@ -295,6 +300,9 @@ class PlanningDraftRow(Base):
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     content_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     saved_state: Mapped[str] = mapped_column(String(20), nullable=False, default="saved")
+    # v3：草稿级体检快照；确认前用户可见，确认时随版本冻结。
+    coverage_json: Mapped[str | None] = mapped_column(Text)
+    review_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
@@ -459,6 +467,8 @@ class PlanningTaskStateRow(Base):
     clarification_question: Mapped[str | None] = mapped_column(String(300))
     # 生成前访谈（v2）：{round, questions:[{question_id,question,kind,options,skippable}], answers:[...], done}
     intake_json: Mapped[str | None] = mapped_column(Text)
+    # Owner-authorized process content, separate from content-free task_events.
+    process_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
     abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     background_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     auto_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
@@ -466,6 +476,11 @@ class PlanningTaskStateRow(Base):
     answer_draft_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     material_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     search_decision: Mapped[str | None] = mapped_column(String(20))
+    # v3：时间预算/范围契约/覆盖体检/评审；均为主人可见的业务内容，不是日志。
+    constraints_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
+    scope_contract_json: Mapped[str | None] = mapped_column(Text)
+    coverage_json: Mapped[str | None] = mapped_column(Text)
+    review_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 

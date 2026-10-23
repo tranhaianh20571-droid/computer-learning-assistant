@@ -2,7 +2,7 @@
 
 约束（架构 §3 / PRD 1.6）：
 - 账户状态机 pending_email → pending_approval → approved | rejected | disabled
-- 密码 Argon2id，最少 15 字符
+- 密码 Argon2id，最少 8 字符
 - 会话持久随机 token，只存哈希；停用/登出/重置立即撤销
 - 登录失败 15 分钟内 5 次 → 锁定 15 分钟
 - 重置令牌只存哈希、30 分钟一次性
@@ -39,7 +39,7 @@ from .models import (
 
 _ph = PasswordHasher(time_cost=2, memory_cost=65536, parallelism=2)
 
-MIN_PASSWORD_LEN = 15
+MIN_PASSWORD_LEN = 8
 MAX_PASSWORD_LEN = 128
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 LOCK_THRESHOLD = 5
@@ -126,7 +126,8 @@ class AuthService:
             return False
 
     # ---- register ----
-    def register(self, email: str, password: str, display_name: str = "", trace_id: Optional[str] = None) -> dict:
+    def register(self, email: str, password: str, display_name: str = "", trace_id: Optional[str] = None,
+                 *, open_registration: bool = False) -> dict:
         email = (email or "").strip().lower()
         if not EMAIL_RE.match(email):
             raise AuthError("EMAIL_INVALID", "invalid email")
@@ -144,21 +145,22 @@ class AuthService:
                 password_hash=pwd_hash,
                 display_name=display_name,
                 role="user",
-                status="pending_email",
+                status="approved" if open_registration else "pending_email",
                 is_admin=False,
             )
             sess.add(user)
             sess.flush()
-            raw_token = _new_token()
-            sess.add(
-                EmailTokenRow(
-                    token_id=f"etok_{uuid.uuid4().hex[:12]}",
-                    user_id=user_id,
-                    token_hash=_hash_token(raw_token),
-                    purpose="verify_email",
-                    expires_at=utcnow() + timedelta(hours=EMAIL_TOKEN_TTL_H),
+            raw_token = None if open_registration else _new_token()
+            if raw_token:
+                sess.add(
+                    EmailTokenRow(
+                        token_id=f"etok_{uuid.uuid4().hex[:12]}",
+                        user_id=user_id,
+                        token_hash=_hash_token(raw_token),
+                        purpose="verify_email",
+                        expires_at=utcnow() + timedelta(hours=EMAIL_TOKEN_TTL_H),
+                    )
                 )
-            )
             sess.commit()
 
         self.audit.append(
@@ -170,6 +172,8 @@ class AuthService:
             trace_id=trace_id,
         )
         # 返回原始令牌仅用于测试/开发邮件夹具；生产由邮件发送
+        if open_registration:
+            return {"user_id": user_id, "status": "approved"}
         return {"user_id": user_id, "verify_token": raw_token, "status": "pending_email"}
 
     def verify_email(self, token: str, trace_id: Optional[str] = None) -> dict:
@@ -345,7 +349,8 @@ class AuthService:
         return {"user_id": user_id, "status": "approved", "created": True}
 
     # ---- login / session ----
-    def login(self, email: str, password: str, trace_id: Optional[str] = None) -> tuple[SessionInfo, str]:
+    def login(self, email: str, password: str, trace_id: Optional[str] = None,
+              *, open_registration: bool = False) -> tuple[SessionInfo, str]:
         """返回 (SessionInfo, raw_session_token)。"""
         email = (email or "").strip().lower()
         generic = AuthError("AUTH_FAILED", "invalid credentials", status=401)
@@ -376,6 +381,11 @@ class AuthService:
                 sess.commit()
                 raise generic
 
+            if open_registration and user.status in ("pending_email", "pending_approval"):
+                user.status, user.updated_at = "approved", now
+                self.audit.append("admin.approval.changed", actor_id=user.user_id,
+                    target_actor_id=user.user_id, object_type="user", object_id=user.user_id,
+                    result="open_registration", trace_id=trace_id, session=sess)
             if user.status != "approved":
                 sess.add(LoginAttemptRow(email=email, success=False))
                 self.audit.append(
@@ -409,6 +419,72 @@ class AuthService:
                 csrf_token=raw_csrf,
                 expires_at=now + timedelta(days=SESSION_TTL_DAYS),
             ), raw_session  # type: ignore[return-value]
+
+    def ensure_market_identity(self, user_id: str, email: str, display_name: str = "") -> str:
+        """Create an account space after market authorization, without opening a session."""
+        email = (email or "").strip().lower()
+        if not user_id or not email:
+            raise AuthError("SESSION_INVALID", "market identity invalid", status=401)
+        with self.db.session() as sess:
+            user = sess.get(UserRow, user_id)
+            if user is not None and user.email != email:
+                raise AuthError("SESSION_INVALID", "market identity mismatch", status=409)
+            if user is None:
+                user = sess.execute(select(UserRow).where(UserRow.email == email)).scalar_one_or_none()
+            if user is None:
+                user = UserRow(user_id=user_id, email=email, password_hash="", display_name=display_name,
+                               role="user", status="approved", is_admin=False)
+                sess.add(user)
+            elif user.status != "approved":
+                raise AuthError("SESSION_INVALID", "account unavailable", status=403)
+            return user.user_id
+
+    def issue_market_session(self, user_id: str, email: str, display_name: str = "") -> tuple[str, str]:
+        """Mirror a market account locally and open a local session.
+
+        Returns (raw_session_token, local_user_id). An existing local account with
+        the same email is reused so migrated installs keep their data and owner ids;
+        otherwise the market id becomes the local id.
+
+        The password hash stays empty: this account can only be used through the
+        market login flow, never through the local password endpoint.
+        """
+        email = (email or "").strip().lower()
+        with self.db.session() as sess:
+            user = sess.get(UserRow, user_id) if user_id else None
+            if user is None and email:
+                user = sess.execute(select(UserRow).where(UserRow.email == email)).scalar_one_or_none()
+            if user is None:
+                user = UserRow(user_id=user_id, email=email, password_hash="", display_name=display_name,
+                               role="user", status="approved", is_admin=False)
+                sess.add(user)
+            else:
+                if user.status in ("disabled", "rejected") or (user.user_id == user_id and user.email != email):
+                    raise AuthError("SESSION_INVALID", "account unavailable", status=403)
+                user.status = "approved"
+                # The market owns the credential: drop any local password so the
+                # local password endpoint can never authenticate this account.
+                user.password_hash = ""
+                user.display_name = display_name
+            local_user_id = user.user_id
+            raw_session = _new_token()
+            raw_csrf = _new_token()
+            sess.add(LoginSessionRow(
+                session_id=f"sess_{uuid.uuid4().hex[:12]}",
+                user_id=local_user_id,
+                session_token_hash=_hash_token(raw_session),
+                csrf_token_hash=_hash_token(raw_csrf),
+                expires_at=utcnow() + timedelta(days=SESSION_TTL_DAYS),
+            ))
+            sess.commit()
+        return raw_session, local_user_id
+
+    def sync_market_profile(self, owner: str, email: str, display_name: str) -> None:
+        with self.db.session() as sess:
+            user = sess.get(UserRow, owner)
+            if user is None or user.status != "approved" or user.email != email.strip().lower():
+                raise AuthError("SESSION_INVALID", "account unavailable", status=403)
+            user.display_name = display_name[:100]
 
     def logout(self, session_token: str, trace_id: Optional[str] = None) -> dict:
         th = _hash_token(session_token)

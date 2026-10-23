@@ -64,6 +64,7 @@ def create_feature_router(service, resolve_user):
             if turn is None or turn.owner_user_id != owner: raise error("task_not_found", status=404)
             draft = service.draft(sess, turn.draft_id, owner)
             if draft.revision != turn.base_revision: raise error("DRAFT_REVISION_MISMATCH", status=409)
+        service.prepare_dialogue(task_id, owner)
         service.tasks.requeue_for_retry(task_id, actor_id=owner); service.kick(task_id)
         return {"task_id": task_id}
 

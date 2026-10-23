@@ -7,6 +7,7 @@ import httpx
 from PIL import Image, ImageOps
 from .openai import OpenAIAdapter
 from .base import AdapterError, validate_endpoint
+from ...net_policy import addresses_allowed, is_literal_address
 
 
 class ImageGenerationAdapter(OpenAIAdapter):
@@ -19,26 +20,27 @@ class ImageGenerationAdapter(OpenAIAdapter):
         super().__init__(**options)
         self.resolver = resolver or socket.getaddrinfo
 
-    def _destination(self):
+    def _destination(self, operation="generations"):
+        from ..model_catalog import canonical_endpoint
+        endpoint = canonical_endpoint(self.endpoint)
         import socket
-        import ipaddress
         from urllib.parse import urlsplit
         parsed = urlsplit(self.endpoint)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
                 or parsed.query or parsed.fragment):
             raise AdapterError("invalid_endpoint", status=400)
-        base = httpx.URL(self.endpoint)
+        base = httpx.URL(endpoint)
         try:
             infos = self.resolver(base.host, base.port or 443, 0, socket.SOCK_STREAM)
         except OSError:
             raise AdapterError("connection_error", status=502) from None
         try:
             addresses = [item[4][0] for item in infos]
-            if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+            if not addresses_allowed(addresses, from_hostname=not is_literal_address(base.host)):
                 raise ValueError("nonpublic")
         except (ValueError, IndexError, TypeError):
             raise AdapterError("invalid_endpoint", status=400) from None
-        url = httpx.URL(f"{self.endpoint}/images/generations").copy_with(host=addresses[0])
+        url = httpx.URL(f"{endpoint}/images/{operation}").copy_with(host=addresses[0])
         return url, base.netloc.decode("ascii"), base.host.encode("ascii")
 
     def _client_or_new(self):
@@ -57,7 +59,7 @@ class ImageGenerationAdapter(OpenAIAdapter):
             raise AdapterError("invalid_response", status=502)
         return super()._map_status(status, payload)
 
-    def _image_request(self, payload):
+    def _image_request(self, payload, reference=None):
         from time import monotonic
         from .request_metrics import observe
         validate_endpoint(self.endpoint)
@@ -66,13 +68,20 @@ class ImageGenerationAdapter(OpenAIAdapter):
         started = monotonic()
         failure = None
         try:
-            url, host_header, sni = self._destination()
+            url, host_header, sni = self._destination("edits" if reference else "generations")
             if getattr(self, "authorize_request", None):
                 self.authorize_request()
             headers = {**self.headers, "Accept": "application/json", "Host": host_header}
             extensions = {"sni_hostname": sni}
+            request = {"json": payload}
+            if reference:
+                if not isinstance(reference, bytes) or len(reference) > 8 * 1024 * 1024:
+                    raise AdapterError("invalid_field", status=400)
+                headers.pop("Content-Type", None)
+                request = {"data": {name: str(value) for name, value in payload.items()},
+                    "files": {"image": ("reference.png", reference, "image/png")}}
             with self._http_client() as client:
-                with client.stream("POST", str(url), json=payload, headers=headers, timeout=self.timeout,
+                with client.stream("POST", str(url), **request, headers=headers, timeout=self.timeout,
                     follow_redirects=False, extensions=extensions) as response:
                     self._map_status(response.status_code, {})
                     raw = bytearray()

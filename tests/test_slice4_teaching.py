@@ -52,11 +52,7 @@ from backend.teaching.models import AudioAssetRow, PlaybackCheckpointRow, Teachi
 
 GOOD_DECLARATION = {
     "kind": "board", "title": "核心概念速览",
-    "points": ["定义", "例子", "误用"],
-    "code": None, "formula": None,
-    "nodes": [{"id": "n1", "label": "事务 A"}, {"id": "n2", "label": "事务 B"}],
-    "edges": [{"from_id": "n1", "to_id": "n2", "label": "冲突"}],
-    "original_refs": [], "reveal_ms": [0, 4000, 8000],
+    "format_version": 3,
 }
 STEP_PAYLOAD = {
     "steps": [{
@@ -66,7 +62,11 @@ STEP_PAYLOAD = {
         "board": GOOD_DECLARATION,
     }],
 }
-FOLLOWUP_PAYLOAD = {"answer": "这是追问的合成回答，按定义、例子、误用三段展开。", "board": None}
+STEP_PAYLOAD["steps"][0].update(alignment_version=1, beats=[{
+    "id": "one", "text": STEP_PAYLOAD["steps"][0]["text"],
+    "blocks": [{"id": "concept", "type": "text", "text": "核心概念"}],
+    "cues": [{"block_id": "concept", "target": "text", "quote": "核心概念"}]}])
+FOLLOWUP_PAYLOAD = {"alignment_version": 1, "answer": "这是追问的合成回答，按定义、例子、误用三段展开。", "board": None}
 
 
 class TeachingModelAdapter(SyntheticModelAdapter):
@@ -102,7 +102,7 @@ class NoSubtitleTTSAdapter:
 class GoodTTSAdapter(NoSubtitleTTSAdapter):
     def synthesize(self, text, **kwargs):
         out = super().synthesize(text, **kwargs)
-        out["subtitle"] = [{"word": "seg", "begin_ms": 0, "end_ms": 400}]
+        out["subtitle"] = [{"word": text, "begin_ms": 0, "end_ms": 400}]
         return out
 
 

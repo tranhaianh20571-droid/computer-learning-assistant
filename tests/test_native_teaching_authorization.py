@@ -59,9 +59,12 @@ def env(monkeypatch):
                 "protocol": row.protocol} if current == owner and row.is_active else None
     def model_factory(current, ident):
         calls.append(("content", ident))
-        return TestModel(custom_output_args={"steps": [{"title": "Synthetic step",
-            "text": "A unique key identifies a value. Verify the key before reading the value, then compare the returned value with the expected result. Repeat with a new key to check the rule.",
-            "board": {"kind": "board", "title": "Lookup", "points": ["Key identifies value"], "nodes": [], "edges": [], "original_refs": []},
+        text = "A unique key identifies a value. Verify the key before reading the value, then compare the returned value with the expected result. Repeat with a new key to check the rule."
+        return TestModel(custom_output_args={"steps": [{"title": "Synthetic step", "alignment_version": 1,
+            "text": text,
+            "beats": [{"id": "lookup", "text": text, "blocks": [{"id": "lookup", "type": "text", "text": "key identifies a value"}],
+                       "cues": [{"block_id": "lookup", "target": "text", "quote": "key identifies a value"}]}],
+            "board": {"kind": "board", "title": "Lookup", "format_version": 3},
             "phase": "intuition", "covered_goal_ids": ["g1"], "lesson_finished": False}]})
     model_factory.config_for_owner = lambda current: describe(current, "content_model")
     def tts_factory(current, ident):
@@ -99,6 +102,34 @@ def consent(env):
     with env.db.session() as sess:
         return sess.scalars(select(LessonAuthorizationRow).where(
             LessonAuthorizationRow.owner_user_id == env.owner).order_by(LessonAuthorizationRow.created_at.desc())).first()
+
+
+@pytest.fixture
+def isolated_scheduler(monkeypatch):
+    """Global queues must not inherit earlier test cases' unconsumed leases."""
+    from sqlalchemy import create_engine, text
+    url = make_url(get_database_url())
+    if not str(url.query.get("options", "")).startswith("-csearch_path=native_validation_"):
+        pytest.skip("requires owned regression schema")
+    schema = "native_validation_" + uuid.uuid4().hex
+    admin = create_engine(url)
+    with admin.begin() as conn:
+        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+    isolated = url.update_query_dict({"options": "-csearch_path=" + schema})
+    monkeypatch.setenv("LEARNING_DATABASE_URL", isolated.render_as_string(hide_password=False))
+    db = Database()
+    fixture = None
+    try:
+        db.create_all()
+        fixture = env.__wrapped__(monkeypatch)
+        yield next(fixture)
+    finally:
+        if fixture:
+            fixture.close()
+        db.dispose()
+        with admin.begin() as conn:
+            conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
 
 
 def test_start_without_consent_creates_no_task_or_conversation(env):
@@ -215,6 +246,26 @@ def test_task_and_grant_confirmation_rollback_together(env, monkeypatch):
         assert not sess.scalar(select(ConversationRow.conversation_id).where(ConversationRow.owner_user_id == env.owner))
 
 
+def test_recovery_compares_the_same_authorization_context_projection(env):
+    start = approve(env)
+    conv_id = start["conversation_id"]
+    with env.db.session() as sess:
+        blueprint = sess.get(LessonBlueprintRow, conv_id)
+        context = json.loads(blueprint.context_json)
+        context.update(unit_scope_hash="a" * 64,
+            scope_capabilities=[{"capability_id": "synthetic-capability"}])
+        blueprint.context_json = json.dumps(context)
+    view = env.service.preflight_lesson(env.course, env.lesson, actor_id=env.owner,
+        purpose="recover", conversation_id=conv_id)
+    assert view["readiness"] == "ready"
+    with env.db.session() as sess:
+        sess.get(LessonRow, env.lesson).goal_ref = "Changed actual learning goal"
+    with pytest.raises(Slice1Error) as caught:
+        env.service.preflight_lesson(env.course, env.lesson, actor_id=env.owner,
+            purpose="recover", conversation_id=conv_id)
+    assert caught.value.code == "disclosure_required"
+
+
 def test_next_refinement_and_followup_require_current_root_consent(env):
     start = approve(env)
     assert env.service.run_step_generation(start["task_id"])["status"] == "succeeded"
@@ -298,7 +349,8 @@ def test_failed_prewarm_can_be_reviewed_and_retried_with_new_root(env):
     assert env.service.preparation.run(retry["task_id"])["status"] == "succeeded"
 
 
-def test_background_marks_revoked_queued_task_failed_without_attempt_or_factory(env):
+def test_background_marks_revoked_queued_task_failed_without_attempt_or_factory(isolated_scheduler):
+    env = isolated_scheduler
     start = approve(env)
     env.service.disclosures.revoke(consent(env).content_root_grant_id, actor_id=env.owner)
     worker = TeachingBackground(env.service)

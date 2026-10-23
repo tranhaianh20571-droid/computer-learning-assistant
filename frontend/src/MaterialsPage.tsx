@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api";
+import { BookOpen, FileText, FileType2, FolderOpen, Plus, Search, Trash2, Upload } from "lucide-react";
 
 /**
  * 资料页（切片 2 T07，设计稿 3 节）：
@@ -33,9 +34,18 @@ export default function MaterialsPage({ onErr, onOk }: { onErr: (s: string) => v
   const [selected, setSelected] = useState<string>("");
   const [pages, setPages] = useState<any[]>([]);
   const [query, setQuery] = useState("");
+  const [nameQuery, setNameQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState("all");
   const [hits, setHits] = useState<any[] | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [picking, setPicking] = useState(false);
+  const totalBytes = useMemo(() => materials.reduce((size, item) => size + (item.size_bytes || 0), 0), [materials]);
+  const visibleMaterials = useMemo(() => materials.filter(material => {
+    const kindMatches = kindFilter === "all" || material.kind === kindFilter;
+    const query = nameQuery.trim().toLowerCase();
+    const queryMatches = !query || `${material.material_id} ${material.kind}`.toLowerCase().includes(query);
+    return kindMatches && queryMatches;
+  }), [materials, kindFilter, nameQuery]);
+  const kinds = useMemo(() => [...new Set(materials.map(material => material.kind))].sort(), [materials]);
 
   const loadMaterials = useCallback(async () => {
     try {
@@ -114,69 +124,63 @@ export default function MaterialsPage({ onErr, onOk }: { onErr: (s: string) => v
   }, [onErr, query, selected]);
 
   return (
-    <div className="mat-layout">
-      <div className="od-stack" style={{ ["--od-gap" as any]: "16px" }}>
-        <div
-          className="upzone"
-          role="button"
-          tabIndex={0}
-          aria-label="上传资料"
-          onClick={() => setPicking(true)}
-          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setPicking(true); }}
-        >
-          <span className="big" aria-hidden="true">⇪</span>
-          <div>
-            <div className="t">{uploading ? "正在上传…" : "上传 PDF / Markdown / TXT"}</div>
-            <span className="help">单文件 ≤ 20 MiB · 单次 ≤ 10 个 · 扫描 PDF ≤ 1000 页</span>
-          </div>
-          <button className="btn btn-sm btn-pri" disabled={uploading}
-            onClick={(e) => { e.stopPropagation(); setPicking(true); }}>
-            选择文件
+    <div className="knowledge-page">
+      <header className="knowledge-heading">
+        <div><span className="kicker">个人知识库</span><h1>我的资料</h1><p>整理资料，查看处理状态，并在选定资料中检索。</p></div>
+        <label className="knowledge-upload">
+          <input type="file" multiple accept=".pdf,.md,.markdown,.txt" disabled={uploading}
+            onChange={(e) => { upload(e.target.files); e.target.value = ""; }} />
+          <Upload size={16} aria-hidden="true" />{uploading ? "正在上传…" : "添加资料"}
+        </label>
+      </header>
+      <div className="knowledge-layout">
+        <aside className="knowledge-sidebar" aria-label="资料主题">
+          <h2>资料主题</h2>
+          <button className="knowledge-filter" aria-current={kindFilter === "all"} onClick={() => setKindFilter("all")}>
+            <BookOpen aria-hidden="true" /><span>全部资料</span><b>{materials.length}</b>
           </button>
-          <input
-            type="file"
-            multiple
-            accept=".pdf,.md,.markdown,.txt"
-            style={{ display: "none" }}
-            ref={(el) => {
-              if (el && picking) {
-                setPicking(false);
-                el.click();
-              }
-            }}
-            onChange={(e) => { upload(e.target.files); e.target.value = ""; }}
-          />
-        </div>
-
-        <ul className="mat-list" aria-label="我的资料">
-          {materials.map((m) => (
-            <li key={m.material_id}>
-              <button
-                className={`mat-item${selected === m.material_id ? "" : ""}`}
-                aria-current={selected === m.material_id}
-                onClick={() => setSelected(m.material_id)}
-              >
-                <span className="n od-truncate">资料 {m.material_id.slice(0, 12)}</span>
-                <span className="m">{m.kind.toUpperCase()} · {Math.round((m.size_bytes || 0) / 1024)} KiB</span>
-                <MatState status={m.status} />
-              </button>
-              {selected === m.material_id && (
-                <div className="row" style={{ padding: "0 12px 10px 14px" }}>
-                  <button className="btn btn-sm btn-danger" onClick={() => remove(m.material_id)}>删除</button>
-                  <span className="help">删除后立即从所有检索范围移除。</span>
-                </div>
-              )}
-            </li>
-          ))}
-          {materials.length === 0 && <li className="help" style={{ padding: 12 }}>还没有资料。上传后自动逐页解析。</li>}
-        </ul>
-      </div>
-
-      <div className="od-stack" style={{ ["--od-gap" as any]: "16px", minWidth: 0 }}>
+          {kinds.map(kind => <button key={kind} className="knowledge-filter" aria-current={kindFilter === kind} onClick={() => setKindFilter(kind)}>
+            <FileType2 aria-hidden="true" /><span>{kind.toUpperCase()}</span><b>{materials.filter(item => item.kind === kind).length}</b>
+          </button>)}
+          <div className="knowledge-quota"><span>存储空间</span><strong>{totalBytes < 1024 * 1024
+            ? `${Math.ceil(totalBytes / 1024)} KiB`
+            : `${(totalBytes / (1024 * 1024)).toFixed(1)} MiB`}</strong></div>
+        </aside>
+        <section className="knowledge-main" aria-label="资料">
+          <div className="knowledge-toolbar">
+            <label className="knowledge-search"><Search size={17} aria-hidden="true" /><input type="search" value={nameQuery} onChange={event => setNameQuery(event.target.value)} placeholder="搜索资料 ID 或类型" aria-label="搜索资料 ID 或类型" /></label>
+            <span className="knowledge-result-count">{visibleMaterials.length} 份资料</span>
+          </div>
+          {materials.length === 0 ? <div className="knowledge-empty"><FolderOpen size={26} aria-hidden="true" /><h2>知识库还是空的</h2><p>添加 PDF、Markdown 或 TXT 资料，开始整理个人知识库。</p>
+            <label className="knowledge-upload"><input type="file" multiple accept=".pdf,.md,.markdown,.txt" disabled={uploading}
+              onChange={(e) => { upload(e.target.files); e.target.value = ""; }} /><Plus size={16} />选择资料</label>
+          </div> : visibleMaterials.length === 0 ? <div className="knowledge-empty"><h2>没有匹配的资料</h2><p>更换搜索内容或资料类型。</p><button className="btn" onClick={() => { setNameQuery(""); setKindFilter("all"); }}>清除筛选</button></div> :
+          <div className="knowledge-materials" aria-label="我的资料">
+            {visibleMaterials.map((m) => (
+              <article className={`knowledge-material${selected === m.material_id ? " is-selected" : ""}`} key={m.material_id}>
+                <button className="knowledge-material-select" aria-current={selected === m.material_id} onClick={() => setSelected(m.material_id)}>
+                  <span className="knowledge-file-icon">{m.kind === "pdf" ? <FileText aria-hidden="true" /> : <FileType2 aria-hidden="true" />}</span>
+                  <span className="knowledge-material-name"><strong>资料 {m.material_id.slice(0, 12)}</strong><small>{m.kind.toUpperCase()} · {Math.round((m.size_bytes || 0) / 1024)} KiB</small></span>
+                  <MatState status={m.status} />
+                  <span className="knowledge-material-date">{m.created_at ? new Date(m.created_at).toLocaleDateString() : ""}</span>
+                </button>
+                {selected === m.material_id && <div className="knowledge-material-actions">
+                  <span>删除后将立即从所有检索范围移除。</span><button className="btn btn-sm btn-danger" onClick={() => remove(m.material_id)}><Trash2 size={14} />删除资料</button>
+                </div>}
+              </article>
+            ))}
+          </div>}
+          <div className="knowledge-footer"><span>资料仅自己可见</span><span>最多支持 10 份同时上传 · 单文件不超过 20 MiB</span></div>
+        </section>
+        <section className="knowledge-detail" aria-label="资料处理与检索">
         {selected && (
           <>
+            <div className="knowledge-detail-heading">
+              <div><span className="kicker">资料详情</span><h2>资料 {selected.slice(0, 12)}</h2></div>
+              <span className="knowledge-detail-kind">{materials.find(item => item.material_id === selected)?.kind.toUpperCase()}</span>
+            </div>
             <div>
-              <span className="kicker">逐页状态 · {selected.slice(0, 12)}</span>
+              <span className="kicker">逐页处理状态</span>
               <div className="pages" role="group" aria-label="逐页处理结果">
                 {pages.map((p) => (
                   <button
@@ -195,37 +199,22 @@ export default function MaterialsPage({ onErr, onOk }: { onErr: (s: string) => v
                 <span><i style={{ background: "var(--err)" }} />失败（点击可重试）</span>
               </div>
             </div>
-
-            <div className="pgdetail">
-              <span className="kicker">资料检索 · 仅选定资料</span>
-              <div className="row">
-                <input
-                  className="inp"
-                  style={{ maxWidth: 320 }}
-                  placeholder="检索关键词（中文/标识符/版本号）"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") search(); }}
-                  aria-label="检索关键词"
-                />
-                <button className="btn btn-pri btn-sm" onClick={search}>检索</button>
-              </div>
-              {hits !== null && (
-                <ul className="regions">
-                  {hits.map((h) => (
-                    <li key={h.chunk_id}>
-                      <span className="rk">p{h.page_no}</span>
-                      <span>chunk {h.chunk_id.slice(0, 12)} {h.figure_asset_id ? "· 关联图块" : ""}</span>
-                      <span className="src src-book">资料</span>
-                    </li>
-                  ))}
-                  {hits.length === 0 && <li className="help">无命中。</li>}
-                </ul>
-              )}
+            <div className="knowledge-retrieval">
+              <span className="kicker">内容检索</span>
+              <label className="knowledge-search"><Search size={16} aria-hidden="true" /><input
+                placeholder="查找一个概念或问题" value={query} onChange={(event) => { setQuery(event.target.value); setHits(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") search(); }} aria-label="检索关键词" />
+              </label>
+              <button className="btn btn-ink" disabled={!query.trim()} onClick={search}>检索当前资料</button>
+              {hits !== null && <ul className="regions">
+                {hits.map((h) => <li key={h.chunk_id}><span className="rk">p{h.page_no}</span><span>chunk {h.chunk_id.slice(0, 12)} {h.figure_asset_id ? "· 关联图块" : ""}</span><span className="src src-book">资料</span></li>)}
+                {hits.length === 0 && <li className="help">当前资料没有命中。</li>}
+              </ul>}
             </div>
           </>
         )}
-        {!selected && <p className="muted">选择或上传一份资料后，这里显示逐页状态与检索面板。</p>}
+        {!selected && <div className="knowledge-detail-empty"><FolderOpen size={24} aria-hidden="true" /><p>选择一份资料，查看处理状态或检索内容。</p></div>}
+        </section>
       </div>
     </div>
   );

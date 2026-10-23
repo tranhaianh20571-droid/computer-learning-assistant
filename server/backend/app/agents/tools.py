@@ -144,6 +144,8 @@ def make_search_materials_tool(retrieval_service, *, owner_user_id: str, materia
             {
                 "title": str(e.get("title", ""))[:60],
                 "excerpt": str(e.get("excerpt", e.get("text", "")))[:200],
+                **{key: e[key] for key in ("material_id", "page_no", "section_id", "content_hash")
+                   if key in e},
             }
             for e in result.excerpts[: max(1, min(limit, 5))]
         ]

@@ -1,4 +1,4 @@
-"""切片 1：MiniMax TTS 与管理员 OCR/搜索适配器（T04，AC-04）。"""
+"""切片 1：MiniMax TTS 与管理员 OCR 与个人搜索适配器（T04，AC-04）。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ os.environ.setdefault("LEARNING_DATABASE_URL", get_database_url())
 from backend.logging_audit.db import Database  # noqa: E402
 from backend.slice1.adapters.minimax import MiniMaxTTSAdapter  # noqa: E402
 from backend.slice1.adapters.paddleocr import PaddleOCRAdapter  # noqa: E402
-from backend.slice1.adapters.tavily_hikari import TavilyHikariAdapter  # noqa: E402
+from backend.slice1.adapters import build_adapter  # noqa: E402
+from backend.slice1.adapters.anysearch import AnySearchAdapter  # noqa: E402
 from backend.slice1.config_service import ConfigService  # noqa: E402
 from backend.slice1.errors import Slice1Error  # noqa: E402
 
@@ -128,45 +129,28 @@ class TestPaddleOCRAdapter:
         assert bodies and bodies[0]["material_id"] == "synthetic_probe"
 
 
-class TestTavilyHikariAdapter:
-    def test_search_normalizes_results(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "results": [
-                        {"title": "T", "url": "https://example.test/a", "content": "snippet"},
-                        {"title": "T2", "url": "https://example.test/b", "content": "snippet2"},
-                    ]
-                },
-            )
+class TestPersonalSearchProviderRegistration:
+    def test_legacy_search_provider_is_retired(self):
+        with pytest.raises(Slice1Error) as failure:
+            build_adapter("tavily_hikari", endpoint="http://127.0.0.1:8787", credentials={"api_key": FAKE_KEY})
+        assert failure.value.code == "protocol_mismatch"
 
-        adapter = TavilyHikariAdapter(
-            endpoint="http://127.0.0.1:8787",
-            credentials={"api_key": FAKE_KEY},
-            client=_client(handler),
-        )
-        result = adapter.search("test query")
-        assert result["result_count"] == 2
-        assert result["results"][0]["source"] == "external_supplement"
-        assert result["results"][0]["fetched_at"].endswith("Z")
-        assert result["query_id"].startswith("qry_")
+    def test_anysearch_timeout_is_20_seconds(self):
+        adapter = AnySearchAdapter(credentials={"api_key": FAKE_KEY})
+        try:
+            assert adapter.timeout == 20.0
+        finally:
+            adapter.close()
 
-    def test_timeout_is_20_seconds(self):
-        adapter = TavilyHikariAdapter(endpoint="http://127.0.0.1:8787")
-        assert adapter.timeout == 20.0
-
-    def test_failure_maps_to_controlled_error(self):
-        from backend.slice1.adapters.base import AdapterError
-
-        adapter = TavilyHikariAdapter(
-            endpoint="http://127.0.0.1:8787",
-            credentials={"api_key": FAKE_KEY},
-            client=_client(lambda r: httpx.Response(503, json={"error": "down"})),
-        )
-        with pytest.raises(AdapterError) as exc:
-            adapter.search("q")
-        assert exc.value.code == "capability_test_failed"
+    def test_search_cannot_be_an_administrator_configuration(self):
+        db = Database()
+        db.create_all()
+        svc = ConfigService(db, encryption_key="k")
+        with pytest.raises(Slice1Error) as failure:
+            svc.create(actor_id="admin_1", is_admin=True, kind="search", protocol="anysearch",
+                endpoint="https://api.anysearch.com", model_name="", credentials={"api_key": FAKE_KEY},
+                owner_scope="admin")
+        assert failure.value.status == 422
 
 
 class TestAdminCloudConfigPermissions:
@@ -207,9 +191,9 @@ class TestAdminCloudConfigPermissions:
         svc.create(
             actor_id="admin_1",
             is_admin=True,
-            kind="search",
-            protocol="tavily_hikari",
-            endpoint="https://search.example.test",
+            kind="ocr",
+            protocol="paddleocr",
+            endpoint="https://ocr.example.test",
             model_name="",
             credentials={"api_key": FAKE_KEY},
             owner_scope="admin",

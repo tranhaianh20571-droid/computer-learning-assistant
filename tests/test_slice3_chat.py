@@ -145,55 +145,69 @@ class TestChatFlow:
         # 历史范围已记录
         assert isinstance(json.loads(row.history_range_json), dict)
 
-    def test_search_failure_wait_then_offline_resume(self, env) -> None:
-        user_id, token = make_user(env["client"], env["database"])
+    def test_search_failure_automatically_continues_offline(self, env):
+        _, token = make_user(env["client"], env["database"])
         client = env["client"]
-        env["container"]["model"] = ChatModelAdapter()
+        model = env["container"]["model"] = ChatModelAdapter()
         env["container"]["search"] = SyntheticSearchAdapter(fail="timeout")
         conv_id = client.post("/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
-
-        r = client.post(
-            f"/api/chat/{conv_id}/messages", headers=auth_headers(token),
-            json={"content": "联网查一下", "use_search": True,
-                  "idempotency_key": f"m{uuid.uuid4().hex[:8]}"},
-        )
-        assert r.status_code == 409
-        assert r.json()["error_code"] == "AWAITING_SEARCH_DECISION"
-
-        # 会话处于等待态：当前 generation 只有 user 消息
+        result = client.post(f"/api/chat/{conv_id}/messages", headers=auth_headers(token),
+            json={"content": "讲解事务概念", "idempotency_key": uuid.uuid4().hex})
+        assert result.status_code == 200, result.text
+        assert result.json()["external_result_count"] == 0
+        assert len(model.generate_calls) == 1
         got = client.get(f"/api/chat/{conv_id}", headers=auth_headers(token)).json()
-        assert got["wait_state"] == "awaiting_search_decision"
+        assert got["wait_state"] is None
+        assert [m["role"] for m in got["messages"]] == ["user", "assistant"]
+        assert client.post(f"/api/chat/{conv_id}/resume", headers=auth_headers(token),
+            json={"decision": "retry"}).status_code == 409
 
-        # 决策：离线继续 → 生成答案，generation 不再递增
-        r2 = client.post(
-            f"/api/chat/{conv_id}/resume", headers=auth_headers(token),
-            json={"decision": "offline_continue"},
-        )
-        assert r2.status_code == 200, r2.text
-        assert r2.json()["message"]["content"].startswith("已收到")
-        got2 = client.get(f"/api/chat/{conv_id}", headers=auth_headers(token)).json()
-        assert got2["generation"] == 1
-        assert got2["wait_state"] is None
+    def test_optional_search_evidence_is_consumed_and_only_refs_persist(self, env):
+        _, token = make_user(env["client"], env["database"])
+        client = env["client"]
+        model = env["container"]["model"] = ChatModelAdapter()
+        env["container"]["search"] = SyntheticSearchAdapter()
+        conv_id = client.post("/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
+        result = client.post(f"/api/chat/{conv_id}/messages", headers=auth_headers(token),
+            json={"content": "事务原理", "idempotency_key": uuid.uuid4().hex})
+        assert result.status_code == 200, result.text
+        assert result.json()["external_result_count"] == 1
+        call = model.generate_calls[-1]
+        assert "external_results" in str(call["messages"])
+        assert "untrusted" in call["instructions"]
+        from backend.planning.models import ContextManifestRow
+        with env["database"].session() as sess:
+            manifest = sess.get(ContextManifestRow, result.json()["manifest_id"])
+            assert manifest.conversation_id == conv_id
+            refs = json.loads(manifest.retrieval_refs_json)
+            external = [r for r in refs if r.get("source") == "external"]
+            assert len(external) == 1
+            assert "excerpt" not in external[0] and "url" not in external[0]
 
-    def test_search_retry_after_recovery(self, env) -> None:
-        user_id, token = make_user(env["client"], env["database"])
+    def test_latest_question_calls_model_after_search_failure(self, env):
+        _, token = make_user(env["client"], env["database"])
+        client = env["client"]
+        model = env["container"]["model"] = ChatModelAdapter()
+        env["container"]["search"] = SyntheticSearchAdapter(fail="timeout")
+        conv_id = client.post("/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
+        result = client.post(f"/api/chat/{conv_id}/messages", headers=auth_headers(token),
+            json={"content": "今天的最新发布是什么？", "idempotency_key": uuid.uuid4().hex})
+        assert result.status_code == 200, result.text
+        assert result.json()["message"]["content"].startswith("已收到")
+        assert len(model.generate_calls) == 1
+        assert "do not claim current facts were verified" in model.generate_calls[0]["instructions"]
+
+    def test_explicit_search_disabled_does_not_create_adapter(self, env):
+        _, token = make_user(env["client"], env["database"])
         client = env["client"]
         env["container"]["model"] = ChatModelAdapter()
-        search = SyntheticSearchAdapter(fail="timeout")
-        env["container"]["search"] = search
+        def forbidden(*args):
+            raise AssertionError("disabled search touched factory")
+        env["state"].chat.search_adapter_factory = forbidden
         conv_id = client.post("/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
-        client.post(
-            f"/api/chat/{conv_id}/messages", headers=auth_headers(token),
-            json={"content": "联网查一下", "use_search": True,
-                  "idempotency_key": f"m{uuid.uuid4().hex[:8]}"},
-        )
-        search.fail = None
-        r = client.post(
-            f"/api/chat/{conv_id}/resume", headers=auth_headers(token),
-            json={"decision": "retry"},
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["external_result_count"] == 1
+        result = client.post(f"/api/chat/{conv_id}/messages", headers=auth_headers(token),
+            json={"content": "事务", "use_search": False, "idempotency_key": uuid.uuid4().hex})
+        assert result.status_code == 200, result.text
 
     def test_refresh_restores_saved_without_resend(self, env) -> None:
         user_id, token = make_user(env["client"], env["database"])
@@ -306,25 +320,19 @@ class TestStreamingChat:
         assert assistant[0]["content"] == "".join(deltas)
         assert assistant[0]["status"] == "completed"
 
-    def test_stream_wait_event_on_search_failure(self, streaming_env) -> None:
-        """流式下的搜索失败以 wait 事件呈现；会话进入等待态。"""
+    def test_stream_search_failure_finishes_without_learner_wait(self, streaming_env):
         client = streaming_env["client"]
-        user_id, token = make_user(client, streaming_env["database"])
+        _, token = make_user(client, streaming_env["database"])
         streaming_env["container"]["search"] = SyntheticSearchAdapter(fail="timeout")
         conv_id = client.post("/api/chat", headers=auth_headers(token), json={}).json()["conversation_id"]
-        r = client.post(
-            f"/api/chat/{conv_id}/messages/stream", headers=auth_headers(token),
-            json={"content": "联网查一下", "use_search": True,
-                  "idempotency_key": f"m{uuid.uuid4().hex[:8]}"},
-        )
-        events = _parse_sse(r.text)
-        assert events[-1]["type"] == "wait"
+        result = client.post(f"/api/chat/{conv_id}/messages/stream", headers=auth_headers(token),
+            json={"content": "事务概念", "idempotency_key": uuid.uuid4().hex})
+        events = _parse_sse(result.text)
+        assert events[-1]["type"] == "done", events
+        assert not any(e["type"] == "wait" for e in events)
         got = client.get(f"/api/chat/{conv_id}", headers=auth_headers(token)).json()
-        assert got["wait_state"] == "awaiting_search_decision"
-        # 恢复（离线继续）走既有非流式路径
-        r2 = client.post(f"/api/chat/{conv_id}/resume", headers=auth_headers(token),
-                         json={"decision": "offline_continue"})
-        assert r2.status_code == 200
+        assert got["wait_state"] is None
+        assert got["messages"][-1]["status"] == "completed"
 
     def test_stream_error_event_on_no_adapter(self, streaming_env) -> None:
         client = streaming_env["client"]

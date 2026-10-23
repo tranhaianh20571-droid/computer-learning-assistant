@@ -53,6 +53,7 @@ class StructuredLogger:
     ) -> None:
         self.service = service
         self.environment = environment
+        self._default_stream = stream is None
         self.stream = stream if stream is not None else sys.stdout
         self.content_stream = content_stream  # ADR-022：内容通道独立输出口（未设则回落主口）
         self.strict = strict
@@ -129,12 +130,26 @@ class StructuredLogger:
         self._validate_required(spec, record)
         sanitized = sanitize_record(record)
         line = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        runtime_sink = None
+        if (self._default_stream and LogEventType.RUNTIME in spec.types
+                and LogEventType.CONTENT not in spec.types):
+            from .runtime_sink import get_runtime_sink
+            runtime_sink = get_runtime_sink()
+            runtime_sink.append(sanitized)
         target = self.stream
         if LogEventType.CONTENT in spec.types and self.content_stream is not None:
             target = self.content_stream
-        target.write(line + "\n")
-        if hasattr(target, "flush"):
-            target.flush()
+        try:
+            target.write(line + "\n")
+            if hasattr(target, "flush"):
+                target.flush()
+        except (OSError, ValueError):
+            if not self._default_stream:
+                raise
+            # A broken redirected stdout must not prevent either disk capture
+            # or the core operation. Count it without logging the raw exception.
+            if runtime_sink is not None:
+                runtime_sink.record_io_failure()
         return sanitized
 
     def _validate_required(self, spec: EventSpec, record: Mapping[str, Any]) -> None:

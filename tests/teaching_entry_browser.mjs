@@ -28,6 +28,7 @@ await page.route("**/*",async route=>{
   let body={};
   if(url.pathname==="/api/auth/me"||url.pathname==="/api/auth/guest")body={user_id:"synthetic-user",status:"approved",role:"user",display_name:"Synthetic"};
   else if(url.pathname==="/api/materials")body={data:[]};
+  else if(url.pathname==="/api/cards")body={data:[]};
   else if(url.pathname==="/api/planning/library")body={routes:[],courses:[],drafts:[]};
   else if(url.pathname==="/api/teaching/synthetic-conversation")body=workspace;
   else if(url.pathname.endsWith("/recover")){workspace={...workspace,steps:[lesson],artifact_recovery:null,required_action:null,queued_tasks:[]};body={conversation_id:"synthetic-conversation",task_id:"synthetic-repair",recovered:true};}
@@ -83,16 +84,22 @@ try{
  checks.push("exhausted_repairs_show_limit_and_stop_retry");
   workspace={...workspace,steps:[lesson],tts_authorized:true,queued_tasks:[],artifact_recovery:null};
   await mount("lecture");await host.getByText("正在准备语音…",{exact:true}).waitFor();
-  await page.waitForFunction(()=>document.querySelector("#teaching-entry-regression .lecture-segment p")?.textContent.length>2);
+  await host.getByRole("button",{name:"重试语音",exact:true}).waitFor();
+  assert.equal(await host.locator(".lecture-segment p").count(),0);
+  assert.equal(await host.getByRole("button",{name:"继续文字讲解",exact:true}).count(),0);
   const played=await page.evaluate(()=>window.__audioPlays);
-  workspace={...workspace,steps:[{...lesson,audio_id:"late-audio",audio_ready:true}]};
-  await page.waitForFunction(()=>document.querySelector("#teaching-entry-regression .lw-simple")?.dataset.audioState==="paused");
-  assert.equal(await page.evaluate(()=>window.__audioPlays),played);
-  checks.push("audio_timeout_unlocks_text_and_late_audio_does_not_play");
-   workspace={...workspace,steps:[{...lesson,audio_id:"autoplay-blocked-audio",audio_ready:true}]};
+  workspace={...workspace,steps:[{...lesson,audio_id:"late-audio",audio_ready:true,
+    audio_subtitles:[{text:lesson.text,begin_ms:0,end_ms:30000}]}]};
+  await host.getByRole("button",{name:"点击开启声音",exact:true}).waitFor();
+  assert.equal(await host.locator(".lecture-segment p").count(),0);
+  assert((await page.evaluate(()=>window.__audioPlays))>played);
+  checks.push("audio_timeout_keeps_text_gated_and_late_audio_requires_playback");
+   workspace={...workspace,steps:[{...lesson,audio_id:"autoplay-blocked-audio",audio_ready:true,
+     audio_subtitles:[{text:lesson.text,begin_ms:0,end_ms:30000}]}]};
    await mount("lecture");await host.getByRole("button",{name:"点击开启声音",exact:true}).waitFor();
-   await page.waitForFunction(()=>document.querySelector("#teaching-entry-regression .lecture-segment p")?.textContent.length>2);
-   checks.push("autoplay_block_falls_back_to_text");
+   await page.waitForTimeout(1200);
+   assert.equal(await host.locator(".lecture-segment p").count(),0);
+   checks.push("autoplay_block_keeps_text_gated");
   await mount("overview");await host.getByRole("button",{name:"开始学习",exact:true}).waitFor();
   assert.equal(await host.getByRole("button",{name:/预生成|预加载/}).count(),0);
   assert.equal(await host.getByText(/首段已|首段预加载|首段准备/).count(),0);
@@ -109,4 +116,8 @@ try{
  checks.push("lesson_start_direct_post_without_consent");
  assert.deepEqual(errors,[]);assert.equal(await page.evaluate(()=>window.__testError),undefined);
  console.log(JSON.stringify({checks,pageErrors:errors,synthetic:true,allApiRequestsIntercepted:true}));
+}catch(error){
+ console.error(JSON.stringify({pageErrors:errors,testError:await page.evaluate(()=>window.__testError),
+  visible:await page.locator("#teaching-entry-regression").innerText()}));
+ throw error;
 }finally{await context.close();await browser.close();}

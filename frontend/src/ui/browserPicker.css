@@ -1,0 +1,10 @@
+.modal:has(.browser-picker){width:440px;max-width:calc(100vw - 32px)}
+.browser-picker-list{max-height:360px;overflow:auto}
+.browser-picker-row{display:flex;align-items:center;gap:12px;width:100%;min-height:52px;padding:12px 8px;border:0;border-bottom:1px solid var(--line,#ddd);background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.browser-picker-row:hover{background:var(--hover,rgba(128,128,128,.08))}
+.browser-picker-row:disabled{opacity:.55;cursor:wait}
+.browser-picker-row>img,.browser-picker-row>svg{flex:none}
+.browser-picker-row>span{flex:1;min-width:0;overflow-wrap:anywhere}
+.browser-picker-browse{margin-top:12px;border-bottom:0}
+.browser-picker-loading{display:flex;align-items:center;gap:10px;min-height:52px}
+.browser-picker-error{color:var(--danger,#a52b2b);font-size:14px;margin:12px 0 0}

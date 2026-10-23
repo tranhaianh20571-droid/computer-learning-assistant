@@ -97,8 +97,8 @@ export function RouteOverview({ routeId, versionId, search = "", onErr, go }: {
   </div>;
 }
 
-export function CourseOverview({ courseId, context = "", onErr, onOk, go }: {
-  courseId: string; context?: string; onErr: (s: string) => void; onOk: (s: string) => void; go: (p: string) => void;
+export function CourseOverview({ courseId, ownerUserId, context = "", onErr, onOk, go }: {
+  courseId: string; ownerUserId?: string; context?: string; onErr: (s: string) => void; onOk: (s: string) => void; go: (p: string) => void;
 }) {
   const [overview, setOverview] = useState<any>(null);
   const [starting,setStarting]=useState(false);
@@ -269,7 +269,7 @@ export function CourseOverview({ courseId, context = "", onErr, onOk, go }: {
                 );
               })}
             </ol>
-            {overview.outline_confirmed && !overview.historical_outline && <UnitAssessment courseId={courseId} unitId={u.unit_id} unitTitle={u.title}
+            {overview.outline_confirmed && !overview.historical_outline && <UnitAssessment key={`${ownerUserId}:${courseId}:${u.unit_id}`} ownerUserId={ownerUserId} courseTitle={overview.title} unitIndex={ui + 1} lessons={u.lessons || []} courseId={courseId} unitId={u.unit_id} unitTitle={u.title}
               onReview={() => document.getElementById(`unit-${u.unit_id}`)?.scrollIntoView({ behavior: "smooth" })} />}
           </div>
         ))}

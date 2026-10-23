@@ -40,9 +40,47 @@ def completed_blocks(raw):
     return result
 
 
-def partial_step(raw, *, followup=False, allowed_material_ids=None,existing_blocks=None):
+def aligned_preview(raw, *, followup=False, existing_blocks=None):
+    """Do not expose an unfinished quote or unchecked board before its beat closes."""
+    from .board_blocks import TeachingBeat
+    from .board_alignment import aligned_beats
+    decoder, parsed, blocks = json.JSONDecoder(), [], {}
+    for match in re.finditer(r'"beats"\s*:\s*\[', raw):
+        pos = match.end()
+        while pos < len(raw):
+            while pos < len(raw) and raw[pos] in " \r\n\t,":
+                pos += 1
+            try:
+                value, pos = decoder.raw_decode(raw, pos)
+                beat = TeachingBeat.model_validate(value)
+                if any(block.id in (existing_blocks or {}) and block.model_dump()!=existing_blocks[block.id]
+                       for block in beat.blocks):
+                    break
+                proposed = {**blocks, **{block.id: block for block in beat.blocks}}
+                for cue in beat.cues:
+                    if cue.block_id not in proposed and cue.block_id in (existing_blocks or {}):
+                        proposed[cue.block_id] = BLOCK_ADAPTER.validate_python(existing_blocks[cue.block_id])
+                if any(block.id in blocks and block != blocks[block.id] for block in beat.blocks):
+                    break
+                aligned_beats([*parsed, beat], list(proposed.values()))
+                blocks, parsed = proposed, [*parsed, beat]
+            except (ValueError, ValidationError):
+                break
+        break
+    beats = aligned_beats(parsed, list(blocks.values()))
+    board = declaration_to_scene(BoardDeclaration(title="板书", format_version=3,
+                                                  blocks=list(blocks.values()))) if blocks else None
+    if board:
+        board.update(alignment_version=1, beats=beats)
+    return {"text": "".join(beat.text for beat in parsed), "title": "", "board": board,
+            "beats": beats, "alignment_version": 1}
+
+
+def partial_step(raw, *, followup=False, allowed_material_ids=None,existing_blocks=None,require_alignment=False):
     """Expose unfinished text but only complete, schema-valid board fields."""
     try:
+        if require_alignment:
+            return aligned_preview(raw, followup=followup,existing_blocks=existing_blocks)
         loose = from_json(raw, allow_partial="trailing-strings")
         closed = from_json(raw, allow_partial=True)
         item = loose if followup else (loose.get("steps") or [{}])[0]
@@ -107,7 +145,7 @@ def partial_step(raw, *, followup=False, allowed_material_ids=None,existing_bloc
 
 
 class PreviewWriter:
-    def __init__(self, service, lease, conv, step_no, *, followup=False,stage_no=None,stage_segment_no=1,existing_blocks=None):
+    def __init__(self, service, lease, conv, step_no, *, followup=False,stage_no=None,stage_segment_no=1,existing_blocks=None,require_alignment=False):
         self.service, self.lease, self.conv, self.step_no = service, lease, conv, step_no
         self.raw = ""
         self.last_write = 0.0
@@ -116,6 +154,7 @@ class PreviewWriter:
         self.stage_no = stage_no or step_no
         self.stage_segment_no = stage_segment_no
         self.existing_blocks = existing_blocks or {}
+        self.require_alignment = require_alignment
         self.allowed_material_ids = set(json.loads(conv.material_snapshot_json or "[]"))
 
     def __call__(self, delta, reset=False):
@@ -127,7 +166,7 @@ class PreviewWriter:
         if len(self.raw.encode("utf8")) > 32*1024:
             raise terr("MODEL_RESPONSE_TOO_LARGE")
         payload = partial_step(self.raw,followup=self.followup,allowed_material_ids=self.allowed_material_ids,
-            existing_blocks=self.existing_blocks) if self.raw else {"text":"", "title":"", "board":None}
+            existing_blocks=self.existing_blocks,require_alignment=self.require_alignment) if self.raw else {"text":"", "title":"", "board":None}
         if payload is None:
             return
         payload.update(stage_no=self.stage_no,stage_segment_no=self.stage_segment_no,

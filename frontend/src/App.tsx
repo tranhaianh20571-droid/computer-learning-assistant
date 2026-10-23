@@ -1,8 +1,10 @@
 import { Component, useCallback, useEffect, useState, type ReactNode } from "react";
-import { api } from "./api";
+import { BookOpen, FolderOpen, Home, LogOut, Settings, ShieldCheck, Store, UsersRound, RotateCcw } from "lucide-react";
+import { api, characterApi } from "./api";
 import { useHashRoute } from "./hooks/useHashRoute";
-import { loadGuest, useSession } from "./hooks/useSession";
-import { AUTH_LEFT, LoginView, RegisterView, ResetView, VerifyView } from "./views/auth/AuthPages";
+import { useSession } from "./hooks/useSession";
+import { LoginView, RegisterView, ResetView, VerifyView, MarketReceiveView } from "./views/auth/AuthPages";
+import AuthShell from "./views/auth/AuthShell";
 import AdminView from "./views/AdminView";
 import CanvasView from "./views/CanvasView";
 import CoursesPage from "./views/CoursesPage";
@@ -15,14 +17,19 @@ import TaskEntry from "./TaskEntry";
 import { CourseOverview, RouteOverview } from "./Overview";
 import MaterialsPage from "./MaterialsPage";
 import LectureView from "./LectureView";
+import CharactersPage from "./views/CharactersPage";
+import TaughtKnowledgePage from "./views/TaughtKnowledgePage";
+import ReviewPage from "./views/ReviewPage";
 import "./tokens.css";
 import "./App.css";
-
-const AUTH_DISABLED = import.meta.env.DEV && import.meta.env.VITE_DISABLE_AUTH === "1";
+import "./revision.css";
+import SettingsShell from "./ui/SettingsShell";
+import BrandLogo from "./ui/BrandLogo";
+import { openExternalPage, reserveExternalWindow } from "./lib/externalWindow";
 
 /**
  * 应用骨架（对齐设计规范 ds-1「工程制图 / 技术手册」，v2 布局收敛）：
- * - 侧栏三组：开始（新的学习任务）/ 学习（课程、课程规划、我的资料）/ 管理（注册审批+徽标）；
+ * - 侧栏三组：开始（新的学习任务）/ 学习（课程、我的资料）/ 管理（注册审批+徽标）；
  *   任务状态与即时对话撤出主导航（路由保留：/tasks 由规划流程进入，/chat 由首页切换进入）；
  * - 侧栏可完全收起（桌面）：侧栏内「«」收起、顶栏「»」展开，偏好记入 localStorage；
  *   规划导图步骤可请求临时自动隐藏（离开该步骤自动恢复，不覆盖手动偏好）；
@@ -73,9 +80,40 @@ export default function App() {
   const { me, setMe, booted } = useSession();
   const { route, navigate } = useHashRoute();
   const [routePath, routeQuery = ""] = route.split("?");
+  const revisionMode = routePath !== "/planning" && !routePath.startsWith("/lecture/");
   const query = new URLSearchParams(routeQuery);
+  useEffect(() => {
+    if (routePath === "/memory") navigate("/capabilities?section=personal-memory");
+  }, [routePath, navigate]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [marketOpening, setMarketOpening] = useState(false);
+  useEffect(() => window.desktopBrowser?.onOpen(url => {
+    void openExternalPage(url, null).catch(() => setError("打开浏览器失败，请重试。"));
+  }), []);
+  const accountName = me?.display_name || me?.email?.split("@")[0] || "我";
+  const openMarket = async () => {
+    if (marketOpening) return;
+    const tab = reserveExternalWindow();
+    setMarketOpening(true);
+    closeSide();
+    try {
+      let result: { url: string; display_name?: string };
+      try { result = await characterApi.marketWebLogin(); }
+      catch (failure) {
+        const code = (failure as { code?: string }).code;
+        if (!window.desktopBrowser || !["BIND_REQUIRED", "RECEIVE_ONLY"].includes(code || "")) throw failure;
+        const binding = await characterApi.marketBinding();
+        if (!binding.base_url) throw failure;
+        result = { url: binding.base_url };
+      }
+      if (result.display_name) setMe(current => current ? { ...current, display_name: result.display_name! } : current);
+      await openExternalPage(result.url, tab);
+    } catch (error) {
+      tab?.close();
+      setError((error as Error).message || "打开市集失败，请重试。");
+    } finally { setMarketOpening(false); }
+  };
   const [pendingCount, setPendingCount] = useState(0);
   // 侧栏收起：手动偏好（持久化）+ 页面请求的临时隐藏（如规划导图步骤）
   const [sideCollapsed, setSideCollapsed] = useState<boolean>(() => {
@@ -147,24 +185,29 @@ export default function App() {
     };
   }, [closeSide]);
 
-  const isAuthRoute = ["/login", "/register", "/verify", "/reset"].includes(route);
-
+  const isAuthRoute = ["/login", "/register", "/verify", "/reset", "/market-receive"].includes(route);
   useEffect(() => {
-    if (AUTH_DISABLED && isAuthRoute) navigate("/home");
-  }, [isAuthRoute, navigate]);
+    if (booted && !me && !isAuthRoute) navigate("/login");
+  }, [booted, me, isAuthRoute, navigate]);
 
-  if (!booted) return <div className="auth"><div className="auth-r"><p className="muted">加载中…</p></div></div>;
+  if (!booted || (!me && !isAuthRoute)) return <div className="auth"><div className="auth-r"><p className="muted">加载中…</p></div></div>;
 
   if (isAuthRoute) {
     return (
-      <div className="auth">
-        {AUTH_LEFT}
-        <div className="auth-r">
-          <div className="auth-col">
+      <AuthShell register={route === "/register"}>
             {error && <div className="error" role="alert">{error}</div>}
             {notice && <div className="notice" role="status">{notice}</div>}
+            {route === "/market-receive" && <MarketReceiveView onErr={setError} />}
             {route === "/register" && (
-              <RegisterView onDone={(m: string) => { setNotice(m); setError(""); go("/verify"); }} onErr={setError} />
+              <RegisterView
+                onDone={async (m: string) => {
+                  setNotice(m); setError("");
+                  // Binding already opened a local session; restore it instead of asking for a password again.
+                  try { setMe(await api.me()); go("/home"); }
+                  catch { go("/login"); }
+                }}
+                onErr={setError}
+              />
             )}
             {route === "/verify" && (
               <VerifyView onDone={(m: string) => { setNotice(m); setError(""); go("/login"); }} onErr={setError} />
@@ -173,16 +216,20 @@ export default function App() {
               <LoginView
                 onDone={async (m: string) => {
                   setNotice(m); setError("");
-                  try { setMe(await api.me()); } catch { /* ignore */ }
-                  go("/home");
+                  try { setMe(await api.me()); go("/home"); }
+                  catch { setMe(null); setError("登录状态恢复失败，请重试。"); }
                 }}
                 onErr={setError}
               />
             )}
             {route === "/reset" && <ResetView onDone={setNotice} onErr={setError} />}
-          </div>
-        </div>
-      </div>
+            {me && <span className="auth-switch">
+              已登录，
+              <button className="linkbtn" type="button" onClick={() => go("/home")}>
+                返回学习空间
+              </button>
+            </span>}
+      </AuthShell>
     );
   }
 
@@ -191,7 +238,8 @@ export default function App() {
     return (
       <PageErrorBoundary key={route}>
       <LectureView
-        conversationId={route.slice("/lecture/".length)}
+        conversationId={routePath.slice("/lecture/".length)}
+        reviewStep={Number(new URLSearchParams(routeQuery).get("review"))||undefined}
         onErr={setError}
         onOk={setNotice}
         go={go}
@@ -200,14 +248,38 @@ export default function App() {
     );
   }
 
+  if (routePath === "/capabilities" && me) {
+    return <SettingsShell name={accountName} isAdmin={me.is_admin} go={go} onLogout={async()=>{
+      try {await api.logout();setMe(null);window.location.replace("/#/login");}
+      catch {setError("退出失败，请重试。");}
+    }}>
+      <PageErrorBoundary key={me.user_id}>
+        {error&&<Dialog title="出错了" onClose={()=>setError("")}>{error}</Dialog>}
+        {notice&&<div className="notice toast" role="status" onClick={()=>setNotice("")}>{notice}</div>}
+        <CapabilityConfig key={me.user_id} ownerId={me.user_id} isAdmin={me.is_admin} onErr={setError} onOk={setNotice}/>
+      </PageErrorBoundary>
+    </SettingsShell>;
+  }
+
   // ---------- 导航分组 ----------
+  const navIcon = (path: string) => {
+    if (path === "/home") return <Home aria-hidden="true" />;
+    if (path === "/courses") return <BookOpen aria-hidden="true" />;
+    if (path === "/review") return <RotateCcw aria-hidden="true" />;
+    if (path === "/materials") return <FolderOpen aria-hidden="true" />;
+    if (path === "/cards") return <UsersRound aria-hidden="true" />;
+    if (path === "/card-market") return <Store aria-hidden="true" />;
+    return <ShieldCheck aria-hidden="true" />;
+  };
   const navItem = (path: string, label: string, badge?: number) => (
     <button
       className="nav-a"
-      aria-current={route === path ? "page" : undefined}
+      aria-label={label}
+      aria-current={routePath === path || (path === "/courses" && routePath.startsWith("/knowledge/")) ? "page" : undefined}
       onClick={() => go(path)}
     >
-      <span>{label}</span>
+      {revisionMode ? <span className="nav-icon">{navIcon(path)}</span> : <span>{label}</span>}
+      {revisionMode && <span className="nav-label">{label}</span>}
       {badge !== undefined && badge > 0 && <span className="nav-badge" aria-label={`待审批 ${badge} 项`}>{badge}</span>}
     </button>
   );
@@ -217,12 +289,13 @@ export default function App() {
     "/chat": ["即时对话"],
     "/planning": ["课程规划"],
     "/courses": ["课程"],
+    "/review": ["复习"],
     "/materials": ["资料准备"],
     "/tasks": ["任务状态"],
     "/admin": ["管理员审批"],
     "/capabilities": ["设置"],
   };
-  const crumbHere = CRUMBS[route] || (route.startsWith("/route/") ? ["学习路线"] : route.startsWith("/course/") ? ["课程"] : []);
+  const crumbHere = CRUMBS[route] || (route.startsWith("/knowledge/") ? ["本节课", "已讲知识点"] : route.startsWith("/route/") ? ["学习路线"] : route.startsWith("/course/") ? ["课程"] : []);
   const sideOpen = () => document.getElementById("side")?.classList.toggle("open");
   // 切换侧栏收起：手动操作覆盖自动隐藏（导图步骤的临时隐藏由此解除）
   const toggleSide = () => {
@@ -233,10 +306,10 @@ export default function App() {
   };
 
   return (
-    <div className={"app" + (sideHidden ? " side-collapsed" : "")}>
+    <div className={"app" + (sideHidden ? " side-collapsed" : "") + (revisionMode ? " revision-app" : "")}>
       <nav className="side" id="side" aria-label="主导航">
         <div className="brand">
-          <span className="wm">学伴</span><span className="sub">CS · STUDY</span>
+          <BrandLogo />
           <button
             className="iconbtn side-collapse-btn"
             onClick={toggleSide}
@@ -255,8 +328,12 @@ export default function App() {
         <div className="nav-g">
           <span className="gl">学习</span>
           {navItem("/courses", "课程")}
-          {navItem("/planning", "课程规划")}
+          {navItem("/review", "复习")}
           {navItem("/materials", "我的资料")}
+          {navItem("/cards", "人物导师")}
+          <button className="nav-a" aria-label="卡片市集" title="卡片市集" disabled={marketOpening} onClick={() => void openMarket()}>
+            {revisionMode ? <><span className="nav-icon"><Store aria-hidden="true" /></span><span className="nav-label">卡片市集</span></> : "卡片市集"}
+          </button>
         </div>
         {me?.is_admin && (
           <div className="nav-g">
@@ -265,27 +342,31 @@ export default function App() {
           </div>
         )}
         <div className="side-foot">
-          {me && !me.is_guest ? (
+          {me ? (
             <>
-              <button className="nav-a" onClick={() => go("/capabilities")}>设置</button>
-              <span className="who">{me.email}</span>
+              <button className="nav-a" aria-label="设置" onClick={() => go("/capabilities")}>
+                {revisionMode ? <><span className="nav-icon"><Settings aria-hidden="true" /></span><span className="nav-label">设置</span></> : "设置"}
+              </button>
+              {revisionMode && <span className="revision-avatar" aria-label={`${accountName} 的工作空间`}>{Array.from(accountName)[0]}</span>}
+              <span className="who">{accountName}</span>
               <button
+                aria-label="退出登录"
                 onClick={async () => {
-                  try { await api.logout(); } catch { /* ignore */ }
-                  // 退出后回到访客身份（访客 Cookie 未清除，之前的访客数据仍可访问）
-                  setMe(await loadGuest());
-                  go("/login");
+                  try { await api.logout(); setMe(null); window.location.replace("/#/login"); }
+                  catch { setError("退出失败，请重试。"); }
                 }}
               >
-                退出登录
+                {revisionMode ? <><LogOut aria-hidden="true" /><span className="nav-label">退出登录</span></> : "退出登录"}
               </button>
             </>
           ) : (
             <>
               {me && <button className="nav-a" onClick={() => go("/capabilities")}>设置</button>}
               <span className="who">{me ? "访客模式" : "未登录"}</span>
-              <button onClick={() => go("/login")}>登录</button>
-              <button onClick={() => go("/register")}>申请加入</button>
+              <>
+                <button onClick={() => go("/login")}>登录</button>
+                <button onClick={() => go("/register")}>申请加入</button>
+              </>
             </>
           )}
         </div>
@@ -312,7 +393,7 @@ export default function App() {
           )}
         </header>
         <main className="page">
-          <PageErrorBoundary key={route}>
+          <PageErrorBoundary key={`${me?.user_id}:${routePath === "/capabilities" ? routePath : route}`}>
           {error && (
             <Dialog title="出错了" onClose={() => setError("")}>{error}</Dialog>
           )}
@@ -328,6 +409,7 @@ export default function App() {
           {route === "/courses" && (
             <CoursesPage me={me} onErr={setError} onOk={setNotice} go={go} />
           )}
+          {routePath === "/review" && <ReviewPage key={me?.user_id || "guest"} route={route} go={go} />}
           {route === "/materials" && me && (
             <MaterialsPage onErr={setError} onOk={setNotice} />
           )}
@@ -340,15 +422,17 @@ export default function App() {
             }} />
           )}
           {route === "/canvas" && <CanvasView />}
-          {route === "/capabilities" && (
+          {(routePath === "/cards" || routePath === "/card-market" || routePath.startsWith("/card/")) && <CharactersPage market={routePath === "/card-market"} conversationId={new URLSearchParams(routeQuery).get("conversation")||undefined} cardId={routePath.startsWith("/card/") ? routePath.slice(6) : undefined} go={go} onErr={setError} />}
+          {routePath.startsWith("/knowledge/")&&<TaughtKnowledgePage conversationId={routePath.slice(11)} go={go} onErr={setError}/>}
+          {routePath === "/capabilities" && (
             me ? (
-              <CapabilityConfig isAdmin={me.is_admin} onErr={setError} onOk={setNotice} />
+              <CapabilityConfig key={me.user_id} ownerId={me.user_id} isAdmin={me.is_admin} onErr={setError} onOk={setNotice} />
             ) : (
               <div className="note note-info" role="status">
-                <span className="tag">登录</span>
-                <div className="tt">请先登录后管理能力配置</div>
-                <div>模型、语音和连接器配置只对登录用户开放。</div>
-                <div className="acts"><button className="btn btn-pri btn-sm" onClick={() => go("/login")}>去登录</button></div>
+                <span className="tag">会话</span>
+                <div className="tt">暂时无法加载能力配置</div>
+                <div>请检查服务连接并刷新页面，恢复当前会话后重试。</div>
+                <div className="acts"><button className="btn btn-pri btn-sm" onClick={() => location.reload()}>刷新页面</button></div>
               </div>
             )
           )}
@@ -356,13 +440,13 @@ export default function App() {
             <PlanningView key={me?.user_id || "anonymous"} ownerId={me?.user_id || ""} onErr={setError} onOk={setNotice} needLogin={!me} go={go} onMapMode={onMapMode} />
           )}
           {route === "/chat" && (
-            <ChatView onErr={setError} onOk={setNotice} needLogin={!me} />
+            <ChatView onErr={setError} onOk={setNotice} needLogin={!me} ownerId={me?.user_id||""} />
           )}
           {route.startsWith("/route/") && (
             <RouteOverview routeId={routePath.slice("/route/".length)} versionId={query.get("version_id") || undefined} search={query.get("q") || ""} onErr={setError} go={go} />
           )}
           {route.startsWith("/course/") && (
-            <CourseOverview courseId={routePath.slice("/course/".length)} context={routeQuery} onErr={setError} onOk={setNotice} go={go} />
+            <CourseOverview courseId={routePath.slice("/course/".length)} ownerUserId={me?.user_id} context={routeQuery} onErr={setError} onOk={setNotice} go={go} />
           )}
           </PageErrorBoundary>
         </main>

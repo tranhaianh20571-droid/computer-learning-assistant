@@ -13,7 +13,7 @@ from backend.tasks.service import LearningTaskRow
 from backend.teaching.background import TeachingBackground
 from backend.teaching.learning_models import PreparedFirstSegmentRow
 from backend.teaching.models import TeachingStepRow
-from test_native_teaching_authorization import env  # noqa: F401
+from test_native_teaching_authorization import env, isolated_scheduler  # noqa: F401
 
 
 @pytest.fixture
@@ -214,7 +214,9 @@ def test_server_reconcile_is_bounded_and_ignores_unconfigured_owners(automatic):
     assert automatic.calls==[]
 
 
-def test_interactive_generation_has_priority_over_background_prewarm(automatic,monkeypatch):
+def test_interactive_generation_has_priority_over_background_prewarm(isolated_scheduler,monkeypatch):
+    automatic = isolated_scheduler
+    automatic.service.authorization.automatic_enabled = True
     service=automatic.service
     warm=service.preparation.prepare_course(automatic.course,automatic.owner)
     started=start(automatic)

@@ -26,6 +26,8 @@ ERROR_CODES = {
     "invalid_encoding": 400,
     "too_many_pages": 400,
     "file_too_large": 413,
+    "text_too_large": 413,
+    "pptx_slide_too_large": 413,
     "too_many_files": 400,
     "quota_exceeded": 409,
     "material_already_deleted": 410,

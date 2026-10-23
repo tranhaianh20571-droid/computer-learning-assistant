@@ -1,0 +1,30 @@
+# Overlay on compose.yml. The video adapter has no public port.
+services:
+  backend:
+    environment:
+      SOURCE_TRUSTED_SERVICES: http://source-video:8092
+    volumes:
+      - source-materials:/app/backend/storage
+    depends_on:
+      source-video:
+        condition: service_started
+
+  source-video:
+    build:
+      context: ../server/source-worker
+    environment:
+      SOURCE_VIDEO_API_KEY: ${SOURCE_VIDEO_API_KEY:?Set a separate video adapter key}
+      SOURCE_ASR_MODELS_DIR: /models
+    volumes:
+      - source-asr-models:/models
+    read_only: true
+    tmpfs:
+      - /tmp:size=2147483648,mode=1777
+    mem_limit: 6g
+    cpus: 4
+    pids_limit: 128
+    restart: unless-stopped
+
+volumes:
+  source-materials:
+  source-asr-models:

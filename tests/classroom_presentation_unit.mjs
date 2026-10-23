@@ -43,7 +43,9 @@ const graph={id:"g",type:"graph",diagram:"relationship",nodes:[{id:"a",label:"�
 const summary=layoutBoard([graph],1200,new Set(["g"]));
 assert(!summary.pages[0].elements.some(e=>e.type==="arrow"));
 const detail=layoutBoard([graph],1200,new Set(["g"]),[],{g:"a"});
-assert(detail.pages[0].elements.some(e=>e.type==="arrow"));
+assert.equal(detail.pages[0].elements.filter(e=>e.customData?.edgeIndex!==undefined).length,graph.edges.length);
+assert.deepEqual(detail.pages[0].elements.map(e=>[e.id,e.x,e.y,e.width,e.height]),
+ summary.pages[0].elements.map(e=>[e.id,e.x,e.y,e.width,e.height])); // Focus preserves all relationship rows.
 const sequence=layoutBoard([{...graph,id:"seq",diagram:"sequence",edges:[{from_id:"a",to_id:"b",label:"请求"}]}],1200,new Set(["seq"]));
 assert(sequence.pages[0].elements.some(e=>e.strokeStyle==="dashed"));
 const reveal=layoutBoard([{id:"typed",type:"text",text:"完整文字应保留完整尺寸"}],1200,new Set(["typed"]),[],{},"",

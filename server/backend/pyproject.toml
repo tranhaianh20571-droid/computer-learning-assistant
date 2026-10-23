@@ -4,6 +4,8 @@ version = "0.1.0"
 description = ""
 requires-python = ">=3.14,<4.0"
 dependencies = [
+    "psutil>=7.0,<9",
+    "filelock>=3.20,<4",
     "fastapi[standard]>=0.141.1,<1.0.0",
     "python-multipart<1.0.0,>=0.0.27",
     "email-validator<3.0.0.0,>=2.1.0.post1",
@@ -23,11 +25,18 @@ dependencies = [
     "cryptography>=44.0.0,<51.0.0",
     "websockets>=14.0,<17.0",
     "pypdfium2>=5.13.0",
+    "olefile>=0.47,<1",
     "jieba>=0.42.1",
     "pillow>=12.3.0",
+    "imageio-ffmpeg>=0.6.0,<0.7.0",
     "pydantic-ai-slim[openai,anthropic,google]>=2.51.0,<2.52.0",
+    "hindsight-client==1.0.0",
+    "fsrs==6.3.2",
+    "hindsight-pydantic-ai==0.4.20",
     "opentelemetry-sdk>=1.24",
     "opentelemetry-exporter-otlp-proto-http>=1.24",
+    "lxml>=6,<7",
+    "markdown-it-py>=4,<5",
 ]
 
 [dependency-groups]

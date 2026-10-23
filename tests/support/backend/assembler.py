@@ -13,6 +13,12 @@
 from __future__ import annotations
 
 import os
+from contextlib import AsyncExitStack, asynccontextmanager
+
+from app.logging_audit.sdk_logging import install_sdk_logging_safety
+
+# Install before route/SDK imports: template modules enable root INFO logging.
+install_sdk_logging_safety()
 
 import sentry_sdk
 from fastapi import FastAPI
@@ -56,6 +62,7 @@ def _prepare_http_proxy_environment() -> None:
 
 
 def create_app() -> FastAPI:
+    install_sdk_logging_safety()
     _prepare_http_proxy_environment()
     if settings.SENTRY_DSN and settings.FASTAPI_ENV != "development":
         sentry_sdk.init(dsn=str(settings.SENTRY_DSN), enable_tracing=True)
@@ -88,7 +95,7 @@ def create_app() -> FastAPI:
     )
 
     # 模板工程路由（O-B 后仅保留 login/users/utils/learning[/private]）
-    app.include_router(api_router, prefix=settings.API_V1_STR)
+    # Product identity uses /api/auth exclusively; template identity is retired.
 
     # 切片 0→3 全链（含教学与清理路由）挂载在 "/"；/api/v1 路由先注册先匹配
     os.environ.setdefault("LEARNING_DATABASE_URL", str(settings.DATABASE_URL))
@@ -98,23 +105,30 @@ def create_app() -> FastAPI:
     # 凭据主密钥同 pattern 桥接：slice1 crypto 只读进程环境，settings 值不会自动传播。
     if settings.APP_ENCRYPTION_KEY:
         os.environ.setdefault("APP_ENCRYPTION_KEY", settings.APP_ENCRYPTION_KEY)
+    for name in ("SOURCE_VIDEO_PYTHON", "SOURCE_ASR_MODELS_DIR", "SOURCE_TRUSTED_SERVICES", "SOURCE_WORKER_MODE",
+                 "CORPUS_VECTOR_BACKEND"):
+        value = getattr(settings, name, None)
+        if value:
+            os.environ.setdefault(name, value)
 
     from app.slice3_app import create_slice3_app
 
     learning_app=create_slice3_app()
     app.mount("/", learning_app)
-    @app.on_event("startup")
-    def start_teaching_worker():
-        learning_app.state.slice3.teaching.background.start()
-        learning_app.state.slice3.planning.background.start()
-        learning_app.state.slice3.features.cover_background.start()
-    @app.on_event("shutdown")
-    def stop_teaching_worker():
-        learning_app.state.slice3.features.cover_background.close()
-        learning_app.state.slice3.planning.background.close()
-        learning_app.state.slice3.teaching.background.close()
+    from app.lifecycle import worker_lifespan
+    additional_workers = worker_lifespan([
+        learning_app.state.slice3.memory, learning_app.state.slice1.character_media,
+        learning_app.state.slice3.planning.background, learning_app.state.slice1.market_receiver])
+
+    @asynccontextmanager
+    async def lifespan(_app):
         from app.logging_audit.otel_setup import shutdown_otel
-        shutdown_otel(timeout_millis=2000)
+        async with AsyncExitStack() as stack:
+            stack.callback(shutdown_otel, timeout_millis=2000)
+            await stack.enter_async_context(learning_app.router.lifespan_context(learning_app))
+            await stack.enter_async_context(additional_workers(_app))
+            yield
+    app.router.lifespan_context = lifespan
     return app
 
 

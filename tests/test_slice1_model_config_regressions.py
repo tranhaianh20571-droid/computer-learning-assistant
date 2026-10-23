@@ -119,8 +119,9 @@ def test_decrypt_failure_returns_safe_json_response(broken):
 def test_proxy_environment_cleanup_preserves_standard_proxies(monkeypatch, no_proxy, expected):
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
-    monkeypatch.chdir(root / "server/backend")
-    monkeypatch.syspath_prepend(str(root / "server/backend"))
+    runtime = root / "server/backend"
+    monkeypatch.chdir(runtime)
+    monkeypatch.syspath_prepend(str(runtime))
     from app.assembler import _prepare_http_proxy_environment
 
     standard = {"HTTP_PROXY": "http://proxy.example.test:8080",
@@ -146,8 +147,9 @@ def test_proxy_environment_cleanup_preserves_standard_proxies(monkeypatch, no_pr
 def test_proxy_cleanup_keeps_non_host_bracketed_entries(value, monkeypatch):
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
-    monkeypatch.chdir(root / "server/backend")
-    monkeypatch.syspath_prepend(str(root / "server/backend"))
+    runtime = root / "server/backend"
+    monkeypatch.chdir(runtime)
+    monkeypatch.syspath_prepend(str(runtime))
     from app.assembler import _prepare_http_proxy_environment
     monkeypatch.delenv("no_proxy", raising=False)
     monkeypatch.setenv("NO_PROXY", value)

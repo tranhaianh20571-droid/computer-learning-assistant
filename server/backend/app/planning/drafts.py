@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import timezone
 from typing import Callable, Optional
 
 from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
 from ..logging_audit.db import Database
 from ..logging_audit.repositories import PgAuditLog
@@ -53,6 +55,16 @@ class DraftService:
         self.db = db
         self.audit = audit
 
+    def _freeze_sources(self, sess, draft, lesson_pairs=()):
+        from ..materials.study_sources import freeze_sources
+        state = sess.scalar(select(PlanningTaskStateRow).where(
+            PlanningTaskStateRow.owner_user_id == draft.owner_user_id,
+            PlanningTaskStateRow.draft_id == draft.draft_id).order_by(PlanningTaskStateRow.updated_at.desc()))
+        ids = load_json_field(state.material_ids_json, []) if state else []
+        if not ids:
+            return "{}"
+        return json.dumps(freeze_sources(sess, draft.owner_user_id, ids, lesson_pairs), ensure_ascii=False)
+
     # ---- 审计 ----
     def _audit(self, event: str, *, actor_id: str, object_id: str, result: str, reason: str = "") -> None:
         if self.audit is None:
@@ -82,6 +94,8 @@ class DraftService:
             "base_version_id": row.base_version_id,
             "revision": row.revision,
             "content": load_json_field(row.content_json, {}),
+            "coverage": load_json_field(row.coverage_json, {}) if row.coverage_json else {},
+            "review": load_json_field(row.review_json, {}) if row.review_json else {},
             "saved_state": row.saved_state,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
@@ -152,6 +166,8 @@ class DraftService:
             # 内容形态校验（长度/层级/索引合法）；DAG 留给确认事务
             validate_content_json(row.draft_kind, content)
             row.content_json = json.dumps(content, ensure_ascii=False)
+            # 人工修改后旧体检结论不再代表当前草稿。
+            row.review_json = None
             row.revision += 1
             row.saved_state = saved_state
             row.updated_at = utcnow()
@@ -179,17 +195,28 @@ class DraftService:
         source_task_id: str,
         base_draft_revision: int = 0,
         lease=None,
+        publication_guard: Optional[Callable[[Session], None]] = None,
+        coverage: Optional[dict] = None,
+        review: Optional[dict] = None,
     ) -> dict:
         """AI 候选落库；人工编辑（更高 revision）后旧候选不得替换新草稿。"""
         with self.db.session() as sess:
             target_kind = "route" if candidate_kind != "outline_generate" else "course_outline"
             planning_target(sess, target_kind, target_id, owner_user_id, mutable=True)
-            if lease is not None:
+            if lease is not None or publication_guard is not None:
                 from ..tasks.service import LearningTaskRow
                 task = sess.get(LearningTaskRow, source_task_id, with_for_update=True)
-                if (not task or task.cancel_requested or task.generation != lease.generation
-                    or task.lease_token != lease.lease_token or not task.lease_until or task.lease_until <= utcnow()):
+                if not task or task.owner_user_id != owner_user_id or task.cancel_requested:
                     raise error("STALE_RESULT_DISCARDED", status=409)
+                lease_until = task.lease_until
+                if lease_until is not None and lease_until.tzinfo is None:
+                    lease_until = lease_until.replace(tzinfo=timezone.utc)
+                if lease is not None and (task.generation != lease.generation
+                    or task.lease_token != lease.lease_token or not lease_until or lease_until <= utcnow()):
+                    raise error("STALE_RESULT_DISCARDED", status=409)
+            # Check against this transaction after locking the task and before any candidate/draft write.
+            if publication_guard is not None:
+                publication_guard(sess)
             draft = (
                 sess.execute(
                     select(PlanningDraftRow).where(
@@ -222,12 +249,18 @@ class DraftService:
                     base_version_id=None,
                     revision=1,
                     content_json=json.dumps(content, ensure_ascii=False),
+                    coverage_json=json.dumps(coverage or {}, ensure_ascii=False) if coverage is not None else None,
+                    review_json=json.dumps(review or {}, ensure_ascii=False) if review is not None else None,
                     saved_state="saved",
                 )
                 sess.add(draft)
                 sess.flush()
             else:
                 draft.content_json = json.dumps(content, ensure_ascii=False)
+                if coverage is not None:
+                    draft.coverage_json = json.dumps(coverage, ensure_ascii=False)
+                if review is not None:
+                    draft.review_json = json.dumps(review, ensure_ascii=False)
                 draft.revision += 1
                 draft.saved_state = "saved"
                 draft.updated_at = utcnow()
@@ -296,6 +329,7 @@ class DraftService:
         idempotency_key: str,
         allow_duplicate: bool = False,
         duplicate_fingerprint: str | None = None,
+        acknowledge_issues: bool = False,
     ) -> dict:
         """确认草稿 → 不可变版本。单事务校验 + 建版本 + 指针 + 审计。"""
         with self.db.session() as sess:
@@ -344,8 +378,20 @@ class DraftService:
             if draft.revision != revision:
                 raise error("DRAFT_REVISION_MISMATCH", f"expected revision {draft.revision}", status=409)
 
+            review = load_json_field(draft.review_json, {}) if draft.review_json else {}
+            if review.get("acknowledgement_required") and not acknowledge_issues:
+                raise error(
+                    "PLANNING_REVIEW_REQUIRED",
+                    "规划体检存在关键缺口，需要用户确认后才能使用。",
+                    status=409,
+                )
+
             content = load_json_field(draft.content_json, {})
             validate_content_json(draft.draft_kind, content)
+            if draft.draft_kind == "route" and content.get("structure_version") == 2:
+                from .retry_policy import missing_courses
+                if missing_courses(content):
+                    raise error("INVALID_OUTLINE_STRUCTURE", status=400)
             identity = self._identity(sess, draft, target)
             identity_fingerprint = fingerprint(identity)
             if allow_duplicate and duplicate_fingerprint != identity_fingerprint:
@@ -392,12 +438,19 @@ class DraftService:
             ).scalar_one_or_none()
             or 0
         )
+        state = sess.execute(select(PlanningTaskStateRow).where(
+            PlanningTaskStateRow.owner_user_id == actor_id,
+            PlanningTaskStateRow.draft_id == draft.draft_id,
+        ).order_by(PlanningTaskStateRow.updated_at.desc())).scalars().first()
         version = RouteVersionRow(
             route_version_id=f"rv_{uuid.uuid4().hex[:12]}",
             route_id=route.route_id,
             version_no=max_no + 1,
             source_task_id=f"confirm:{idem}",
             prompt_binding_id=None,
+            source_snapshot_json=self._freeze_sources(sess, draft),
+            scope_snapshot_json=state.scope_contract_json if state else None,
+            coverage_snapshot_json=draft.coverage_json,
         )
         sess.add(version)
         sess.flush()
@@ -553,6 +606,13 @@ class DraftService:
             ))
         self._carry_metadata_progress(sess, course_id, source_outline_id, version.outline_version_id,
                                       raw_units, prerequisites)
+        from ..materials.study_sources import freeze_sources
+        route_version = sess.get(RouteVersionRow, source_route_version_id)
+        source = load_json_field(route_version.source_snapshot_json, {}) if route_version else {}
+        if source:
+            pairs = zip(lesson_ids, (l.model_dump() for u in units for l in u.lessons))
+            version.source_snapshot_json = json.dumps(freeze_sources(sess, course.owner_user_id,
+                source["material_ids"], pairs), ensure_ascii=False)
         course.current_outline_version_id = version.outline_version_id
         return version.outline_version_id
 
@@ -626,6 +686,8 @@ class DraftService:
         same_scope = old_outline and old_outline.goal_snapshot_ref == str(content.get("goal", "")) and old_outline.scope_snapshot_ref == str(content.get("scope", ""))
         self._carry_metadata_progress(sess, course.course_id, draft.base_version_id if same_scope else None,
                                       version.outline_version_id, content.get("units", []), candidate.prerequisites)
+        version.source_snapshot_json = self._freeze_sources(sess, draft, zip(
+            lesson_ids_by_index.values(), (l.model_dump() for u in candidate.units for l in u.lessons)))
         course.current_outline_version_id = version.outline_version_id
         self._audit(
             "config.changed", actor_id=actor_id, object_id=version.outline_version_id,

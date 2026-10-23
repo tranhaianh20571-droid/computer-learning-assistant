@@ -1,12 +1,18 @@
 """Owned first-segment cache, learning progress, cost bounds and server lookahead."""
 import json
+import os
+import uuid
+import pytest
 from datetime import timedelta
 from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from sqlalchemy import select,func
+from sqlalchemy import select,func,create_engine,text
+from sqlalchemy.engine import make_url
 from common_fixtures import make_user,auth_headers,synthetic_output_schema
-from test_teaching_assessments import database,env,LearningAdapter,finish  # noqa: F401
+from test_teaching_assessments import env,LearningAdapter,finish  # noqa: F401
+from backend.db import Database
+from backend.logging_audit.db import get_database_url
 from test_course_library import draft,confirm
 from backend.planning.models import ConversationRow,LessonProgressRow,utcnow
 from backend.teaching.learning_models import PreparedFirstSegmentRow,PreparedLessonPlanRow,LessonBlueprintRow
@@ -16,6 +22,35 @@ from backend.teaching.background import TeachingBackground
 
 OUTLINE={"title":"合成缓存课程","units":[{"title":"基础","lessons":[
     {"title":"键值关系","goal":"理解键值查找"},{"title":"更新映射","goal":"理解按键更新"}]}],"prerequisites":[]}
+
+
+@pytest.fixture(scope="module")
+def database():
+    """Background capacity assertions need an owned queue without other suites' leases."""
+    url = make_url(get_database_url())
+    schema = "prewarm_validation_" + uuid.uuid4().hex
+    admin = create_engine(url)
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    isolated = url.update_query_dict({"options": "-csearch_path=" + schema}).render_as_string(hide_password=False)
+    previous = {name: os.environ.get(name) for name in ("LEARNING_DATABASE_URL", "DATABASE_URL")}
+    os.environ.update(LEARNING_DATABASE_URL=isolated, DATABASE_URL=isolated)
+    db = Database(isolated)
+    try:
+        from backend.slice3_app import Slice3State
+        Slice3State(db)
+        db.create_all()
+        yield db
+    finally:
+        db.dispose()
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
 
 
 def setup(env,blocked=None):
@@ -31,6 +66,15 @@ def setup(env,blocked=None):
     state.teaching.model_adapter_factory=factory
     course,item=draft(env,OUTLINE,kind='course_outline');assert confirm(env,item).status_code==200
     overview=state.overview.course_overview(course,actor_id=owner)
+    # Freeze the real synthetic scope before measuring teaching/cache calls.
+    state.teaching.model_adapter_factory=lambda *args:LearningAdapter()
+    state.assessments.scopes.kick=lambda task:state.assessments.scopes._run(task)
+    try:
+        for unit in overview["units"]:
+            state.assessments.scopes.generate(course,unit["unit_id"],owner)
+            assert state.assessments.scopes.get(course,unit["unit_id"],owner)["status"]=="succeeded"
+    finally:
+        state.teaching.model_adapter_factory=factory
     return course,overview['units'][0]['lessons'][0]['lesson_id'],calls
 
 
@@ -104,7 +148,7 @@ def test_server_runs_next_segment_while_first_is_not_displayed_and_pause_stops_m
         for group,future,subject in list(background.pending.values()):future.result(timeout=10)
         workspace=client.get(f"/api/teaching/{start['conversation_id']}",headers=headers).json()
         assert [step['step_no'] for step in workspace['steps']]==[1,2]
-        assert not any(task['step_no']==3 for task in workspace['queued_tasks'])
+        assert any(task['step_no']==3 for task in workspace['queued_tasks'])
         client.post(f"/api/teaching/{start['conversation_id']}/checkpoint",headers=headers,json={
             'client_seq':1,'step_no':2,'position_ms':0,'board_state':{'presentation':{'paused':True}}})
         with service.db.session() as sess:

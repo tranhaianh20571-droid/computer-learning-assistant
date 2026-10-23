@@ -84,12 +84,14 @@ try{
  checks.push('audio_end_and_text_end_gate_automatic_next_segment');
   await voicePage.getByRole('button',{name:'暂停讲解',exact:true}).click();
   await second.context.close();
-  const third=await coursePage(true),skipPage=third.page;
-  await skipPage.getByRole('button',{name:'继续文字讲解',exact:true}).waitFor({timeout:30000});
-  await skipPage.getByRole('button',{name:'继续文字讲解',exact:true}).click();
-  await skipPage.waitForFunction(()=>window.__lectureMedia.at(-1)?.src.includes('/audio/'),null,{timeout:30000});
-  await skipPage.waitForTimeout(400);assert(await skipPage.evaluate(()=>window.__lectureMedia.at(-1).paused));
-  checks.push('text_only_choice_does_not_restart_late_audio');
+  const third=await coursePage(true),blockedPage=third.page;
+  await blockedPage.getByRole('button',{name:'点击开启声音',exact:true}).waitFor({timeout:30000});
+  const blockedText=await blockedPage.locator('.stream').textContent();
+  await blockedPage.waitForTimeout(13000);
+  assert.equal(await blockedPage.locator('.stream').textContent(),blockedText);
+  assert.equal(await blockedPage.getByRole('button',{name:'继续文字讲解',exact:true}).count(),0);
+  assert(await blockedPage.evaluate(()=>window.__lectureMedia.at(-1).paused));
+  checks.push('blocked_audio_preserves_text_gate_after_timeout');
   await third.context.close();assert.deepEqual(errors,[]);
  writeFileSync(output+'/lecture-audio-browser.json',JSON.stringify({checks,pageErrors:errors,synthetic:true},null,2));console.log(JSON.stringify({checks,pageErrors:errors}));
 }catch(error){

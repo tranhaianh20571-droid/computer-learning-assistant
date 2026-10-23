@@ -48,14 +48,127 @@ def engine():
         admin.dispose()
 
 
+def test_review_migration_round_trip(engine):
+    with engine.begin() as connection:
+        module = migration("l2b3c4d5e6f7_course_review.py", connection)
+        module.upgrade()
+        module.upgrade()
+        tables = set(inspect(connection).get_table_names())
+        assert {"review_cards", "review_sessions", "review_answers", "review_logs"} <= tables
+        assert "draft_json" in {c["name"] for c in inspect(connection).get_columns("review_sessions")}
+        module.downgrade()
+        assert "review_sessions" not in inspect(connection).get_table_names()
+
+
 def test_revision_chain_has_single_native_head():
     scripts = ScriptDirectory(str(ROOT / "server/backend/app/alembic"))
-    assert scripts.get_heads() == ["m7a8b9c0d1e2"]
+    assert scripts.get_heads() == ["l2b3c4d5e6f7"]
+    assert scripts.get_revision("l2b3c4d5e6f7").down_revision == "k1a2b3c4d5e6"
+    assert scripts.get_revision("k1a2b3c4d5e6").down_revision == "j0a1b2c3d4e5"
+    assert scripts.get_revision("j0a1b2c3d4e5").down_revision == "i9p0q1r2s3t4"
+    assert scripts.get_revision("i9p0q1r2s3t4").down_revision == "h8o9p0q1r2s3"
+    assert scripts.get_revision("h8o9p0q1r2s3").down_revision == "g7n8o9p0q1r2"
+    assert scripts.get_revision("g7n8o9p0q1r2").down_revision == "f6m7n8o9p0q1"
+    assert scripts.get_revision("f6m7n8o9p0q1").down_revision == "e5l6m7n8o9p0"
+    assert scripts.get_revision("e5l6m7n8o9p0").down_revision == "d4i5j6k7l8m9"
+    assert scripts.get_revision("d4i5j6k7l8m9").down_revision == "c3d4e5f6a7b8"
+    assert scripts.get_revision("c3d4e5f6a7b8").down_revision == "c3h4i5j6k7l8"
+    assert scripts.get_revision("c3h4i5j6k7l8").down_revision == "b2g3h4i5j6k7"
+    assert scripts.get_revision("b2g3h4i5j6k7").down_revision == "a1f2g3h4i5j6"
+    assert scripts.get_revision("a1f2g3h4i5j6").down_revision == "z0e1f2a3b4c5"
+    assert scripts.get_revision("z0e1f2a3b4c5").down_revision == "y9d0e1f2a3b4"
+    assert scripts.get_revision("y9d0e1f2a3b4").down_revision == "x8c9d0e1f2a3"
+    assert scripts.get_revision("x8c9d0e1f2a3").down_revision == "w7b8c9d0e1f2"
+    assert scripts.get_revision("w7b8c9d0e1f2").down_revision == "v6a7b8c9d0e1"
+    assert scripts.get_revision("v6a7b8c9d0e1").down_revision == "u5f6a7b8c9d0"
+    assert scripts.get_revision("u5f6a7b8c9d0").down_revision == "t4f5a6b7c8d9"
+    assert scripts.get_revision("t4f5a6b7c8d9").down_revision == "s3e4f5a6b7c8"
+    assert scripts.get_revision("s3e4f5a6b7c8").down_revision == "r2f3a4b5c6d7"
+    assert scripts.get_revision("r2f3a4b5c6d7").down_revision == "q1e2f3a4b5c6"
+    assert scripts.get_revision("q1e2f3a4b5c6").down_revision == "p0d1e2f3a4b5"
+    assert scripts.get_revision("p0d1e2f3a4b5").down_revision == "o9c0d1e2f3a4"
+    assert scripts.get_revision("o9c0d1e2f3a4").down_revision == "n8b9c0d1e2f3"
+    assert scripts.get_revision("n8b9c0d1e2f3").down_revision == "m7a8b9c0d1e2"
     assert scripts.get_revision("m7a8b9c0d1e2").down_revision == "l6f7a8b9c0d1"
     assert scripts.get_revision("l6f7a8b9c0d1").down_revision == "k5e6f7a8b9c0"
     assert scripts.get_revision("k5e6f7a8b9c0").down_revision == "j4d5e6f7a8b9"
     assert scripts.get_revision("j4d5e6f7a8b9").down_revision == "i3c4d5e6f7a8"
     assert scripts.get_revision("i3c4d5e6f7a8").down_revision == "h2b3c4d5e6f7"
+
+
+def test_memory_lifecycle_upgrade_is_idempotent_and_preserves_stable_tombstones(engine):
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE memory_sources (source_id varchar(64) PRIMARY KEY, owner_user_id varchar(64))"))
+        connection.execute(text("INSERT INTO memory_sources VALUES ('synthetic-old','synthetic-owner')"))
+        module = migration("k1a2b3c4d5e6_memory_lifecycle.py", connection)
+        module.upgrade()
+        module.upgrade()
+        assert connection.scalar(text("SELECT event_key FROM memory_sources")) is None
+        assert inspect(connection).has_table("memory_learning_evidence")
+        assert "native_committed" in {c["name"] for c in inspect(connection).get_columns("memory_maintenance_jobs")}
+        connection.execute(text("UPDATE memory_sources SET event_key='synthetic-stable'"))
+        with pytest.raises(RuntimeError, match="tombstones"):
+            module.downgrade()
+        connection.execute(text("UPDATE memory_sources SET event_key=NULL"))
+        module.downgrade()
+        assert connection.scalar(text("SELECT count(*) FROM memory_sources")) == 1
+
+
+def test_study_sources_migration_preserves_legacy_and_refuses_loss(engine):
+    with engine.begin() as connection:
+        for table in ("route_versions", "outline_versions"):
+            connection.execute(text(f"CREATE TABLE {table} (version_id text PRIMARY KEY)"))
+            connection.execute(text(f"INSERT INTO {table} VALUES ('synthetic-legacy')"))
+        module = migration("c3h4i5j6k7l8_study_sources.py", connection)
+        module.upgrade()
+        assert connection.scalar(text("SELECT source_snapshot_json FROM outline_versions")) == "{}"
+        connection.execute(text("UPDATE outline_versions SET source_snapshot_json=:value"), {"value": '{"version":1}'})
+        with pytest.raises(RuntimeError):
+            module.downgrade()
+        connection.execute(text("UPDATE outline_versions SET source_snapshot_json='{}'"))
+        module.downgrade()
+        assert connection.scalar(text("SELECT count(*) FROM outline_versions")) == 1
+
+
+def test_personal_retrieval_migration_preserves_chunks_and_blocks_loss(engine):
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE text_chunks (chunk_id text PRIMARY KEY)"))
+        connection.execute(text("INSERT INTO text_chunks VALUES ('synthetic-old')"))
+        module = migration("d4i5j6k7l8m9_personal_retrieval.py", connection)
+        module.upgrade()
+        assert connection.scalar(text("SELECT private_text FROM text_chunks")) == ""
+        assert inspect(connection).has_table("personal_memory_migrations")
+        connection.execute(text("UPDATE text_chunks SET private_text='synthetic private text'"))
+        with pytest.raises(RuntimeError):
+            module.downgrade()
+
+
+def test_memory_migration_refuses_nonempty_downgrade(engine):
+    with engine.begin() as connection:
+        module = migration("x8c9d0e1f2a3_user_memory.py", connection)
+        module.upgrade()
+        connection.execute(text("INSERT INTO memory_settings(owner_user_id, enabled) VALUES ('synthetic_owner', false)"))
+        with pytest.raises(RuntimeError):
+            module.downgrade()
+        connection.execute(text("DELETE FROM memory_settings"))
+        module.downgrade()
+
+
+def test_document_attachment_migration_preserves_state_and_refuses_lossy_downgrade(engine):
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE materials (material_id varchar(64) PRIMARY KEY)"))
+        module = migration("y9d0e1f2a3b4_document_attachments.py", connection)
+        module.upgrade()
+        connection.execute(text("INSERT INTO materials VALUES ('synthetic-material')"))
+        connection.execute(text("""INSERT INTO document_attachments
+            (material_id, owner_user_id, upload_key, task_id, config_id, config_version)
+            VALUES ('synthetic-material', 'synthetic-owner', 'synthetic-upload',
+                    'synthetic-task', 'synthetic-config', 1)"""))
+        with pytest.raises(RuntimeError):
+            module.downgrade()
+        assert connection.scalar(text("SELECT count(*) FROM document_attachments")) == 1
+        connection.execute(text("DELETE FROM document_attachments"))
+        module.downgrade()
 
 
 def test_upgrade_preserves_rows_and_accepts_full_refinement_subject(engine):

@@ -9,6 +9,8 @@ from sqlalchemy import create_engine, select, func
 from sqlalchemy.pool import StaticPool
 
 from backend.agents.task_binding import AgentBudgetRow
+from backend.auth.models import UserRow
+from backend.teaching.unit_scope import UnitScopeRow
 from backend.logging_audit.db import Database
 from backend.logging_audit.models import TaskStateRow, TaskEventRow
 from backend.logging_audit.repositories import PgTaskEventStore
@@ -30,7 +32,7 @@ def environment():
     db.engine = create_engine('sqlite+pysqlite:///:memory:', poolclass=StaticPool,
         connect_args={'check_same_thread': False})
     db._factory.configure(bind=db.engine)
-    for model in (CourseRow, OutlineVersionRow, CourseUnitRow, LessonRow, LessonContentVersionRow,
+    for model in (UserRow, UnitScopeRow, CourseRow, OutlineVersionRow, CourseUnitRow, LessonRow, LessonContentVersionRow,
                   ConversationRow, PlanningTaskStateRow, RouteVersionRow, LessonBlueprintRow,
                   PreparedLessonPlanRow, TeachingStepRow, PromptBindingRow, LearningTaskRow,
                   AgentBudgetRow, TaskAttemptRow, TaskStateRow, TaskEventRow):

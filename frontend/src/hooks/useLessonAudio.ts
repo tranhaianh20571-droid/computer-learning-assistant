@@ -1,64 +1,90 @@
 import {useEffect,useRef,useState} from "react";
 import {api} from "../api";
-import {audioCharacters} from "../lib/audioTiming.ts";
+import {audioCharacters,exactAudioAlignment} from "../lib/audioTiming.ts";
 
 export function lessonAudioRequired(workspace:any,step:any,current:number){
-  if(!step?.text || workspace?.tts_authorized===false || workspace?.audio_mode==="text")return false;
+  if(workspace?.tts_authorized===false || workspace?.audio_mode==="text")return false;
   const pending=workspace?.queued_tasks?.some((task:any)=>task.kind==="tts"&&task.step_no===current&&["queued","leased","running"].includes(task.status));
-  return Boolean(workspace?.tts_authorized===true || workspace?.audio_mode==="tts" || (step.audio_ready&&step.audio_id) || pending);
+  return Boolean(workspace?.tts_authorized===true || workspace?.audio_mode==="tts" || (step?.audio_ready&&step.audio_id) || pending);
 }
 
 export const LESSON_AUDIO_WAIT_MS = 12_000;
+type AudioState = "idle"|"playing"|"paused"|"blocked"|"ended"|"failed"|"waiting";
 
 export function useLessonAudio(conversation:string,current:number,step:any,playing:boolean,bufferRef:any,posRef:any,resume:any,audioRequired=false){
-  const media=useRef<HTMLAudioElement|null>(null),source=useRef(""),currentStep=useRef(step);
-  const [state,setState]=useState<"idle"|"playing"|"paused"|"blocked"|"ended"|"failed">("idle");
-  const [textOnly,setTextOnly]=useState(false);
-  const latestTextOnly=useRef(textOnly);latestTextOnly.current=textOnly;
-  const latestAudioRequired=useRef(audioRequired);latestAudioRequired.current=audioRequired;
-  currentStep.current=step;
-  const latestPlaying=useRef(playing);latestPlaying.current=playing;
-  const audioWait=useRef<{key:string;deadline:number}|null>(null);
-  const useText=()=>{
-    latestTextOnly.current=true;
-    media.current?.pause();
-    setState("paused");setTextOnly(true);
-    bufferRef.current.audioGate(`step:${current}`,false);
-    bufferRef.current.audioClock(`step:${current}`,null);
+  const media=useRef<HTMLAudioElement|null>(null),source=useRef(""),sourceEpoch=useRef(0);
+  const [state,setState]=useState<AudioState>("idle"),[retryCount,setRetryCount]=useState(0);
+  const latest=useRef({step,current,playing,audioRequired});latest.current={step,current,playing,audioRequired};
+  const subtitleKey=JSON.stringify(step?.audio_subtitles||[]);
+  const gate=(blocked:boolean)=>bufferRef.current.audioGate(`step:${latest.current.current}`,blocked);
+  const sync=()=>{
+    const value=latest.current,audio=media.current;
+    if(!audio)return;
+    posRef.current=Math.floor(audio.currentTime*1000);
+    bufferRef.current.audioClock(`step:${value.current}`,audioCharacters(
+      value.step?.text||"",value.step?.audio_subtitles||[],posRef.current,value.step?.board?.alignment_version===1));
   };
   const play=()=>{
-    if(latestTextOnly.current||!latestAudioRequired.current)return;
-    const audio=media.current;if(!audio||!source.current)return;
-    const expected=source.current;
-    audio.play().then(()=>{if(source.current===expected&&!latestTextOnly.current&&latestAudioRequired.current){const item=currentStep.current;const chars=audioCharacters(item?.text||"",item?.audio_subtitles||[],posRef.current);bufferRef.current.audioGate(`step:${item?.step_no}`,false);bufferRef.current.audioClock(`step:${item?.step_no}`,chars);setState("playing");}else if(latestTextOnly.current||!latestAudioRequired.current)audio.pause();}).catch(error=>{
-      if(source.current===expected&&!latestTextOnly.current)setState(error.name==="NotAllowedError"?"blocked":"failed");
+    const audio=media.current;
+    if(!audio||!source.current||!latest.current.audioRequired||!latest.current.playing)return;
+    const epoch=sourceEpoch.current;
+    audio.play().then(()=>{
+      if(epoch!==sourceEpoch.current)return;
+      if(!latest.current.audioRequired||!latest.current.playing){audio.pause();return;}
+      if(!audio.paused&&audio.readyState>=2){sync();gate(false);setState("playing");}
+    }).catch(error=>{
+      if(epoch!==sourceEpoch.current)return;
+      gate(true);setState(error.name==="NotAllowedError"?"blocked":navigator.onLine?"failed":"waiting");
     });
   };
   useEffect(()=>{
     const audio=new Audio();audio.preload="auto";media.current=audio;
     let frame=0;
     const tick=()=>{
-      if(source.current&&latestPlaying.current&&!audio.paused){
-        posRef.current=Math.floor(audio.currentTime*1000);
-        bufferRef.current.audioClock(`step:${currentStep.current?.step_no}`,audioCharacters(currentStep.current?.text||"",
-          currentStep.current?.audio_subtitles||[],posRef.current));
-      }
+      if(source.current&&latest.current.playing&&!audio.paused&&!audio.seeking&&audio.readyState>=2)sync();
       frame=requestAnimationFrame(tick);
     };
     frame=requestAnimationFrame(tick);
-    audio.onended=()=>{setState("ended");bufferRef.current.audioClock(`step:${currentStep.current?.step_no}`,
-      Array.from(currentStep.current?.text||"").length);};
-    audio.onerror=()=>{if(source.current)setState("failed");};
-    return()=>{cancelAnimationFrame(frame);audio.pause();audio.removeAttribute("src");audio.load();media.current=null;source.current="";};
+    const waiting=()=>{if(source.current){gate(true);setState("waiting");}};
+    audio.onwaiting=waiting;audio.onseeking=waiting;
+    audio.onstalled=()=>{if(audio.readyState<3)waiting();};
+    audio.onseeked=()=>{
+      if(source.current&&latest.current.playing&&!audio.paused&&audio.readyState>=2){
+        sync();gate(false);setState("playing");
+      }
+    };
+    audio.onplaying=()=>{
+      if(!source.current||!latest.current.playing||!latest.current.audioRequired){audio.pause();return;}
+      sync();gate(false);setState("playing");
+    };
+    audio.oncanplay=()=>{if(latest.current.playing)play();};
+    audio.onended=()=>{
+      if(!source.current||!latest.current.playing||!latest.current.audioRequired)return;
+      sync();
+      gate(false);setState("ended");
+      bufferRef.current.audioClock(`step:${latest.current.current}`,Array.from(latest.current.step?.text||"").length);
+    };
+    audio.onerror=()=>{if(source.current){sourceEpoch.current++;gate(true);setState(navigator.onLine?"failed":"waiting");}};
+    return()=>{
+      sourceEpoch.current++;cancelAnimationFrame(frame);
+      audio.onplaying=null;audio.onwaiting=null;audio.onstalled=null;audio.onseeking=null;audio.onseeked=null;
+      audio.oncanplay=null;audio.onended=null;audio.onerror=null;
+      audio.pause();audio.removeAttribute("src");audio.load();media.current=null;source.current="";
+    };
   },[conversation]);
   useEffect(()=>{
-    setTextOnly(false);
-  },[conversation,current]);
-  useEffect(()=>{
     const audio=media.current;if(!audio)return;
-    audio.pause();setState("idle");source.current="";
+    sourceEpoch.current++;source.current="";audio.pause();gate(audioRequired);setState("idle");
     audio.removeAttribute("src");audio.load();
     if(audioRequired&&step?.audio_ready&&step.audio_id){
+      const cues=step.audio_subtitles;
+      if(step.board?.alignment_version===1&&!exactAudioAlignment(step.text||"",cues||[])){
+        setState("failed");return;
+      }
+      if(!Array.isArray(cues)||!cues.length||!cues.every((cue:any)=>
+        Number.isFinite(cue.begin_ms)&&Number.isFinite(cue.end_ms)&&cue.begin_ms>=0&&cue.end_ms>cue.begin_ms)){
+        setState("failed");return;
+      }
       source.current=step.audio_id;audio.src=api.audioUrl(step.audio_id);
       const offset=resume?.step_no===current&&resume?.presentation?.audio_id===step.audio_id?resume.position_ms:0;
       posRef.current=offset;
@@ -70,39 +96,38 @@ export function useLessonAudio(conversation:string,current:number,step:any,playi
           seeked=true;
         }catch{/* The canplay event retries after the source becomes seekable. */}
       };
-      audio.onloadedmetadata=restorePosition;audio.oncanplay=restorePosition;
-      if(latestPlaying.current&&!latestTextOnly.current)play();else setState("paused");
+      audio.onloadedmetadata=restorePosition;audio.oncanplay=()=>{restorePosition();play();};
+      if(latest.current.playing)play();else setState("paused");
     }
-    return()=>{audio.pause();audio.onloadedmetadata=null;audio.oncanplay=null;bufferRef.current.audioClock(`step:${current}`,null);};
-  },[conversation,current,step?.audio_id,step?.audio_ready,audioRequired]);
+    return()=>{sourceEpoch.current++;audio.pause();audio.onloadedmetadata=null;audio.oncanplay=null;};
+  },[conversation,current,step?.audio_id,step?.audio_ready,audioRequired,subtitleKey]);
   useEffect(()=>{
-    if(!media.current||!source.current)return;
-    if(!playing){media.current.pause();if(state!=="ended")setState("paused");}
-    else if(!textOnly&&state!=="ended")play();
-  },[playing,textOnly]);
+    if(!audioRequired){gate(false);bufferRef.current.audioClock(`step:${current}`,null);return;}
+    if(!playing){media.current?.pause();gate(true);if(state!=="ended")setState("paused");}
+    else if(state!=="ended")play();
+  },[playing,audioRequired]);
   useEffect(()=>{
-    if(audioRequired&&!latestTextOnly.current&&state!=="playing"&&state!=="ended"){
-      bufferRef.current.audioGate(`step:${current}`,true);
-    }else if(!audioRequired||latestTextOnly.current)bufferRef.current.audioClock(`step:${current}`,null);
-  },[state,current,audioRequired]);
+    if(audioRequired&&!step?.audio_ready&&["failed","invalid"].includes(step?.audio_status)){
+      gate(true);setState("failed");
+    }
+  },[audioRequired,step?.audio_ready,step?.audio_status]);
   useEffect(()=>{
-    const key=`step:${current}`;
-    if(audioRequired&&!textOnly)bufferRef.current.audioGate(key,true);
-    else bufferRef.current.audioGate(key,false);
-  },[current,audioRequired,textOnly]);
-  useEffect(()=>{
-    if(!step?.text||!audioRequired||textOnly||!playing||state==="playing"||state==="ended"){audioWait.current=null;return;}
-    if(state==="failed"){useText();return;}
-    const key=`${conversation}:${current}`;
-    if(audioWait.current?.key!==key)audioWait.current={key,deadline:Date.now()+LESSON_AUDIO_WAIT_MS};
-    const remaining=Math.max(0,audioWait.current.deadline-Date.now());
-    const timer=window.setTimeout(useText,remaining);
+    if(!audioRequired||!playing||["playing","ended","failed","blocked"].includes(state))return;
+    const timer=window.setTimeout(()=>{gate(true);setState("waiting");},LESSON_AUDIO_WAIT_MS);
     return()=>window.clearTimeout(timer);
-  },[conversation,current,Boolean(step?.text),audioRequired,textOnly,playing,state]);
-  return {state,textOnly:textOnly||!audioRequired,sourceId:!textOnly&&audioRequired?source.current:null,pause:()=>{
-      if(media.current&&source.current&&!latestTextOnly.current)posRef.current=Math.floor(media.current.currentTime*1000);
-      media.current?.pause();
-    },enable:play,
-    skip:useText,
-    finished:!audioRequired||textOnly||state==="ended"};
+  },[conversation,current,audioRequired,playing,state,retryCount]);
+  return {state,textOnly:!audioRequired,sourceId:audioRequired?source.current:null,
+    alignmentFailed:step?.board?.alignment_version===1&&step?.audio_ready&&!exactAudioAlignment(step.text||"",step.audio_subtitles||[]),
+    pause:()=>{sourceEpoch.current++;if(media.current&&source.current)sync();media.current?.pause();gate(audioRequired);},
+    enable:()=>{setRetryCount(value=>value+1);setState("idle");play();},
+    retry:()=>{
+      setRetryCount(value=>value+1);setState("idle");gate(audioRequired);
+      if(source.current&&media.current){
+        sourceEpoch.current++;media.current.load();
+        const offset=posRef.current;
+        media.current.onloadedmetadata=()=>{if(media.current)media.current.currentTime=offset/1000;};
+        play();
+      }
+    },
+    finished:!audioRequired||state==="ended"};
 }

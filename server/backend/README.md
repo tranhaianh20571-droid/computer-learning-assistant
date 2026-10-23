@@ -1,159 +1,21 @@
-# 学习助手伙伴 · 后端
+# 生产后端
 
-这是 `server/` 的生产 FastAPI 应用。产品前端位于仓库根目录的 `frontend/`，模板前端未纳入此工程。`tests/support/backend/` 仅是契约测试兼容层。
+唯一启动目标为 `app.main:app`，完整装配在 app/assembler.py。Python 依赖使用上层 uv 工作区及 uv.lock。
 
-从仓库根目录运行全套测试：
+在本目录执行 `uv run uvicorn app.main:app --host 127.0.0.1 --port 8000`。环境、数据库与前端启动见[开发指南](../../文档/开发/README.md)。数据库迁移独立执行，不因目录整理自动运行。
 
-```console
-uv run --project server/backend pytest tests
-```
+测试真源是根 [tests](../../tests/README.md)；本目录 tests 仅保留明确标记的模板参考。scripts/test.sh 必须显式传入专项路径或选择器，没有参数时拒绝执行，不默认运行全量。
 
-当前切片 0 的本地验证使用 `uv` 和独立前端开发服务器；下方 Docker/模板说明保留作后续部署整理参考，不能视为已经完成的生产部署方案。
+容器配置在根 [deploy](../../deploy/README.md)，构建上下文为 server。Dockerfile 只构建后端，不依赖不存在的 server/frontend。
 
-## Requirements
-
-* [Docker](https://www.docker.com/).
-* [uv](https://docs.astral.sh/uv/) for Python package and environment management.
-
-## Local Development
-
-Run the backend locally and connect it to PostgreSQL in Docker Compose.
-
-From the project root, start PostgreSQL and Mailpit:
-
-```console
-$ docker compose up -d db mailpit
-```
-
-Then, from `server/backend/`, install the dependencies, prepare the database, and start the development server:
-
-```console
-$ uv sync
-$ uv run bash scripts/prestart.sh
-$ uv run fastapi dev
-```
-
-The API is available at `http://localhost:8000`, with automatic interactive docs at `http://localhost:8000/docs`.
-
-### Product slice 0
-
-The `server/backend` application is the canonical runtime baseline. The template UI is not served; the product UI is the repository-level `frontend/` app. After migrations, run `uv run python scripts/bootstrap_slice0.py` once to create the first product administrator from `FIRST_SUPERUSER` and `FIRST_SUPERUSER_PASSWORD`. Product identity and task routes are available under `/api/auth/*` and `/api/tasks/*`; the template compatibility routes remain under `/api/v1/*`.
-
-## General Workflow
-
-Run backend commands from `server/backend/` with `uv run`. Make sure your editor uses the Python interpreter at `server/.venv/Scripts/python.exe` on Windows or `server/.venv/bin/python` on Linux/macOS.
-
-Modify or add SQLModel models for data and SQL tables in `./app/models.py`, API endpoints in `./app/api/`, CRUD (Create, Read, Update, Delete) utils in `./app/crud.py`.
-
-## VS Code
-
-There are already configurations in place to run the backend through the VS Code debugger, so that you can use breakpoints, pause and explore variables, etc.
-
-The setup is also already configured so you can run the tests through the VS Code Python tests tab.
-
-## Full Stack with Docker Compose
-
-To run the backend and built frontend in Docker Compose:
-
-```console
-$ docker compose run --rm backend bash scripts/prestart.sh
-$ docker compose watch
-```
-
-The application is available at `http://localhost:8000`.
-
-### Docker Compose Override
-
-The `compose.override.yml` file contains local settings for published ports, source synchronization, automatic image rebuilds, and backend reloads. Docker Compose applies it automatically when you run `docker compose` without an explicit file list.
-
-To open a shell in the backend container:
-
-```console
-$ docker compose exec backend bash
-```
-
-## Backend Tests
-
-To test the backend from the `backend` directory, run:
-
-```console
-$ uv run bash scripts/test.sh
-```
-
-The tests run with Pytest. Modify existing template tests or add new ones in `./tests/`; the repository-level contract tests are in `../../tests/`.
-
-If you use GitHub Actions, the tests will run automatically.
-
-### Test a Running Stack
-
-If your stack is already up and you just want to run the tests, you can use:
-
-```bash
-docker compose exec backend bash scripts/tests-start.sh
-```
-
-The `/app/backend/scripts/tests-start.sh` script calls `pytest`. If you need to pass extra arguments to `pytest`, you can pass them to that command and they will be forwarded.
-
-For example, to stop on first error:
-
-```bash
-docker compose exec backend bash scripts/tests-start.sh -x
-```
-
-### Test Coverage
-
-When the tests run, they generate `htmlcov/index.html`. Open it in your browser to inspect the test coverage.
-
-## Migrations
-
-Make sure you create a revision of your models and upgrade the database with that revision every time you change them. From the `backend` directory, use `uv` to run Alembic against the PostgreSQL container:
-
-* Alembic is already configured to import your SQLModel models from `./app/models.py`.
-
-* After changing a model (for example, adding a column), create a revision:
-
-```console
-$ uv run alembic revision --autogenerate -m "Add column last_name to User model"
-```
-
-* Commit to the git repository the files generated in the alembic directory.
-
-* After creating the revision, run the migration in the database (this is what will actually change the database):
-
-```console
-$ uv run alembic upgrade head
-```
-
-If you don't want to use migrations at all, uncomment the lines in the file at `./app/core/db.py` that end in:
-
-```python
-SQLModel.metadata.create_all(engine)
-```
-
-and comment the line in the file `scripts/prestart.sh` that contains:
-
-```console
-$ alembic upgrade head
-```
-
-If you don't want to start with the default models and want to remove them / modify them, from the beginning, without having any previous revision, you can remove the revision files (`.py` Python files) under `./app/alembic/versions/`. And then create a first migration as described above.
-
-## Email Templates
-
-The email templates are written with [React Email](https://react.email) in `./packages/react-email/`. The `emails` directory holds one component per email and the `ui` directory holds the shared components (layout, heading, button, link, callout).
-
-The rendered HTML in `./app/email-templates/` is generated from those components. It is what the application sends and should not be edited by hand.
-
-To preview the emails while editing them, start the dev server from the root of the project:
-
-```console
-$ bun run email:dev
-```
-
-Values coming from the backend are declared as Jinja placeholders in the component props, for example `username = "{{ username }}"`. The context for each email is built in `generate_*_email()` in `./app/utils.py`, so a new placeholder needs to be added there too.
-
-Once you are done, regenerate the templates used by the application:
-
-```console
-$ bun run email:export
-```
+对象备份使用 `BACKUP_STORAGE_DIR`（进程环境变量），默认在业务存储同级的
+`storage-backups/`；禁止与业务目录相同或互相嵌套。备份读取使用该目录内的
+`backup_key`，旧业务目录 `backups/` 只保留兼容轮换，不自动迁移。修改配置时
+须同时迁移已有备份目录，账本不保存绝对路径。这是对象卷与清单备份，数据库
+快照仍由独立工具完成，不提供完整数据库灾备恢复功能。
+资源管理器已接入自动调度、资源账本、固定保护、目录迁移与内存软预算，
+设置入口为“存储与性能”。默认前七次成功启动对账只观察，之后按策略回收
+可重建缓存与无引用对象；有效教材和学习记录不按年龄删除。
+账本迁移为 `h8o9p0q1r2s3`，控制目录位于初始对象目录同级，
+迁移后须保留该控制目录及旧副本；备份目录独立保持。
+详见[完整实施说明](../../文档/开发/本地资源管理完整实施.md)。

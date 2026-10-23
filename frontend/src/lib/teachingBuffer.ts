@@ -1,5 +1,8 @@
 /** One client-side presentation clock. No per-character network/database work. */
-export type Beat = { id: string; text: string; block_ids: string[]; highlight_ids?: string[]; unit_id?: string };
+import {orderedBoardBlocks} from "./boardGroups.ts";
+import {alignedBoard} from "./boardAlignment.ts";
+import type {BoardCue} from "./boardAlignment.ts";
+export type Beat = { id: string; text: string; block_ids: string[]; highlight_ids?: string[]; unit_id?: string;cues?:BoardCue[];pdf_focus?:any };
 export type BufferedTeaching = {
   text: string; shown: number; board: any; beats: Beat[]; epoch: string;
   final: boolean; active: boolean; credit: number; step_no: number; followup: boolean;
@@ -12,7 +15,7 @@ export class TeachingBuffer {
   setPaused(paused: boolean) {
     if (paused === this.paused) return;
     if (paused) {
-      for (const [key, entry] of this.entries) if (!entry.followup) this.frozen.set(key, this.view(key));
+      for (const [key] of this.entries) this.frozen.set(key, this.view(key));
     } else this.frozen.clear();
     this.paused = paused;
   }
@@ -27,14 +30,14 @@ export class TeachingBuffer {
     Object.assign(entry, value, { epoch });
     if (historical) entry.shown = Array.from(entry.text).length;
     // First character appears immediately, but a background prefetch stays hidden.
-    if (entry.active && entry.revealReady && (!this.paused || entry.followup) && entry.shown === 0 && entry.text) entry.shown = 1;
+    if (entry.active && entry.revealReady && !this.paused && entry.shown === 0 && entry.text) entry.shown = 1;
     return entry;
   }
   advance(milliseconds: number) {
     let changed = false;
     for (const entry of this.entries.values()) {
       const total = Array.from(entry.text).length;
-      if (!entry.active || !entry.revealReady || (this.paused && !entry.followup) || entry.shown >= total) continue;
+      if (!entry.active || !entry.revealReady || this.paused || entry.shown >= total) continue;
       if(entry.audioChars!==undefined){
         const next=Math.min(total,Math.max(entry.shown,entry.audioChars));
         if(next!==entry.shown){entry.shown=next;changed=true;}
@@ -60,21 +63,34 @@ export class TeachingBuffer {
     const entry=this.entries.get(key);
     if(entry)entry.audioChars=chars===null?undefined:Math.max(0,chars);
   }
+  restoreCursor(key:string,chars:number){
+    const entry=this.entries.get(key);
+    if(!entry)return;
+    entry.shown=Math.max(0,Math.min(Array.from(entry.text).length,chars));
+    entry.credit=0;entry.delay=0;entry.audioChars=entry.shown;
+    this.frozen.delete(key);
+  }
   audioGate(key:string,blocked:boolean){
     const entry=this.entries.get(key);
     if(!entry)return;
     entry.revealReady=!blocked;
-    if(blocked){entry.audioChars=0;entry.shown=0;entry.credit=0;entry.delay=0;}
+    if(blocked){entry.audioChars=entry.shown;entry.credit=0;entry.delay=0;}
   }
   view(key: string) {
     const entry = this.entries.get(key);
     if (!entry) return null;
-    if (this.paused && !entry.followup && this.frozen.has(key)) return this.frozen.get(key);
+    if (this.paused && this.frozen.has(key)) return this.frozen.get(key);
     const text = Array.from(entry.text).slice(0, entry.shown).join("");
-    const blocks = entry.board?.presentation?.blocks || [];
+    let pdfFocus=entry.board?.pdf_focus,beatOffset=0;
+    for(const beat of entry.beats){
+      if(entry.shown>beatOffset&&beat.pdf_focus)pdfFocus=beat.pdf_focus;
+      beatOffset+=Array.from(beat.text).length;
+    }
+    const blocks = orderedBoardBlocks(entry.board?.presentation?.blocks || [],entry.beats);
     let visible = blocks, highlights: string[] = [];
     const progress = new Map<string, number>();
     let writingId = "", writingUnitId = "";
+    let cueWriting:any=null;
     const revealGroup = (ids: string[], ratio: number, unitId: string) => {
       // block_ids are the model's semantic order. Do not reorder them by the
       // saved board layout: layout order is geometric, not teaching order.
@@ -86,15 +102,21 @@ export class TeachingBuffer {
       let budget = Math.max(0, Math.min(1, ratio)) * total;
       members.forEach((block: any, index: number) => {
         const part = Math.max(0, Math.min(1, budget / weights[index]));
-        if (part > 0) {
-          progress.set(block.id, Math.max(progress.get(block.id) || 0, part));
+        if (part > (progress.get(block.id) || 0)) {
+          progress.set(block.id, part);
           writingId = block.id;
           writingUnitId = unitId;
         }
         budget -= weights[index];
       });
     };
-    if (entry.shown < Array.from(entry.text).length || !entry.final) {
+    if(entry.board?.alignment_version===1){
+      const aligned=alignedBoard(blocks,entry.beats,entry.shown);
+      visible=aligned.visible;cueWriting=aligned.writing;
+      writingId=cueWriting?.block_id||"";
+      writingUnitId=cueWriting?.target||"";
+      highlights=visible.flatMap((block:any)=>block.active_targets.map((target:string)=>`${block.id}:${target}`));
+    }else if (entry.shown < Array.from(entry.text).length || !entry.final) {
       if (entry.beats.length) {
         let start = 0;
         for (const beat of entry.beats) {
@@ -119,13 +141,14 @@ export class TeachingBuffer {
       });
     }
     if (!writingId && entry.active && entry.shown > 0 && visible.length) {
-      writingId = visible.at(-1).id;
+      writingId = visible.at(-1)!.id;
       progress.set(writingId, 1);
     }
     return { ...entry, text, remaining: Math.max(0, Array.from(entry.text).length - entry.shown),
-      board: entry.board ? { ...entry.board, beats: entry.beats,
+      board: entry.board ? { ...entry.board, beats: entry.beats, pdf_focus:pdfFocus,
         presentation: entry.board.presentation ? { ...entry.board.presentation, blocks: visible,
           all_blocks: blocks, highlight_ids: highlights,
-          writing: writingId ? { block_id: writingId, unit_id: writingUnitId, progress: progress.get(writingId), epoch: entry.epoch } : null } : undefined } : null };
+          writing: writingId ? { block_id: writingId, unit_id: writingUnitId, progress: progress.get(writingId)??1,
+            target:cueWriting?.target,epoch: entry.epoch } : null } : undefined } : null };
   }
 }

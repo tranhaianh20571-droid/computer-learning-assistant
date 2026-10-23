@@ -133,7 +133,7 @@ def test_native_guard_security_stops_before_first_model_call(kind, wrapped):
 def test_route_refinement_stops_next_course_on_security_or_budget(code):
     from backend.planning.service import PlanningService
     calls, events, state_reads = [], [], []
-    def refine(adapter, state, course, prompt, budget):
+    def refine(adapter, state, course, prompt, budget, *, coverage_plan, time_budget, profile):
         calls.append(course.title)
         if len(calls) == 1:
             raise error(code)

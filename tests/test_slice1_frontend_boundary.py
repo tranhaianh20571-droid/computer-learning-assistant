@@ -19,6 +19,8 @@ class TestCapabilityConfigPage(unittest.TestCase):
         cls.app = (SRC / "App.tsx").read_text(encoding="utf-8")
         cls.page = (SRC / "CapabilityConfig.tsx").read_text(encoding="utf-8")
         cls.api = (SRC / "api.ts").read_text(encoding="utf-8")
+        cls.purposes = (SRC / "ui" / "PurposeModelSettings.tsx").read_text(encoding="utf-8")
+        cls.provider = (SRC / "ui" / "ProviderConnection.tsx").read_text(encoding="utf-8")
 
     def test_route_and_nav_present(self):
         self.assertIn('"/capabilities"', self.app)
@@ -26,17 +28,19 @@ class TestCapabilityConfigPage(unittest.TestCase):
 
     def test_capability_states_rendered(self):
         for cap in ("text", "image", "tool_call", "json_schema", "streaming", "cancel"):
-            self.assertIn(cap, self.page)
+            self.assertIn(cap, self.provider)
+        self.assertIn("capability_status", self.provider)
+        self.assertIn("ProviderConnection", self.page)
 
     def test_only_mask_displayed(self):
         self.assertIn("credential_mask", self.page)
         self.assertNotIn("encrypted_credentials", self.page)
-        saved_cards = self.page.split("{configs.map((c) => (")[1].split("<h2>本机连接器</h2>")[0]
-        self.assertNotRegex(saved_cards, r"\{\s*(?:c|config)\.(?:credentials|api_key|encrypted_credentials)")
+        self.assertNotRegex(self.page, r"\{\s*(?:c|config)\.(?:credentials|api_key|encrypted_credentials)")
 
     def test_admin_section_gated(self):
-        self.assertIn("isAdmin && (", self.page)
-        self.assertIn("管理员云能力", self.page)
+        self.assertIn('isAdmin && currentPage === "admin" && <div>', self.page)
+        self.assertIn('providerForm("ocr")', self.page)
+        self.assertIn("管理员云 OCR", self.provider)
 
     def test_connector_pairing_and_revoke(self):
         self.assertIn("createPairing", self.page)
@@ -48,11 +52,14 @@ class TestCapabilityConfigPage(unittest.TestCase):
         self.assertIn("revokeDisclosure", self.page)
 
     def test_no_hardcoded_keys_or_console_dumps(self):
-        blob = self.app + self.page + self.api
+        blob = self.app + self.page + self.api + self.purposes
         for pattern in (r"sk-[A-Za-z0-9]{12,}", r"AKIA[0-9A-Z]{8,}", r"ghp_[A-Za-z0-9]{8,}"):
             self.assertIsNone(re.search(pattern, blob), f"found {pattern}")
         self.assertNotIn("console.log", blob)
         self.assertNotIn("console.error", blob)
+        self.assertNotIn("localStorage", self.purposes)
+        self.assertNotIn("sessionStorage", self.purposes)
+        self.assertNotIn("encrypted_credentials", self.purposes)
 
     def test_api_endpoints_declared(self):
         for path in (

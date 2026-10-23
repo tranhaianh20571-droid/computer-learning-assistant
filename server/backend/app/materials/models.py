@@ -1,7 +1,7 @@
 """切片 2 数据模型：资料、页、区域、图块、文本段、配额账本与删除账本。
 
 对应交接文档 §3.1 核心契约。所有个人资源含 `owner_user_id`；
-文件名/路径只存散列，不存正文。
+文件名/路径只存散列；正文仅存私有业务字段，不进入观测通道。
 """
 
 from __future__ import annotations
@@ -84,6 +84,22 @@ class MaterialPageRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
+class DocumentAttachmentRow(Base):
+    """Private task attachment, intentionally excluded from the material library."""
+    __tablename__ = "document_attachments"
+    __table_args__ = (UniqueConstraint("owner_user_id", "upload_key", name="uq_attachment_upload"),)
+
+    material_id: Mapped[str] = mapped_column(String(64), ForeignKey("materials.material_id", ondelete="CASCADE"), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    upload_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    config_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    external_job_id: Mapped[str | None] = mapped_column(String(128))
+    result_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    failure_code: Mapped[str | None] = mapped_column(String(64))
+
+
 class MaterialRegionRow(Base):
     __tablename__ = "material_regions"
     __table_args__ = (
@@ -147,6 +163,7 @@ class TextChunkRow(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tsvector: Mapped[str | None] = mapped_column(TSVECTOR)
     source_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    private_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 

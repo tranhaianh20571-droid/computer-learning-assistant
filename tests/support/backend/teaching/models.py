@@ -52,6 +52,7 @@ class TeachingStepRow(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     phase: Mapped[str] = mapped_column(String(24), nullable=False, default="")
     covered_goal_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    covered_scope_capability_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     lesson_finished: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="generating")
     board_scene_id: Mapped[str | None] = mapped_column(String(64))

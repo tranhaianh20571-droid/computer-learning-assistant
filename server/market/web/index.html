@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>学伴 · 角色卡市集</title>
+<style>
+  :root{
+    --black:#090909;--coal:#0F0F0E;--ivory:#F1EEE6;--ivory-2:#CFCABE;
+    --dim:#8C887E;--dim-2:#615E57;
+    --line:rgba(241,238,230,.14);--line-soft:rgba(241,238,230,.08);
+    --serif:"Noto Serif SC","Source Han Serif SC","Songti SC",STSong,SimSun,serif;
+    --sans:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+    --mono:"Cascadia Mono","JetBrains Mono",Consolas,monospace;
+    --ease:cubic-bezier(.2,.7,.2,1);
+    --r-xs:4px;--r-sm:8px;--r-md:12px;--r-lg:18px;--r-xl:24px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{-webkit-text-size-adjust:100%}
+  body{background:var(--black);color:var(--ivory);font:15px/1.7 var(--sans);-webkit-font-smoothing:antialiased;min-width:320px;overflow-x:hidden}
+  body.locked{overflow:hidden}
+  img{display:block;max-width:100%}
+  a{color:inherit;text-decoration:none}
+  button,input{font:inherit;color:inherit}
+  button{background:none;border:0;cursor:pointer}
+  :focus-visible{outline:2px solid var(--ivory);outline-offset:3px}
+  ::selection{background:#4A463E;color:#fff}
+  .wrap{max-width:1440px;margin:0 auto;padding:0 48px}
+  .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+  header{position:fixed;top:0;left:0;right:0;z-index:50;background:rgba(9,9,9,.8);backdrop-filter:blur(18px);border-bottom:1px solid var(--line-soft)}
+  .bar{display:flex;align-items:center;justify-content:space-between;height:84px;gap:26px}
+  .brand{display:flex;align-items:center;gap:13px;min-width:0}
+  .logo-box{width:36px;height:36px;border:1px solid rgba(241,238,230,.26);border-radius:var(--r-md);display:grid;place-items:center;flex:none;background:rgba(255,255,255,.02)}
+  .logo-box img{width:22px;height:22px;opacity:.95}
+  .brand .word{font:500 18px/1 var(--serif);letter-spacing:.08em}
+  .brand .sub{font:500 8.5px/1 var(--mono);letter-spacing:.22em;color:var(--dim);text-transform:uppercase;display:block;margin-top:4px}
+  nav.main{display:flex;gap:30px;font-size:11.5px;letter-spacing:.1em;color:var(--dim)}
+  nav.main a{position:relative;padding:8px 4px;border-radius:var(--r-sm);transition:color .25s}
+  nav.main a::after{content:"";position:absolute;left:0;right:100%;bottom:2px;height:1px;background:var(--ivory);transition:right .3s var(--ease)}
+  nav.main a:hover,nav.main a.on{color:var(--ivory)}
+  nav.main a.on::after{right:0}
+  .tagflow{display:flex;flex-wrap:wrap;gap:10px 6px;margin:2px 0 30px;max-width:1180px}
+  .tagflow button{display:inline-flex;align-items:center;gap:8px;padding:9px 18px;border-radius:999px;border:1px solid transparent;font-size:15px;line-height:1.45;letter-spacing:.06em;color:var(--ivory-2);transition:background .18s,color .18s,border-color .18s}
+  .tagflow button:hover{color:var(--ivory);border-color:rgba(241,238,230,.22)}
+  .tagflow button em{font:500 8.5px/1 var(--mono);font-style:normal;letter-spacing:.04em;color:var(--dim-2)}
+  .tagflow button[aria-pressed="true"]{background:var(--ivory);border-color:var(--ivory);color:var(--black)}
+  .tagflow button[aria-pressed="true"] em{color:#5A574F}
+  .tagbar-note{font:500 9px/1.8 var(--mono);letter-spacing:.08em;color:var(--dim-2);margin:-10px 0 22px}
+  .actions{display:flex;align-items:center;gap:10px}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:9px;height:40px;padding:0 20px;border:1px solid var(--line);border-radius:999px;font-size:12px;letter-spacing:.03em;transition:background .2s,border-color .2s,color .2s,transform .2s var(--ease)}
+  .btn:hover{transform:translateY(-1px)}
+  .btn-white{background:var(--ivory);border-color:var(--ivory);color:var(--black)}
+  .btn-white:hover{background:#fff;border-color:#fff}
+  .btn-ghost{border-color:var(--line);color:var(--ivory-2)}
+  .btn-ghost:hover{border-color:rgba(241,238,230,.45);color:var(--ivory)}
+  .btn-quiet{height:34px;padding:0 12px;border-color:transparent;border-radius:999px;color:var(--dim)}
+  .btn-quiet:hover{color:var(--ivory);background:rgba(255,255,255,.04);transform:none}
+  .account{display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 16px;border:1px solid var(--line);border-radius:999px;font-size:11.5px;color:var(--ivory-2);max-width:220px;transition:border-color .2s,color .2s,background .2s}
+  .account:hover{border-color:rgba(241,238,230,.42);color:var(--ivory)}
+  .account span.mail{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--ivory);flex:none}
+
+  .hero{padding:150px 0 40px;border-bottom:1px solid var(--line-soft);position:relative;overflow:hidden}
+  .hero::before{content:"";position:absolute;right:3%;top:0;width:720px;height:600px;pointer-events:none;
+    background:radial-gradient(circle at 55% 45%,rgba(226,205,170,.14),rgba(226,205,170,.03) 40%,transparent 68%);filter:blur(14px)}
+  .kicker{display:flex;align-items:center;gap:13px;font:600 9px/1 var(--mono);letter-spacing:.24em;text-transform:uppercase;color:var(--dim)}
+  .kicker::before{content:"";width:36px;height:1px;background:var(--dim-2)}
+  h1{font:300 clamp(40px,4.6vw,66px)/1.1 var(--sans);letter-spacing:-.04em;margin-top:22px;text-wrap:balance}
+  h1 em{font-style:normal;font-family:var(--serif);font-weight:400}
+  .lede{font-size:14px;line-height:1.95;color:var(--ivory-2);max-width:52ch;margin-top:20px}
+  .hero-note{margin-top:26px;font:500 9px/1.8 var(--mono);letter-spacing:.08em;color:var(--dim-2)}
+
+  .catalog{padding:34px 0 70px}
+  body:not(.home) .hero{display:none}
+  body:not(.home) .catalog{padding-top:134px}
+  body:not(.home) .catalog-head{margin-bottom:30px}
+  .catalog-head{display:flex;align-items:flex-end;justify-content:space-between;gap:22px;margin-bottom:22px}
+  .catalog-head h2{font:300 clamp(26px,2.8vw,34px)/1.2 var(--sans);letter-spacing:-.03em;margin-top:12px}
+  .catalog-head h2 em{font-family:var(--serif);font-style:normal;font-weight:400}
+  .count{color:var(--dim);font-size:.6em;font-family:var(--mono);letter-spacing:.06em;margin-left:10px}
+  .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
+  .card{background:#0D0D0C;border:1px solid var(--line-soft);border-radius:var(--r-lg);overflow:hidden;display:flex;flex-direction:column;transition:border-color .25s,transform .3s var(--ease),background .3s}
+  .card:hover{border-color:rgba(241,238,230,.32);transform:translateY(-3px);background:#10100F}
+  .cover{position:relative;aspect-ratio:4/5;overflow:hidden;background:radial-gradient(100% 78% at 50% 20%,#24221E,#0E0E0D 72%)}
+  .cover img{width:100%;height:100%;object-fit:cover;object-position:center top;transition:transform .6s var(--ease)}
+  .card:hover .cover img{transform:scale(1.035)}
+  .cover .empty{display:grid;place-items:center;height:100%;font:400 54px/1 var(--serif);color:var(--dim-2)}
+  .badge{position:absolute;top:11px;left:11px;z-index:2;padding:5px 10px;border-radius:999px;background:rgba(9,9,9,.72);border:1px solid rgba(241,238,230,.22);backdrop-filter:blur(8px);font:500 8px/1 var(--mono);letter-spacing:.16em;color:var(--ivory-2);text-transform:uppercase}
+  .rank{position:absolute;top:11px;right:11px;z-index:2;padding:5px 9px;border-radius:999px;background:rgba(9,9,9,.62);border:1px solid rgba(241,238,230,.22);backdrop-filter:blur(8px);font:500 8px/1 var(--mono);letter-spacing:.14em;color:var(--ivory-2)}
+  .body{padding:14px;display:flex;flex-direction:column;flex:1}
+  .card h3{font:500 18px/1.32 var(--serif);text-wrap:pretty}
+  .tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}
+  .tags span{font-size:9.5px;line-height:1;color:var(--dim);border:1px solid rgba(241,238,230,.12);border-radius:999px;padding:5px 8px}
+  .foot{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:14px;padding-top:11px;border-top:1px solid rgba(241,238,230,.08)}
+  .meta{font:500 8.5px/1.4 var(--mono);letter-spacing:.07em;color:var(--dim-2);white-space:nowrap}
+  .dl{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 13px;border:1px solid rgba(241,238,230,.24);border-radius:999px;font-size:10.5px;color:var(--ivory-2);transition:background .2s,color .2s,border-color .2s}
+  .dl:hover{background:var(--ivory);border-color:var(--ivory);color:var(--black)}
+  .dl svg{width:12px;height:12px}
+  .card-actions{display:flex;gap:8px;align-items:center}
+  .delete-upload{border-color:transparent;color:var(--dim)}
+  .delete-upload:hover{background:transparent;border-color:#e0a19a;color:#e0a19a}
+  .manage-message{font-size:13px;color:var(--ivory-2);margin:0 0 20px}
+  .delete-dialog{margin:auto;width:min(440px,calc(100% - 32px));padding:28px;background:var(--coal);color:var(--ivory);border:1px solid var(--line);border-radius:var(--r-xl)}
+  .delete-dialog::backdrop{background:rgba(0,0,0,.8);backdrop-filter:blur(8px)}
+  .delete-dialog h2{font:400 24px/1.4 var(--serif)}
+  .delete-dialog p{margin-top:14px;font-size:13px;color:var(--ivory-2);overflow-wrap:anywhere}
+  .delete-dialog .dialog-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}
+  .delete-dialog .btn{min-height:44px}
+  .delete-dialog .dialog-error{color:#e0a19a;min-height:22px}
+  .btn:disabled{opacity:.55;cursor:wait}
+
+  .state{padding:60px 0;text-align:center;border-top:1px solid var(--line-soft)}
+  .state h3{font:400 22px/1.4 var(--serif)}
+  .state p{font-size:12.5px;color:var(--dim);margin-top:8px}
+  .state .btn{margin-top:18px}
+
+  .how{border-top:1px solid var(--line-soft);background:var(--coal);padding:46px 0 50px}
+  .how-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:24px}
+  .how-head h2{font:300 30px/1.2 var(--sans);letter-spacing:-.03em}
+  .how-head h2 em{font-family:var(--serif);font-style:normal;font-weight:400}
+  .how-head p{font:500 8.5px/1.7 var(--mono);letter-spacing:.16em;color:var(--dim-2);text-transform:uppercase;text-align:right}
+  .docs{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--line)}
+  .doc{padding:24px 30px 0;border-right:1px solid var(--line);text-align:center}
+  .doc:first-child{padding-left:0}
+  .doc:last-child{border-right:0;padding-right:0}
+  .doc .n{font:500 9px/1 var(--mono);letter-spacing:.16em;color:var(--dim-2)}
+  .doc h3{font:400 19px/1.4 var(--serif);margin:14px 0 9px}
+  .doc p{font-size:12px;line-height:1.9;color:var(--dim);max-width:30ch;margin:0 auto}
+
+  footer{border-top:1px solid var(--line-soft);padding:34px 0 24px}
+  .colophon{display:flex;justify-content:space-between;gap:20px;font:500 8.5px/1.7 var(--mono);letter-spacing:.06em;color:var(--dim-2)}
+  .colophon a:hover{color:var(--ivory)}
+
+  .modal{position:fixed;inset:0;z-index:110;display:grid;place-items:center;padding:24px}
+  .modal[hidden]{display:none}
+  .backdrop{position:absolute;inset:0;background:rgba(0,0,0,.78);backdrop-filter:blur(10px)}
+  .panel{position:relative;z-index:2;width:min(900px,100%);max-height:92vh;overflow:auto;background:#101010;border:1px solid rgba(241,238,230,.18);border-radius:var(--r-xl);display:grid;grid-template-columns:minmax(0,5fr) minmax(0,6fr);overflow-x:hidden}
+  .panel-left{padding:22px;border-right:1px solid var(--line-soft);background:radial-gradient(120% 80% at 50% 10%,#1D1C19,#0C0C0B 74%)}
+  .panel-cover{position:relative;aspect-ratio:4/5;border:1px solid rgba(241,238,230,.14);border-radius:var(--r-md);overflow:hidden;background:radial-gradient(100% 78% at 50% 20%,#24221E,#0E0E0D 72%)}
+  .panel-cover img{width:100%;height:100%;object-fit:cover;object-position:center top}
+  .panel-cover .empty{display:grid;place-items:center;height:100%;font:400 64px/1 var(--serif);color:var(--dim-2)}
+  .panel-right{padding:32px 32px 28px;display:flex;flex-direction:column}
+  .panel-right h2{font:300 clamp(26px,3vw,38px)/1.15 var(--sans);letter-spacing:-.04em;margin-top:16px}
+  .panel-right .desc{font-size:13px;line-height:1.95;color:var(--ivory-2);margin-top:16px}
+  .panel-right .tags{margin-top:16px}
+  .facts{margin-top:20px;border-top:1px solid var(--line)}
+  .facts div{display:grid;grid-template-columns:72px 1fr;gap:12px;padding:9px 0;border-bottom:1px solid var(--line-soft)}
+  .facts dt{font:500 8px/1.7 var(--mono);letter-spacing:.14em;color:var(--dim-2);text-transform:uppercase}
+  .facts dd{font-size:11.5px;color:var(--ivory-2)}
+  .panel-actions{margin-top:auto;padding-top:24px;display:flex;flex-direction:column;gap:10px}
+  .panel-actions .btn{height:46px;width:100%;justify-content:space-between}
+  .secondary{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:10.5px;color:var(--dim)}
+  .close{position:absolute;top:12px;right:12px;z-index:5;width:36px;height:36px;display:grid;place-items:center;border:1px solid rgba(241,238,230,.2);border-radius:50%;background:rgba(9,9,9,.6);color:var(--ivory-2)}
+  .close:hover{background:var(--ivory);color:var(--black)}
+
+  .import-panel{position:relative;z-index:2;width:min(440px,100%);background:#0F0F0E;border:1px solid rgba(241,238,230,.18);border-radius:var(--r-xl);padding:28px 26px 22px;box-shadow:0 30px 80px rgba(0,0,0,.55)}
+  .import-panel h2{font:300 26px/1.25 var(--sans);letter-spacing:-.03em;margin-top:14px}
+  .import-desc{font-size:12.5px;line-height:1.9;color:var(--ivory-2);margin-top:12px}
+  .import-state{min-height:18px;margin-top:12px;font-size:11.5px;color:var(--dim)}
+  .import-state.ok{color:#9FC0A8}
+  .import-state.err{color:#e0a19a}
+  .import-primary{width:100%;height:46px;margin-top:16px}
+  .import-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:16px;padding-top:12px;border-top:1px solid var(--line-soft);font-size:10.5px;color:var(--dim-2)}
+  .import-zip{font-size:10.5px;color:var(--dim);border-bottom:1px solid var(--dim-2);padding-bottom:2px}
+  .import-zip:hover{color:var(--ivory);border-color:var(--ivory)}
+  .local-note{margin-top:14px;padding:10px 12px;border:1px solid var(--line-soft);border-radius:var(--r-md);font-size:11px;line-height:1.8;color:var(--dim)}
+  .local-note a{color:var(--ivory-2);border-bottom:1px solid var(--dim-2)}
+  .auth{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:24px}
+  .auth[hidden]{display:none}
+  .auth-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.82);backdrop-filter:blur(12px)}
+  .auth-card{position:relative;z-index:2;width:min(420px,100%);background:#0F0F0E;border:1px solid rgba(241,238,230,.18);border-radius:var(--r-xl);padding:30px 28px 26px;box-shadow:0 30px 80px rgba(0,0,0,.55)}
+  .auth-card .brand{margin-bottom:22px}
+  .auth-card h2{font:300 26px/1.25 var(--sans);letter-spacing:-.03em}
+  .auth-card h2 em{font-family:var(--serif);font-style:normal}
+  .auth-card p.hint{font-size:12px;line-height:1.8;color:var(--dim);margin-top:10px}
+  .auth-card label{display:block;margin-top:16px;font:500 9px/1 var(--mono);letter-spacing:.16em;color:var(--dim);text-transform:uppercase}
+  .auth-card input{width:100%;height:44px;margin-top:7px;padding:0 14px;background:#0A0A09;border:1px solid rgba(241,238,230,.2);border-radius:var(--r-md);color:var(--ivory);font-size:13px;transition:border-color .2s,box-shadow .2s}
+  .auth-card input:focus{outline:none;border-color:rgba(241,238,230,.62);box-shadow:0 0 0 3px rgba(241,238,230,.06)}
+  .auth-card .submit{width:100%;height:46px;margin-top:22px;background:var(--ivory);color:var(--black);border-radius:999px;font-size:12.5px;font-weight:600;letter-spacing:.04em;transition:background .2s,transform .2s var(--ease)}
+  .auth-card .submit:hover:not([disabled]){background:#fff;transform:translateY(-1px)}
+  .auth-card .submit:hover{background:#fff}
+  .auth-card .submit[disabled]{opacity:.55;cursor:not-allowed}
+  .auth-card .hide{display:none !important}
+  .auth-card label[hidden],.auth-card input[hidden]{display:none}
+  .code-row{display:flex;gap:10px;margin-top:7px;align-items:stretch}
+  .code-row input{margin-top:0;flex:1;min-width:0;font-family:var(--mono);font-size:14px;letter-spacing:.12em}
+  .code-row input::placeholder{font-family:var(--sans);font-size:13px;letter-spacing:0}
+  .code-row button{flex:none;min-width:124px;height:auto;padding:0 18px;border-radius:var(--r-md);border:1px solid rgba(241,238,230,.24);
+    background:rgba(241,238,230,.09);color:var(--ivory);font-size:13px;font-weight:500;letter-spacing:.02em;white-space:nowrap;
+    transition:background .2s,border-color .2s,color .2s}
+  .code-row button:hover:not([disabled]){background:rgba(241,238,230,.16);border-color:rgba(241,238,230,.42)}
+  .code-row button[disabled]{opacity:.5;cursor:not-allowed;background:rgba(241,238,230,.05)}
+  .auth-card .sub-action{margin-top:12px;display:flex;justify-content:space-between;gap:12px;font-size:11px;color:var(--dim)}
+  .auth-card .sub-action[hidden]{display:none}
+  .auth-card .sub-action button{font-size:11px;color:var(--ivory-2);border-bottom:1px solid var(--dim-2);padding-bottom:2px}
+  .auth-card .sub-action button:hover{color:var(--ivory);border-color:var(--ivory)}
+  .account-wrap{position:relative}
+  .account-menu{position:absolute;right:0;top:48px;z-index:60;width:260px;background:#0F0F0E;border:1px solid rgba(241,238,230,.18);border-radius:var(--r-lg);padding:14px;box-shadow:0 20px 50px rgba(0,0,0,.6)}
+  .account-menu[hidden]{display:none}
+  .account-menu label{display:block;font:500 8.5px/1 var(--mono);letter-spacing:.16em;color:var(--dim);text-transform:uppercase}
+  .account-menu input{width:100%;height:38px;margin-top:7px;padding:0 12px;background:#0A0A09;border:1px solid rgba(241,238,230,.2);border-radius:var(--r-sm);color:var(--ivory);font-size:12.5px}
+  .account-menu input:focus{outline:none;border-color:rgba(241,238,230,.6)}
+  .account-menu .row{display:flex;gap:8px;margin-top:12px}
+  .account-menu .row .btn{height:34px;flex:1;font-size:11px;padding:0 12px}
+  .account-menu .msg{min-height:16px;margin-top:8px;font-size:10.5px;color:#e0a19a}
+  .account-menu .name-hint{min-height:15px;margin-top:6px;font-size:10.5px;color:var(--dim-2)}
+  .account-menu .name-hint.ok{color:#9FC0A8}
+  .account-menu .name-hint.bad{color:#e0a19a}
+  .account-menu .msg.ok{color:var(--ivory-2)}
+  .auth-back{display:flex;align-items:center;justify-content:center;width:100%;height:42px;margin-top:10px;
+    border:1px solid rgba(241,238,230,.22);border-radius:999px;background:transparent;color:var(--ivory-2);
+    font-size:12px;letter-spacing:.03em;transition:border-color .2s,color .2s,background .2s}
+  .auth-back:hover{border-color:rgba(241,238,230,.5);color:var(--ivory);background:rgba(255,255,255,.04)}
+  .auth-back[hidden]{display:none}
+  .auth-msg{min-height:20px;margin-top:12px;font-size:11.5px;color:#e0a19a}
+  .auth-msg.ok{color:var(--ivory-2)}
+  .auth-switch{margin-top:16px;font-size:11.5px;color:var(--dim);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .auth-switch button{color:var(--ivory-2);border-bottom:1px solid var(--dim-2);padding-bottom:2px;font-size:11.5px}
+  .auth-switch button:hover{color:var(--ivory);border-color:var(--ivory)}
+
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+  @media (max-width:1180px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  @media (max-width:900px){
+    .wrap{padding:0 26px}
+    .bar{display:grid;grid-template-columns:auto minmax(0,1fr);height:auto;gap:10px 16px;padding-top:12px;padding-bottom:12px}
+    .brand{white-space:nowrap}
+    nav.main{grid-column:1/-1;grid-row:2;justify-content:center;gap:26px;white-space:nowrap}
+    .actions{justify-self:end;min-width:0}
+    .actions .btn{white-space:nowrap;flex:none}
+    .hero{padding-top:150px}
+    body:not(.home) .catalog{padding-top:150px}
+    .grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .docs{grid-template-columns:1fr}
+    .doc{border-right:0;border-bottom:1px solid var(--line);padding:18px 0 22px;text-align:center}
+    .panel{grid-template-columns:1fr;max-height:94vh}
+    .panel-left{border-right:0;border-bottom:1px solid var(--line-soft);padding:16px}
+    .panel-cover{max-height:42vh;aspect-ratio:4/3}
+    .panel-right{padding:22px 20px}
+    .how-head{flex-direction:column;align-items:flex-start}
+    .how-head p{text-align:left}
+  }
+  @media (max-width:560px){
+    .wrap{padding:0 18px}
+    .bar{padding-top:12px;padding-bottom:12px;gap:10px}
+    .brand .sub{display:none}
+    .actions>a[href="/help/import"]{display:none}
+    .actions .btn{padding:0 12px}
+    .account{max-width:100px;padding:0 12px}
+    nav.main{gap:16px;font-size:11px}
+    .card-actions .dl{height:44px}
+    .grid{grid-template-columns:1fr}
+    .colophon{flex-direction:column;gap:6px}
+  }
+</style>
+</head>
+<body class="home">
+
+<header>
+  <div class="wrap bar">
+    <a class="brand" href="/" aria-label="学伴 · 角色卡市集">
+      <span class="logo-box"><img src="/assets/logo.png" alt="学伴"></span>
+      <span><span class="word">学伴</span><span class="sub">Card Market</span></span>
+    </a>
+    <nav class="main" aria-label="主导航">
+      <a href="/" data-nav="all" class="on">全部卡片</a>
+      <a href="/featured" data-nav="official">官方精选</a>
+      <a href="/categories" data-nav="categories">分类</a>
+      <a href="/uploads" data-nav="mine">我上传的</a>
+    </nav>
+    <div class="actions" id="account-area">
+      <a class="btn btn-ghost" href="/help/import">如何导入</a>
+      <button class="btn btn-white" type="button" id="open-auth">登录 / 注册</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <p class="kicker">Issue 01 — 角色卡市集</p>
+      <h1>找到一位导师，<br><em>带回你的电脑。</em></h1>
+      <p class="lede">这里的每一张卡片都包含人物设定、教学方法和状态素材。点「导入」就能送进你电脑上的学伴，成为「我的人物」里的一位导师，离线也能用。</p>
+      <p class="hero-note" id="catalog-meta">正在读取市集…</p>
+    </div>
+  </section>
+
+  <section class="catalog" id="catalog">
+    <div class="wrap">
+      <div class="catalog-head">
+        <div>
+          <p class="kicker" id="catalog-kicker">All cards</p>
+          <h2><span id="catalog-title">全部卡片</span><span class="count" id="count"></span></h2>
+        </div>
+      </div>
+      <div class="tagflow" id="tagflow" aria-label="按标签筛选" hidden></div>
+      <p class="tagbar-note" id="tagbar-note" hidden>可多选 · 同时满足所选标签</p>
+      <p class="manage-message" id="manage-message" role="status" hidden></p>
+      <div class="grid" id="grid" aria-busy="true"></div>
+      <div class="state" id="state" hidden></div>
+    </div>
+  </section>
+
+  <section class="how" id="how">
+    <div class="wrap">
+      <div class="how-head">
+        <h2>从一张卡片，<br><em>到一堂课。</em></h2>
+        <p>Import → Bind → Teach</p>
+      </div>
+      <div class="docs">
+        <div class="doc"><span class="n">01 / Import</span><h3>导入到本机</h3><p>在卡片上点「导入」，选择直接导入到学伴；本地没运行时，也可以下载 ZIP 手动导入。</p></div>
+        <div class="doc"><span class="n">02 / Bind</span><h3>账号绑定本机</h3><p>第一次使用从桌面端发起绑定：注册、邮箱验证码、绑定一次完成，之后网页导入直达本机。</p></div>
+        <div class="doc"><span class="n">03 / Teach</span><h3>开始上课</h3><p>在课程或即时对话里选中这位导师。学习记录只留在你自己的电脑上。</p></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap colophon">
+    <span>© 2026 学伴 · 角色卡市集</span>
+    <span><a href="/bind">绑定桌面端</a> · 卡片属于你，不属于云端</span>
+  </div>
+</footer>
+
+<div class="modal" id="modal" hidden>
+  <div class="backdrop" data-close></div>
+  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="m-title">
+    <button class="close" type="button" data-close aria-label="关闭">✕</button>
+    <div class="panel-left"><div class="panel-cover" id="m-cover"></div></div>
+    <div class="panel-right">
+      <p class="kicker">角色卡 / Card</p>
+      <h2 id="m-title"></h2>
+      <div class="tags" id="m-tags"></div>
+      <p class="desc" id="m-desc"></p>
+      <dl class="facts" id="m-facts"></dl>
+      <div class="panel-actions">
+        <button class="btn btn-white" type="button" id="m-download">导入到学伴</button>
+        <div class="secondary">
+          <span id="m-note"></span>
+          <button type="button" class="import-zip" id="m-zip">下载 ZIP</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="import-modal" hidden>
+  <div class="backdrop" data-import-close></div>
+  <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="import-title">
+    <button class="close" type="button" data-import-close aria-label="关闭">✕</button>
+    <p class="kicker">Import / 导入</p>
+    <h2 id="import-title">导入到学伴</h2>
+    <p class="import-desc" id="import-desc">把这张卡片直接导入到本机「我的人物」，学习记录仍留在你自己的电脑上。</p>
+    <div class="import-state" id="import-state" role="status"></div>
+    <button class="btn btn-white import-primary" type="button" id="import-direct">直接导入到本机</button>
+    <div class="import-foot">
+      <span>本地没有运行学伴？</span>
+      <button type="button" class="import-zip" id="import-zip">下载 ZIP</button>
+    </div>
+  </div>
+</div>
+
+<dialog class="delete-dialog" id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description">
+  <h2 id="delete-title">删除上传</h2>
+  <p id="delete-description"></p>
+  <p>此操作只删除市集上的卡片，本机人物和已下载的副本不受影响。</p>
+  <p class="dialog-error" id="delete-error" role="alert"></p>
+  <div class="dialog-actions">
+    <button class="btn btn-ghost" id="delete-cancel" type="button" autofocus>取消</button>
+    <button class="btn btn-white" id="delete-confirm" type="button">删除上传</button>
+  </div>
+</dialog>
+
+<div class="auth" id="auth" hidden>
+  <div class="auth-backdrop" data-auth-close></div>
+  <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <a class="brand" href="/"><span class="logo-box"><img src="/assets/logo.png" alt="学伴"></span><span><span class="word">学伴</span><span class="sub">Card Market</span></span></a>
+    <h2 id="auth-title">登录市集账号</h2>
+    <p class="hint" id="auth-hint">账号只用于卡片市集。学习数据、教材和对话不上传。</p>
+    <label for="auth-email">邮箱</label><input id="auth-email" type="email" autocomplete="email" spellcheck="false">
+    <label for="auth-password">密码</label><input id="auth-password" type="password" autocomplete="current-password">
+    <button class="submit" type="button" id="auth-submit">登录</button>
+    <div class="auth-msg" id="auth-msg" role="status"></div>
+    <div class="auth-switch">
+      <button type="button" id="auth-close">稍后再说</button>
+    </div>
+    <p class="local-note">还没有账号？注册入口在学伴桌面端：打开「我的人物」→「上传到市集」→「绑定市集账号」，浏览器会打开注册页，完成邮箱验证后自动绑定本机。</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  var binding = null;
+  var incomingParams = new URLSearchParams(location.hash.slice(1));
+  var incomingCode = incomingParams.get('receive') || incomingParams.get('bind');
+  try {
+    if (incomingCode && /^[A-Za-z0-9_-]{12}$/.test(incomingCode)) {
+      binding = { code: incomingCode, purpose: incomingParams.has('receive') ? 'receive' : 'login', expires: Date.now() + 10 * 60 * 1000 };
+      history.replaceState(null, '', location.pathname + location.search);
+      sessionStorage.setItem('market.pendingBinding', JSON.stringify(binding));
+    } else {
+      binding = JSON.parse(sessionStorage.getItem('market.pendingBinding') || 'null');
+    }
+  } catch (error) { /* Keep an incoming binding usable when storage is unavailable. */ }
+  function bindingUrl() {
+    if (!binding || !/^[A-Za-z0-9_-]{12}$/.test(binding.code) || binding.expires <= Date.now()) {
+      binding = null;
+      try { sessionStorage.removeItem('market.pendingBinding'); } catch (error) {}
+      return '';
+    }
+    return '/bind?code=' + encodeURIComponent(binding.code) + (binding.purpose === 'receive' ? '&purpose=receive' : '');
+  }
+  var registerUrl = bindingUrl();
+  document.addEventListener('click', function (event) {
+    var link = event.target.closest('a[href^="/bind?code="]');
+    if (link && !bindingUrl()) {
+      event.preventDefault();
+      alert('注册连接已过期，请从本机应用重新点击注册。');
+    }
+  });
+  if (registerUrl) {
+    document.querySelector('.local-note').innerHTML = '<a href="' + registerUrl + '">注册账号</a>';
+    document.querySelectorAll('a[href="/bind"]').forEach(function (link) { link.href = registerUrl; });
+  }
+  var state = { user: null, cards: [], mode: 'login', current: null, scope: 'all', tags: [] };
+  var grid = document.getElementById('grid');
+  var stateBox = document.getElementById('state');
+  var countBox = document.getElementById('count');
+  var meta = document.getElementById('catalog-meta');
+  var account = document.getElementById('account-area');
+  var auth = document.getElementById('auth');
+  var authTitle = document.getElementById('auth-title');
+  var authHint = document.getElementById('auth-hint');
+  var authEmail = document.getElementById('auth-email');
+  var authPassword = document.getElementById('auth-password');
+  var authSubmit = document.getElementById('auth-submit');
+  var authMsg = document.getElementById('auth-msg');
+  var modal = document.getElementById('modal');
+  var tagflow = document.getElementById('tagflow');
+  var tagbarNote = document.getElementById('tagbar-note');
+  var catalogTitle = document.getElementById('catalog-title');
+  var catalogKicker = document.getElementById('catalog-kicker');
+  var navLinks = Array.prototype.slice.call(document.querySelectorAll('nav.main a'));
+
+  function esc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  async function api(path, options) {
+    var response = await fetch(path, Object.assign({ credentials: 'include' }, options || {}));
+    var data = null;
+    try { data = await response.json(); } catch (e) { data = null; }
+    if (!response.ok) {
+      var detail = (data && data.detail) || data || {};
+      var error = new Error(detail.message || '操作失败，请稍后再试。');
+      error.code = detail.error_code;
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  }
+
+  function renderAccount() {
+    if (state.user) {
+      var name = state.user.display_name || state.user.email.split('@')[0];
+      account.innerHTML = '<a class="btn btn-ghost" href="/help/import">如何导入</a>' +
+        '<div class="account-wrap"><button class="account" type="button" id="account-toggle" title="账号设置">' +
+        '<span class="dot"></span><span class="mail">' + esc(name) + '</span></button>' +
+        '<div class="account-menu" id="account-menu" hidden>' +
+        '<label for="account-name">用户名</label>' +
+        '<input id="account-name" type="text" maxlength="24" value="' + esc(state.user.display_name || '') + '" placeholder="设置用户名" autocomplete="nickname">' +
+        '<div class="name-hint" id="account-name-hint"></div>' +
+        '<div class="msg" id="account-msg" role="status"></div>' +
+        '<div class="row"><button class="btn btn-white" type="button" id="account-save">保存</button>' +
+        '<button class="btn btn-ghost" type="button" id="account-logout">退出登录</button></div></div></div>';
+      var menu = document.getElementById('account-menu');
+      document.getElementById('account-toggle').addEventListener('click', function (event) {
+        event.stopPropagation();
+        menu.hidden = !menu.hidden;
+        if (!menu.hidden) document.getElementById('account-name').focus();
+      });
+      var nameInput = document.getElementById('account-name');
+      var nameHint = document.getElementById('account-name-hint');
+      var nameTimer = null;
+      var nameVersion = 0;
+      nameInput.addEventListener('input', function () {
+        var value = nameInput.value.trim();
+        var version = ++nameVersion;
+        if (nameTimer) window.clearTimeout(nameTimer);
+        nameHint.className = 'name-hint';
+        if (!value) { nameHint.textContent = ''; return; }
+        if (value === (state.user.display_name || '')) { nameHint.textContent = '当前用户名'; return; }
+        nameHint.textContent = '检查中…';
+        nameTimer = window.setTimeout(async function () {
+          var apply = function (result) {
+            if (version !== nameVersion || !nameInput.isConnected) return;
+            if (result.available) {
+              nameHint.className = 'name-hint ok';
+              nameHint.textContent = '可以使用';
+            } else {
+              nameHint.className = 'name-hint bad';
+              nameHint.textContent = result.reason === 'taken' ? '这个用户名已被使用'
+                : result.reason === 'too_long' ? '用户名过长' : '包含不支持的字符';
+            }
+          };
+          try {
+            var result = await api('/api/username/available?name=' + encodeURIComponent(value), { cache: 'no-store' });
+            apply(result);
+          } catch (error) {
+            if (version === nameVersion && nameInput.isConnected) nameHint.textContent = '暂时无法查重，保存时会再次校验。';
+          }
+        }, 300);
+      });
+      document.getElementById('account-save').addEventListener('click', async function () {
+        var value = document.getElementById('account-name').value.trim();
+        var msg = document.getElementById('account-msg');
+        if (!value) { msg.className = 'msg'; msg.textContent = '用户名不能为空。'; return; }
+        var saveButton = document.getElementById('account-save');
+        saveButton.disabled = true;
+        try {
+          var result = await api('/api/username', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ display_name: value })
+          });
+          state.user.display_name = result.display_name;
+          msg.className = 'msg ok';
+          msg.textContent = '已保存。';
+          renderAccount();
+        } catch (error) {
+          msg.className = 'msg';
+          msg.textContent = error.message || '保存失败';
+        } finally {
+          saveButton.disabled = false;
+        }
+      });
+      document.getElementById('account-logout').addEventListener('click', async function () {
+        try { await api('/api/logout', { method: 'POST' }); } catch (e) {}
+        state.user = null;
+        renderAccount();
+        loadCards();
+      });
+    } else {
+      account.innerHTML = '<a class="btn btn-ghost" href="/help/import">如何导入</a>' +
+        '<button class="btn btn-white" type="button" id="open-auth">' + (bindingUrl() ? '登录' : '登录 / 注册') + '</button>';
+      document.getElementById('open-auth').addEventListener('click', function () { openAuth('login'); });
+    }
+    if (bindingUrl()) {
+      var registerLink = document.createElement('a');
+      registerLink.className = 'btn btn-white';
+      registerLink.href = bindingUrl();
+      registerLink.textContent = binding.purpose === 'receive' ? '开启账号接收' : state.user ? '绑定这台电脑' : '注册账号';
+      registerLink.addEventListener('click', function (event) {
+        if (!bindingUrl()) {
+          event.preventDefault();
+          registerLink.remove();
+          alert('注册连接已过期，请从本机应用重新点击注册。');
+        }
+      });
+      account.appendChild(registerLink);
+    }
+  }
+
+  function visibleCards() {
+    if (!state.tags.length) return state.cards;
+    return state.cards.filter(function (card) {
+      var tags = card.tags || [];
+      return state.tags.every(function (tag) { return tags.indexOf(tag) !== -1; });
+    });
+  }
+
+  function renderTagflow() {
+    var show = state.scope === 'categories';
+    tagflow.hidden = !show;
+    tagbarNote.hidden = !show;
+    if (!show) { tagflow.innerHTML = ''; return; }
+    var counts = {};
+    state.cards.forEach(function (card) {
+      (card.tags || []).forEach(function (tag) { counts[tag] = (counts[tag] || 0) + 1; });
+    });
+    var tags = Object.keys(counts).sort(function (a, b) {
+      return counts[b] - counts[a] || a.localeCompare(b, 'zh-Hans-CN');
+    });
+    if (!tags.length) {
+      tagflow.innerHTML = '<button type="button" aria-pressed="true" disabled>全部</button>';
+      tagbarNote.hidden = true;
+      return;
+    }
+    var items = ['<button type="button" data-tag-all aria-pressed="' + (state.tags.length ? 'false' : 'true') + '">全部</button>'];
+    items = items.concat(tags.map(function (tag) {
+      var on = state.tags.indexOf(tag) !== -1;
+      return '<button type="button" data-tag="' + esc(tag) + '" aria-pressed="' + on + '">' +
+        esc(tag) + '<em>' + String(counts[tag]).padStart(2, '0') + '</em></button>';
+    }));
+    tagflow.innerHTML = items.join('');
+    tagflow.querySelector('[data-tag-all]').addEventListener('click', function () {
+      state.tags = [];
+      renderTagflow();
+      renderCards();
+    });
+    tagflow.querySelectorAll('[data-tag]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var tag = button.dataset.tag;
+        state.tags = state.tags.indexOf(tag) === -1
+          ? state.tags.concat([tag])
+          : state.tags.filter(function (item) { return item !== tag; });
+        renderTagflow();
+        renderCards();
+      });
+    });
+  }
+
+  function visibleCards() {
+    if (!state.tags.length) return state.cards;
+    return state.cards.filter(function (card) {
+      var tags = card.tags || [];
+      return state.tags.every(function (tag) { return tags.indexOf(tag) !== -1; });
+    });
+  }
+
+  function renderCards() {
+    grid.setAttribute('aria-busy', 'false');
+    var cards = visibleCards();
+    if (!cards.length) {
+      grid.innerHTML = '';
+      countBox.textContent = '00 张';
+      stateBox.hidden = false;
+      if (state.cards.length && state.tags.length) {
+        stateBox.innerHTML = '<h3>没有同时满足这些标签的卡片</h3><p>减少一个标签，或点「全部」清除筛选。</p>' +
+          '<button class="btn btn-ghost" type="button" data-reset-tags>清除标签筛选</button>';
+        stateBox.querySelector('[data-reset-tags]').addEventListener('click', function () {
+          state.tags = []; renderTagflow(); renderCards();
+        });
+        return;
+      }
+      if (state.scope === 'official') {
+        stateBox.innerHTML = '<h3>还没有官方精选</h3><p>官方账号上传的卡片会自动出现在这里。</p><a class="btn btn-ghost" href="/">看全部卡片</a>';
+      } else if (state.scope === 'categories') {
+        stateBox.innerHTML = '<h3>还没有可分类的标签</h3><p>卡片上传后，人物标签会自动出现在这里。</p><a class="btn btn-ghost" href="/">看全部卡片</a>';
+      } else if (state.scope === 'mine') {
+        stateBox.innerHTML = '<h3>还没有上传的卡片</h3><p>在本机「我的人物」中上传后，会出现在这里。</p><a class="btn btn-ghost" href="/">浏览市集</a>';
+      } else {
+        stateBox.innerHTML = '<h3>市集还没有卡片</h3><p>在学伴桌面端「我的人物」里点「上传到市集」，第一张卡片就会出现在这里。</p><a class="btn btn-ghost" href="/bind">绑定桌面端</a>';
+      }
+      return;
+    }
+    stateBox.hidden = true;
+    countBox.textContent = (cards.length < 10 ? '0' : '') + cards.length + ' 张';
+    grid.innerHTML = cards.map(function (card, index) {
+      var rank = state.scope !== 'mine' && card.downloads_72h > 0 && index < 5 ? '<span class="rank">TOP ' + String(index + 1).padStart(2, '0') + '</span>' : '';
+      var badge = card.official ? '<span class="badge">官方</span>' : '';
+      var tags = (card.tags || []).slice(0, 3).map(function (tag) { return '<span>' + esc(tag) + '</span>'; }).join('');
+      return '<article class="card" data-id="' + esc(card.card_id) + '" tabindex="0">' +
+        '<div class="cover" data-cover>' + '<img src="' + esc(card.cover_url) + '" alt="' + esc(card.title) + '" loading="lazy">' + badge + rank + '</div>' +
+        '<div class="body"><h3>' + esc(card.title) + '</h3>' +
+        '<div class="tags">' + (tags || '<span>角色卡</span>') + '</div>' +
+        '<div class="foot"><span class="meta">' + (card.downloads_72h || 0) + ' 次下载</span>' +
+        '<div class="card-actions"><button class="dl" type="button" data-download="' + esc(card.card_id) + '">导入' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg></button>' +
+        (state.scope === 'mine' ? '<button class="dl delete-upload" type="button" data-delete="' + esc(card.card_id) + '" aria-label="删除上传：' + esc(card.title) + '">删除</button>' : '') +
+        '</div></div></div></article>';
+    }).join('');
+    grid.querySelectorAll('.card').forEach(function (element) {
+      var card = state.cards.find(function (item) { return item.card_id === element.dataset.id; });
+      element.addEventListener('click', function (event) {
+        if (event.target.closest('[data-download],[data-delete]')) return;
+        openCard(card);
+      });
+      element.addEventListener('keydown', function (event) {
+        if (event.target === element && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openCard(card); }
+      });
+    });
+    grid.querySelectorAll('[data-download]').forEach(function (button) {
+      button.addEventListener('click', function (event) {
+        event.stopPropagation();
+        openImport(button.dataset.download);
+      });
+    });
+    grid.querySelectorAll('[data-delete]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        openDelete(state.cards.find(function (card) { return card.card_id === button.dataset.delete; }));
+      });
+    });
+  }
+
+  function applyScope(scope) {
+    state.scope = scope;
+    state.tags = [];
+    document.getElementById('manage-message').hidden = true;
+    document.body.classList.toggle('home', scope === 'all');
+    navLinks.forEach(function (link) { link.classList.toggle('on', link.dataset.nav === scope); });
+    if (scope === 'official') {
+      catalogTitle.textContent = '官方精选';
+      catalogKicker.textContent = 'Official picks';
+      document.title = '学伴 · 官方精选';
+    } else if (scope === 'categories') {
+      catalogTitle.textContent = '分类';
+      catalogKicker.textContent = 'Browse by tag';
+      document.title = '学伴 · 分类';
+    } else if (scope === 'mine') {
+      catalogTitle.textContent = '我上传的';
+      catalogKicker.textContent = 'My uploads';
+      document.title = '学伴 · 我上传的';
+    } else {
+      catalogTitle.textContent = '全部卡片';
+      catalogKicker.textContent = 'All cards';
+      document.title = '学伴 · 角色卡市集';
+    }
+  }
+
+  var catalogRequest = 0;
+  async function loadCards() {
+    var currentRequest = ++catalogRequest;
+    var scope = state.scope;
+    state.cards = [];
+    grid.innerHTML = '';
+    grid.setAttribute('aria-busy', 'true');
+    countBox.textContent = '';
+    stateBox.hidden = false;
+    stateBox.innerHTML = '<p role="status">正在读取卡片…</p>';
+    renderTagflow();
+    try {
+      var data = await api('/api/cards' + (scope === 'official' ? '?scope=official' : scope === 'mine' ? '?scope=mine' : ''));
+      if (currentRequest !== catalogRequest) return;
+      state.cards = data.data || [];
+      meta.textContent = '共 ' + state.cards.length + ' 张卡片 · 按下载热度排序';
+    } catch (error) {
+      if (currentRequest !== catalogRequest) return;
+      meta.textContent = '市集暂时不可达';
+      state.cards = [];
+      grid.setAttribute('aria-busy', 'false');
+      if (scope === 'mine' && error.status === 401) {
+        state.user = null;
+        renderAccount();
+        stateBox.innerHTML = '<h3>登录后查看你的上传</h3><button class="btn btn-white" type="button" data-login>登录</button>';
+        stateBox.querySelector('[data-login]').addEventListener('click', function () { openAuth('login'); });
+      } else {
+        stateBox.innerHTML = '<h3>暂时无法读取卡片</h3><p>请稍后重试。</p><button class="btn btn-ghost" type="button" data-retry>重试</button>';
+        stateBox.querySelector('[data-retry]').addEventListener('click', loadCards);
+      }
+      return;
+    }
+    renderTagflow();
+    renderCards();
+  }
+
+  function routeScope(path) {
+    var clean = path.replace(/\/+$/, '') || '/';
+    if (clean === '/featured') return 'official';
+    if (clean === '/categories') return 'categories';
+    if (clean === '/uploads') return 'mine';
+    return 'all';
+  }
+
+  function scopePath(scope) {
+    if (scope === 'official') return '/featured';
+    if (scope === 'categories') return '/categories';
+    if (scope === 'mine') return '/uploads';
+    return '/';
+  }
+
+  navLinks.forEach(function (link) {
+    link.addEventListener('click', function (event) {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+      event.preventDefault();
+      var scope = link.dataset.nav || 'all';
+      window.history.pushState({ scope: scope }, '', scopePath(scope));
+      applyScope(scope);
+      loadCards();
+    });
+  });
+  window.addEventListener('popstate', function () {
+    applyScope(routeScope(location.pathname));
+    loadCards();
+  });
+
+  function openCard(card) {
+    if (!card) return;
+    state.current = card;
+    document.getElementById('m-title').textContent = card.title;
+    document.getElementById('m-tags').innerHTML = (card.tags || []).map(function (tag) {
+      return '<span>' + esc(tag) + '</span>';
+    }).join('') || '<span>角色卡</span>';
+    var desc = card.summary || '这张卡片还没有填写人物介绍。下载后导入学伴，就能在「我的人物」里查看完整设定。';
+    document.getElementById('m-desc').textContent = desc;
+    document.getElementById('m-facts').innerHTML =
+      '<div><dt>热度</dt><dd>' + (card.downloads_72h || 0) + ' 次下载</dd></div>' +
+      '<div><dt>上架</dt><dd>' + esc((card.created_at || '').slice(0, 10)) + '</dd></div>' +
+      '<div><dt>内容</dt><dd>人物设定 · 对话方法 · 状态素材</dd></div>' +
+      '<div><dt>隐私</dt><dd>不包含任何人的学习记录</dd></div>';
+    document.getElementById('m-note').textContent = state.user ? '' : '登录后可导入';
+    var cover = document.getElementById('m-cover');
+    cover.innerHTML = '<img src="' + esc(card.cover_url) + '" alt="' + esc(card.title) + '">';
+    modal.hidden = false;
+    document.body.classList.add('locked');
+    document.getElementById('m-download').focus();
+  }
+
+  var deleteDialog = document.getElementById('delete-dialog');
+  var deleteConfirm = document.getElementById('delete-confirm');
+  var deleteCancel = document.getElementById('delete-cancel');
+  var deleting = false;
+  var deleteCard = null;
+  function openDelete(card) {
+    if (!card || deleting) return;
+    deleteCard = card;
+    document.getElementById('delete-description').textContent = '确定删除「' + card.title + '」？';
+    document.getElementById('delete-error').textContent = '';
+    deleteDialog.showModal();
+    deleteCancel.focus();
+  }
+  deleteCancel.addEventListener('click', function () { deleteDialog.close(); });
+  deleteDialog.addEventListener('cancel', function (event) { if (deleting) event.preventDefault(); });
+  deleteConfirm.addEventListener('click', async function () {
+    if (!deleteCard || deleting) return;
+    deleting = true;
+    deleteConfirm.disabled = true;
+    deleteCancel.disabled = true;
+    deleteConfirm.textContent = '正在删除…';
+    document.getElementById('delete-error').textContent = '';
+    try {
+      await api('/api/cards/' + encodeURIComponent(deleteCard.card_id), { method: 'DELETE' });
+      deleteDialog.close();
+      await loadCards();
+      var message = document.getElementById('manage-message');
+      message.textContent = '已删除上传。';
+      message.hidden = false;
+      document.querySelector('nav.main a.on').focus();
+    } catch (error) {
+      document.getElementById('delete-error').textContent = error.message || '删除失败，请重试。';
+    } finally {
+      deleting = false;
+      deleteConfirm.disabled = false;
+      deleteCancel.disabled = false;
+      deleteConfirm.textContent = '删除上传';
+    }
+  });
+
+  function closeCard() {
+    modal.hidden = true;
+    document.body.classList.remove('locked');
+  }
+
+  var importModal = document.getElementById('import-modal');
+  var importState = document.getElementById('import-state');
+  var importDirect = document.getElementById('import-direct');
+  var importCardId = '';
+  var importTimer = null;
+
+  async function downloadZip(cardId) {
+    var response = await fetch('/api/cards/' + encodeURIComponent(cardId) + '/package', { credentials: 'include' });
+    if (response.status === 401) { closeImport(); openAuth('login', '登录后才能下载卡片。'); return; }
+    if (!response.ok) throw new Error('下载失败，请稍后再试。');
+    var blob = await response.blob();
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = (state.current && state.current.title ? state.current.title : 'card') + '.studycard.zip';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(function () { URL.revokeObjectURL(link.href); }, 4000);
+    loadCards();
+  }
+
+  function closeImport() {
+    if (importTimer) { window.clearTimeout(importTimer); importTimer = null; }
+    importModal.hidden = true;
+    document.body.classList.remove('locked');
+  }
+
+  function openImport(cardId) {
+    if (!state.user) { openAuth('login', '登录后才能导入卡片。'); return; }
+    importCardId = cardId;
+    importDirect.disabled = false;
+    importDirect.textContent = '直接导入到本机';
+    importState.className = 'import-state';
+    importState.textContent = '会保存到当前市集账号的本地空间，不受本机当前登录账号影响。';
+    importModal.hidden = false;
+    document.body.classList.add('locked');
+    importDirect.focus();
+  }
+
+  async function pollImport(jobId) {
+    try {
+      var result = await api('/api/imports/' + encodeURIComponent(jobId));
+      if (result.status === 'done') {
+        importState.className = 'import-state ok';
+        importState.textContent = '已导入该账号的本地空间，登录该账号后可在「我的人物」查看。';
+        importDirect.textContent = '完成';
+        loadCards();
+        return;
+      }
+      if (result.status === 'failed') {
+        importState.className = 'import-state err';
+        importState.textContent = result.message || '导入失败，可以下载 ZIP 手动导入。';
+        importDirect.disabled = false;
+        importDirect.textContent = '重新导入';
+        return;
+      }
+      importState.className = 'import-state';
+      importState.textContent = result.status === 'taken' ? '本机正在导入…' : '等待本机接收…';
+      importTimer = window.setTimeout(function () { pollImport(jobId); }, 1500);
+    } catch (error) {
+      importState.className = 'import-state err';
+      importState.textContent = error.message || '查询导入状态失败。';
+      importDirect.disabled = false;
+      importDirect.textContent = '重新导入';
+    }
+  }
+
+  async function directImport() {
+    importDirect.disabled = true;
+    importDirect.textContent = '正在通知本机…';
+    importState.className = 'import-state';
+    importState.textContent = '';
+    try {
+      var job = await api('/api/imports', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ card_id: importCardId })
+      });
+      importState.textContent = '等待本机接收…';
+      importTimer = window.setTimeout(function () { pollImport(job.job_id); }, 1200);
+    } catch (error) {
+      importDirect.disabled = false;
+      importDirect.textContent = '直接导入到本机';
+      importState.className = 'import-state err';
+      if (error.code === 'LOCAL_OFFLINE') {
+        importState.innerHTML = '当前账号未开启本地接收，或应用未运行。<a href="http://localhost:5173/#/market-receive" target="_blank" rel="noopener noreferrer">开启账号接收</a>，或下载 ZIP 手动导入。';
+      } else {
+        importState.textContent = error.message || '导入失败，可以下载 ZIP 手动导入。';
+      }
+    }
+  }
+
+  function setField(element, label, visible) {
+    element.classList.toggle('hide', !visible);
+    if (label) label.classList.toggle('hide', !visible);
+  }
+
+  function openAuth(mode, hint) {
+    state.mode = 'login';
+    authTitle.innerHTML = '登录市集账号';
+    authHint.textContent = hint || '账号只用于卡片市集。学习数据、教材和对话不上传。';
+    authMsg.textContent = '';
+    authMsg.className = 'auth-msg';
+    auth.hidden = false;
+    document.body.classList.add('locked');
+    authEmail.focus();
+  }
+
+  function closeAuth() {
+    auth.hidden = true;
+    document.body.classList.remove('locked');
+  }
+
+  async function submitAuth() {
+    var email = authEmail.value.trim();
+    var password = authPassword.value;
+    if (!email || !password) { authMsg.textContent = '请填写邮箱和密码。'; return; }
+    authSubmit.disabled = true;
+    authMsg.textContent = '';
+    try {
+      state.user = await api('/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email, password: password })
+      });
+      closeAuth();
+      renderAccount();
+      loadCards();
+      if (state.current) document.getElementById('m-note').textContent = '';
+    } catch (error) {
+      authMsg.className = 'auth-msg';
+      authMsg.textContent = error.message || '登录失败';
+    } finally {
+      authSubmit.disabled = false;
+    }
+  }
+
+  authSubmit.addEventListener('click', submitAuth);
+  authPassword.addEventListener('keydown', function (event) { if (event.key === 'Enter') submitAuth(); });
+  document.addEventListener('click', function (event) {
+    var menu = document.getElementById('account-menu');
+    if (menu && !menu.hidden && !event.target.closest('.account-wrap')) menu.hidden = true;
+  });
+
+  document.querySelectorAll('[data-close]').forEach(function (element) {
+    element.addEventListener('click', closeCard);
+  });
+  document.querySelectorAll('[data-import-close]').forEach(function (element) {
+    element.addEventListener('click', closeImport);
+  });
+  importDirect.addEventListener('click', directImport);
+  document.getElementById('import-zip').addEventListener('click', function () {
+    downloadZip(importCardId).catch(function (error) {
+      importState.className = 'import-state err';
+      importState.textContent = error.message || '下载失败';
+    });
+  });
+  document.getElementById('m-zip').addEventListener('click', function () {
+    if (!state.current) return;
+    closeCard();
+    downloadZip(state.current.card_id).catch(function (error) { alert(error.message || '下载失败'); });
+  });
+  document.getElementById('m-download').addEventListener('click', function () {
+    if (!state.current) return;
+    var id = state.current.card_id;
+    closeCard();
+    openImport(id);
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    if (!importModal.hidden) closeImport();
+    if (!modal.hidden) closeCard();
+    if (!auth.hidden) closeAuth();
+  });
+
+  (async function boot() {
+    var loginTicket = new URLSearchParams(location.hash.slice(1)).get('login');
+    if (loginTicket) {
+      history.replaceState(null, '', location.pathname + location.search);
+      try {
+        await api('/api/web-login/consume', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: loginTicket })
+        });
+      } catch (error) {
+        openAuth('login', error.message || '登录链接已失效，请从学伴重新打开市集。');
+      }
+    }
+    try {
+      var session = await api('/api/me');
+      state.user = session && session.authenticated ? session.user : null;
+    } catch (error) { state.user = null; }
+    renderAccount();
+    applyScope(routeScope(location.pathname));
+    await loadCards();
+  })();
+})();
+</script>
+</body>
+</html>

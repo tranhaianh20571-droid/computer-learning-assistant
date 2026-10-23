@@ -1,3 +1,4 @@
+import os
 import warnings
 from typing import Literal, Self
 
@@ -48,6 +49,23 @@ class Settings(BaseSettings):
     EMAILS_FROM_EMAIL: EmailStr | None = None
     EMAILS_FROM_NAME: str | None = None
 
+    # 市集站：QQ / Gmail 双通道，按收件域路由并互为回退。
+    # 凭据只从环境变量或未入库的 .env 读取；授权码/App Password 均可随时撤销。
+    QQ_SMTP_HOST: str = "smtp.qq.com"
+    QQ_SMTP_PORT: int = 465
+    QQ_SMTP_SSL: bool = True
+    QQ_SMTP_TLS: bool = False
+    QQ_SMTP_USER: str | None = None
+    QQ_SMTP_PASSWORD: str | None = None
+    QQ_FROM_EMAIL: str | None = None
+    GMAIL_SMTP_HOST: str = "smtp.gmail.com"
+    GMAIL_SMTP_PORT: int = 465
+    GMAIL_SMTP_SSL: bool = True
+    GMAIL_SMTP_TLS: bool = False
+    GMAIL_SMTP_USER: str | None = None
+    GMAIL_SMTP_PASSWORD: str | None = None
+    GMAIL_FROM_EMAIL: str | None = None
+
     @model_validator(mode="after")
     def _set_default_emails_from(self) -> Self:
         if not self.EMAILS_FROM_NAME:
@@ -59,7 +77,11 @@ class Settings(BaseSettings):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def emails_enabled(self) -> bool:
-        return bool(self.SMTP_HOST and self.EMAILS_FROM_EMAIL)
+        return bool(
+            (self.SMTP_HOST and self.EMAILS_FROM_EMAIL)
+            or (self.QQ_SMTP_USER and self.QQ_SMTP_PASSWORD)
+            or (self.GMAIL_SMTP_USER and self.GMAIL_SMTP_PASSWORD)
+        )
 
     EMAIL_TEST_USER: EmailStr = "test@example.com"
     FIRST_SUPERUSER: EmailStr
@@ -67,6 +89,13 @@ class Settings(BaseSettings):
     # 切片 1：凭据加密主密钥（AES-256-GCM）。不写仓库、不写日志。
     # 未配置时能力配置写入返回受控错误，不影响切片 0 链路。
     APP_ENCRYPTION_KEY: str | None = None
+    SOURCE_VIDEO_PYTHON: str | None = None
+    SOURCE_ASR_MODELS_DIR: str | None = None
+    SOURCE_TRUSTED_SERVICES: str = ""
+    SOURCE_WORKER_MODE: str = "embedded"
+    CORPUS_VECTOR_BACKEND: Literal["auto", "json"] = "auto"
+    # 角色卡市集：本地只保存加密设备令牌，不保存市集密码。
+    MARKET_BASE_URL: str = "https://studypal.tailf6f37a.ts.net"
     # ADR-022：OTel/Langfuse 观测（OTLP 出口）与内容 trace 通道。
     # 密钥只从环境变量/.env 读取，不写日志、不进事件；未配置时整链路 no-op。
     OTEL_ENABLED: bool = False
@@ -105,4 +134,4 @@ class Settings(BaseSettings):
         return self
 
 
-settings = Settings()  # type: ignore # ty: ignore[unused-ignore-comment]
+settings = Settings(_env_file=None) if os.environ.get("STUDY_DESKTOP_MODE") == "1" else Settings()  # type: ignore

@@ -1,122 +1,139 @@
-/** Measure captions before node placement; reserve space for every label. */
-import { wrapGraphText, graphTextWidth } from "./boardText.ts";
+/** Topology owns placement; captions participate in layout before rendering. */
+import dagre from "@dagrejs/dagre";
+import {wrapText,measureBoardText} from "./boardText.ts";
+import {graphStages} from "./graphStages.ts";
 
-export function graphMinimumWidth(block:any,columns:number){
-  const nodes=block.nodes||[],edges=(block.edges||[]).length<=12?block.edges||[]:[];
-  const indexes=new Map<string,number>(nodes.map((node:any,index:number)=>[node.id,index]));
-  const adjacent=(edge:any)=>indexes.has(edge.from_id)&&indexes.has(edge.to_id)&&
-    indexes.get(edge.to_id)===indexes.get(edge.from_id)!+columns;
-  const external=edges.filter((edge:any)=>!adjacent(edge));
-  const nodeRun=Math.max(0,...nodes.map((node:any)=>graphTextWidth((node.group||"")+"\n"+node.label,14)));
-  const inlineRun=Math.max(0,...edges.filter(adjacent).map((edge:any)=>graphTextWidth(edge.label||"",11)));
-  const outsideRun=Math.max(0,...external.map((edge:any)=>graphTextWidth(edge.label||"",11)));
-  return Math.max(96,nodeRun+16,inlineRun+12)*columns+18*(columns-1)+16+
-    (external.length?Math.max(76,outsideRun+22):0);
+const ACCENT="#31588b",INK="#252927";
+const ratio=(node:any)=>node.shape==="decision"?.58:node.shape==="terminal"?.7:1;
+const nodeText=(node:any)=>(node.group?node.group+"\n":"")+node.label;
+
+export function graphMinimumWidth(_block:any,_columns:number){
+  return 280;
 }
 
-export function graphLayout(block: any, width: number, columns: number, font: number, gap: number,
-    selected = "", highlights: string[] = []) {
-  const allEdges=block.edges||[];
-  const edges=allEdges.filter((edge:any)=>selected?edge.from_id===selected||edge.to_id===selected:allEdges.length<=12);
-  const nodes=block.nodes,positions:Record<string,any>={},elements:any[]=[];
-  const indexById=new Map<string,number>(nodes.map((node:any,index:number)=>[node.id,index]));
-  const adjacent=(edge:any)=>{
-    const from=indexById.get(edge.from_id),to=indexById.get(edge.to_id);
-    return from!==undefined&&to!==undefined&&to===from+columns;
-  };
-  const external=edges.filter((edge:any)=>!adjacent(edge));
-  const captionFont=11,lineHeight=captionFont*1.5;
-  const captionRun=Math.max(0,...external.map((edge:any)=>graphTextWidth(edge.label||"",captionFont)));
-  // A simple vertical chain needs no routing gutter: use the whole column.
-  const gutter=external.length?Math.max(76,captionRun+22):0;
-  const nodeWidth=Math.max(48,(width-gutter-16-(columns-1)*18)/columns);
-  const nodeText=(node:any)=>(node.group?node.group+"\n":"")+node.label;
-  const rowGaps:number[]=[];
-  const captionHeights=new Map<any,number>();
-  const laneHeights=new Map<string,number>();
-  for(const edge of edges.filter(adjacent)){
-    if(!edge.label)continue;
-    const captionHeight=wrapGraphText(edge.label,nodeWidth-12,captionFont).length*lineHeight;
-    captionHeights.set(edge,captionHeight);
-    laneHeights.set(edge.from_id,(laneHeights.get(edge.from_id)||0)+captionHeight+6);
+export function graphLayout(block:any,width:number,_columns:number,font:number,gap:number,
+    selected="",highlights:string[]=[]){
+  const nodes=block.nodes||[],edges=block.edges||[];
+  const captionFont=12,lineHeight=18;
+  const nodeWidth=Math.min(240,Math.max(96,(width-64)/2));
+  const captionWidth=Math.min(192,Math.max(96,width*.4));
+  const g=new dagre.graphlib.Graph({multigraph:true}).setGraph({
+    rankdir:"TB",nodesep:28,edgesep:22,ranksep:Math.max(38,gap),marginx:12,marginy:12,
+  }).setDefaultEdgeLabel(()=>({}));
+  for(const node of nodes){
+    const inner=ratio(node);
+    const lines=wrapText(nodeText(node),nodeWidth*inner-20,font);
+    g.setNode(node.id,{width:nodeWidth,height:Math.max(52,(lines.length*font*1.5+20)/inner)});
   }
-  let y=4;
-  for(let i=0;i<nodes.length;i+=columns){
-    const row=nodes.slice(i,i+columns),rowNo=Math.floor(i/columns);
-    const height=Math.max(...row.map((node:any)=>wrapGraphText(nodeText(node),nodeWidth-16,font).length))*font*1.5+16;
-    row.forEach((node:any,j:number)=>positions[node.id]={x:8+j*(nodeWidth+18),y,w:nodeWidth,h:height,row:rowNo});
-    const captionHeight=Math.max(0,...row.map((node:any)=>Math.max(0,(laneHeights.get(node.id)||0)-6)));
-    rowGaps[rowNo]=Math.max(gap,captionHeight+20);
-    y+=height+rowGaps[rowNo];
-  }
-  let height=Math.max(40,y-(rowGaps.at(-1)||gap)+4);
-  const edgeLabels:any[]=[],occupied:{x:number;y:number;width:number;height:number}[]=[];
-  const captionOffsets=new Map<string,number>();
-  const intersects=(a:any,b:any)=>a.x<b.x+b.width+5&&a.x+a.width+5>b.x&&a.y<b.y+b.height+5&&a.y+a.height+5>b.y;
   edges.forEach((edge:any,index:number)=>{
-    const a=positions[edge.from_id],b=positions[edge.to_id];if(!a||!b)return;
-    const ax=a.x+a.w,ay=a.y+a.h/2,bx=b.x+b.w,by=b.y+b.h/2;
-    const consecutive=adjacent(edge);
-    let x=ax,ty=ay,points:number[][],labelX:number,labelY:number,labelWidth:number;
-    if(consecutive){
-      const distance=b.y-a.y-a.h;
-      x=a.x+a.w/2;ty=a.y+a.h;points=[[0,0],[0,distance]];
-      labelX=a.x+6;labelWidth=a.w-12;
-      const captionHeight=captionHeights.get(edge)||0;
-      const laneHeight=Math.max(0,(laneHeights.get(edge.from_id)||0)-6);
-      labelY=ty+(distance-laneHeight)/2+(captionOffsets.get(edge.from_id)||0);
-      if(edge.label)captionOffsets.set(edge.from_id,(captionOffsets.get(edge.from_id)||0)+captionHeight+6);
-    } else {
-      const route=width-gutter+4+(index%2)*6;
-      points=edge.from_id===edge.to_id?[[0,0],[route-ax,0],[route-ax,24],[0,24]]:
-        [[0,0],[route-ax,0],[route-ax,by-ay],[bx-ax,by-ay]];
-      labelX=route+5;labelWidth=Math.max(36,width-labelX-4);
-      const captionHeight=wrapGraphText(edge.label||"",labelWidth,captionFont).length*lineHeight;
-      labelY=Math.max(0,(ay+by)/2-captionHeight/2);
-      if(edge.label){
-        // Captions in the outside lane avoid one another. A leader preserves
-        // the association with the original edge after displacement.
-        const originalY=labelY;
-        let conflict=occupied.find(box=>intersects({x:labelX-2,y:labelY-1,width:labelWidth+4,height:captionHeight+2},box));
-        while(conflict){
-          labelY=conflict.y+conflict.height+7;
-          conflict=occupied.find(box=>intersects({x:labelX-2,y:labelY-1,width:labelWidth+4,height:captionHeight+2},box));
-        }
-        if(labelY!==originalY)elements.push({type:"line",id:`${block.id}_edge_leader_${index}`,
-          x:route,y:originalY+captionHeight/2,width:Math.max(1,labelX-route),height:labelY-originalY,
-          points:[[0,0],[labelX-route,labelY-originalY]],strokeColor:"#31588b",strokeWidth:1,
-          backgroundColor:"transparent",roughness:0});
-      }
+    if(!g.hasNode(edge.from_id)||!g.hasNode(edge.to_id))return;
+    const lines=edge.label?wrapText(edge.label,captionWidth,captionFont):[];
+    const labelWidth=lines.length?Math.max(...lines.map(line=>measureBoardText(line,captionFont)))+12:0;
+    g.setEdge(edge.from_id,edge.to_id,{width:labelWidth,height:lines.length?lines.length*lineHeight+10:0,
+      labelpos:"c",labeloffset:12},String(index));
+  });
+  dagre.layout(g);
+  // Readable relationship rows are a lossless fallback for a graph which cannot
+  // fit the viewport. Never scale lettering down or silently remove edges.
+  if((g.graph().width||0)>width)return relationRows(block,width,font,selected,highlights);
+  const stages=graphStages(block,Object.fromEntries(nodes.map((node:any)=>[node.id,g.node(node.id)])));
+  const elements:any[]=[],labels:any[]=[];
+  const offset=(width-(g.graph().width||0))/2;
+  const meta=(stage:number,extra:any={})=>({blockId:block.id,graphStage:stage,
+    graphStageCount:stages.total,...extra});
+  edges.forEach((edge:any,index:number)=>{
+    const laid=g.edge({v:edge.from_id,w:edge.to_id,name:String(index)});
+    if(!laid?.points?.length)return;
+    let points:number[][]=laid.points.map((p:{x:number;y:number})=>[p.x+offset,p.y]);
+    if(edge.from_id===edge.to_id){
+      const node=g.node(edge.from_id),right=node.x!+offset+node.width/2,cy=node.y!;
+      const labelRight=(laid.x??node.x!)+offset+(laid.width||0)/2;
+      const outside=Math.max(right+32,labelRight+12),near=right+10;
+      const top=Math.min(cy-node.height/2,(laid.y??cy)-(laid.height||0)/2)-10;
+      const bottom=Math.max(cy+node.height/2,(laid.y??cy)+(laid.height||0)/2)+10;
+      points=[[right,cy-node.height/4],[near,cy-node.height/4],[near,top],[outside,top],
+        [outside,bottom],[near,bottom],[near,cy+node.height/4],[right,cy+node.height/4]];
     }
-    const minX=Math.min(...points.map(point=>point[0])),maxX=Math.max(...points.map(point=>point[0]));
-    const minY=Math.min(...points.map(point=>point[1])),maxY=Math.max(...points.map(point=>point[1]));
-    elements.push({type:"arrow",id:`${block.id}_edge_${index}`,x,y:ty,
-      width:Math.max(1,maxX-minX),height:Math.max(1,maxY-minY),points,endArrowhead:"arrow",
-      strokeColor:"#31588b",strokeWidth:1,backgroundColor:"transparent",roughness:0,
-      customData:{blockId:block.id,edgeFrom:edge.from_id,edgeTo:edge.to_id}});
-    if(edge.label){
-      const lines=wrapGraphText(edge.label,labelWidth,captionFont),lh=lines.length*lineHeight;
-      height=Math.max(height,labelY+lh+4);
-      occupied.push({x:labelX-2,y:labelY-1,width:labelWidth+4,height:lh+2});
-      edgeLabels.push({type:"rectangle",id:`${block.id}_edge_label_bg_${index}`,x:labelX-2,y:labelY-1,
-        width:labelWidth+4,height:lh+2,strokeColor:"transparent",backgroundColor:"#fcfcfb",fillStyle:"solid",roughness:0},
-        {type:"text",id:`${block.id}_edge_label_${index}`,x:labelX,y:labelY,width:labelWidth,height:lh,
-          text:lines.join("\n"),fontSize:captionFont,fontFamily:3,lineHeight:1.5,strokeColor:"#31588b",
-          customData:{blockId:block.id,edgeFrom:edge.from_id,edgeTo:edge.to_id}});
+    // Dagre intersects rectangles; ellipse and diamond ports need their own boundary.
+    for(const [endpoint,neighbor,nodeId] of [[0,1,edge.from_id],
+      [points.length-1,points.length-2,edge.to_id]] as [number,number,string][]){
+      const node=nodes.find((n:any)=>n.id===nodeId),box=g.node(nodeId);
+      if(!node||node.shape==="process"||!node.shape)continue;
+      const dx=points[neighbor][0]-(box.x!+offset),dy=points[neighbor][1]-box.y!;
+      const rx=box.width/2,ry=box.height/2;
+      const divisor=node.shape==="decision"?Math.abs(dx/rx)+Math.abs(dy/ry):Math.hypot(dx/rx,dy/ry);
+      if(divisor)points[endpoint]=[box.x!+offset+dx/divisor,box.y!+dy/divisor];
+    }
+    const origin=points[0],relative=points.map(p=>[p[0]-origin[0],p[1]-origin[1]]);
+    const data=meta(stages.edgeStages[index],{edgeFrom:edge.from_id,edgeTo:edge.to_id,edgeIndex:index});
+    const xs=points.map(p=>p[0]),ys=points.map(p=>p[1]);
+    elements.push({type:"arrow",id:`${block.id}_edge_${index}`,x:origin[0],y:origin[1],
+      width:Math.max(1,Math.max(...xs)-Math.min(...xs)),height:Math.max(1,Math.max(...ys)-Math.min(...ys)),
+      points:relative,endArrowhead:"arrow",strokeColor:ACCENT,strokeWidth:selected&&
+        (edge.from_id===selected||edge.to_id===selected)?2:1.5,backgroundColor:"transparent",
+      roughness:0,customData:data});
+    if(edge.label&&laid.x!==undefined&&laid.y!==undefined){
+      const x=laid.x+offset-laid.width!/2,y=laid.y-laid.height!/2;
+      const lines=wrapText(edge.label,captionWidth,captionFont);
+      labels.push({type:"rectangle",id:`${block.id}_edge_label_bg_${index}`,x,y,
+        width:laid.width,height:laid.height,strokeColor:"transparent",backgroundColor:"#fcfcfb",
+        fillStyle:"solid",roughness:0,customData:data},
+      {type:"text",id:`${block.id}_edge_label_${index}`,x:x+6,y:y+5,
+        width:laid.width!-12,height:lines.length*lineHeight,text:lines.join("\n"),
+        fontSize:captionFont,fontFamily:3,lineHeight:1.5,strokeColor:ACCENT,customData:data});
     }
   });
-  nodes.forEach((node:any)=>{
-    const pos=positions[node.id],active=selected===node.id||highlights.includes(node.id);
-    elements.push({type:"rectangle",id:`${block.id}_node_${node.id}`,x:pos.x,y:pos.y,width:pos.w,height:pos.h,
-      strokeColor:active?"#31588b":"#899d90",backgroundColor:active?"#dce9f8":"#eef3ef",fillStyle:"solid",roughness:0},
-      {type:"text",id:`${block.id}_node_text_${node.id}`,x:pos.x+8,y:pos.y+8,width:pos.w-16,height:pos.h-16,
-        text:wrapGraphText(nodeText(node),pos.w-16,font).join("\n"),fontSize:font,fontFamily:3,lineHeight:1.5,strokeColor:"#252927"});
-  });
-  elements.push(...edgeLabels);
-  if(allEdges.length>12){
-    const text=selected?"显示所选节点的相关连接":"连接较多：选择节点查看相关连接";
-    elements.push({type:"text",id:`${block.id}_detail_hint`,x:0,y:height+4,width,height:36,
-      text,fontSize:12,fontFamily:3,lineHeight:1.5,strokeColor:"#31588b"});height+=44;
+  for(const node of nodes){
+    const laid=g.node(node.id),inner=ratio(node),active=selected===node.id||highlights.includes(node.id);
+    const x=laid.x!+offset-laid.width/2,y=laid.y!-laid.height/2;
+    const data=meta(stages.nodeStages[node.id],{nodeId:node.id});
+    elements.push({type:node.shape==="decision"?"diamond":node.shape==="terminal"?"ellipse":"rectangle",
+      id:`${block.id}_node_${node.id}`,x,y,width:laid.width,height:laid.height,
+      strokeColor:active?ACCENT:"#899d90",backgroundColor:active?"#dce9f8":"#eef3ef",
+      fillStyle:"solid",strokeWidth:1.5,roughness:0,customData:data},
+    {type:"text",id:`${block.id}_node_text_${node.id}`,
+      x:x+laid.width*(1-inner)/2+10,y:y+laid.height*(1-inner)/2+10,
+      width:laid.width*inner-20,height:laid.height*inner-20,
+      text:wrapText(nodeText(node),laid.width*inner-20,font).join("\n"),fontSize:font,
+      fontFamily:3,lineHeight:1.5,strokeColor:INK,customData:data});
   }
-  return {elements,height,font};
+  elements.push(...labels);
+  const bounds=elements.flatMap(element=>element.points
+    ?element.points.map(([x,y]:number[])=>[element.x+x,element.y+y])
+    :[[element.x,element.y],[element.x+element.width,element.y+element.height]]);
+  const minX=Math.min(0,...bounds.map(p=>p[0])),minY=Math.min(0,...bounds.map(p=>p[1]));
+  const maxX=Math.max(0,...bounds.map(p=>p[0])),maxY=Math.max(0,...bounds.map(p=>p[1]));
+  if(maxX-minX+12>width)return relationRows(block,width,font,selected,highlights);
+  for(const element of elements){element.x-=minX;element.y+=8-minY;}
+  return {elements,height:Math.max(40,maxY-minY+16),font,mode:"graph"};
+}
+
+function relationRows(block:any,width:number,font:number,selected:string,highlights:string[]){
+  const nodes=block.nodes||[],edges=block.edges||[],stages=graphStages(block);
+  const byId=new Map<string,any>(nodes.map((n:any)=>[n.id,n]));
+  const elements:any[]=[];
+  let y=8;
+  const add=(id:string,text:string,stage:number,extra:any={})=>{
+    const lines=wrapText(text,width-32,font),height=lines.length*font*1.5;
+    elements.push({type:"text",id,x:16,y,width:width-32,height,text:lines.join("\n"),fontSize:font,
+      fontFamily:3,lineHeight:1.5,strokeColor:extra.active?ACCENT:INK,
+      customData:{blockId:block.id,graphStage:stage,graphStageCount:stages.total,...extra}});
+    y+=height+20;
+  };
+  // Reserve rows in reveal order so later relationships never fill an earlier gap.
+  for(let stage=0;stage<stages.total;stage++){
+    for(const node of nodes)if(stages.nodeStages[node.id]===stage){
+      add(`${block.id}_node_${node.id}`,nodeText(node),stage,
+        {nodeId:node.id,active:node.id===selected||highlights.includes(node.id)});
+    }
+    edges.forEach((edge:any,i:number)=>{
+      if(stages.edgeStages[i]!==stage)return;
+      const from=byId.get(edge.from_id),to=byId.get(edge.to_id);
+      if(!from||!to)return;
+      add(`${block.id}_edge_${i}`,`${from.label} → ${edge.label?edge.label+" → ":""}${to.label}`,
+        stage,{edgeFrom:edge.from_id,edgeTo:edge.to_id,edgeIndex:i,
+          active:edge.from_id===selected||edge.to_id===selected});
+    });
+  }
+  return {elements,height:y,font,mode:"relations"};
 }

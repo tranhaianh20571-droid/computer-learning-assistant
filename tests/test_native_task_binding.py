@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from backend.agents.task_binding import AgentBudgetRow, bind_task_deps
+from backend.auth.models import UserRow
 from backend.logging_audit.db import Database
 from backend.logging_audit.models import TaskEventRow, TaskStateRow
 from backend.logging_audit.repositories import PgTaskEventStore
@@ -36,7 +37,7 @@ def fails(code):
 @pytest.fixture
 def env():
     db = Database("sqlite+pysqlite:///:memory:")
-    for model in (LearningTaskRow, AgentBudgetRow, TaskAttemptRow, TaskStateRow, TaskEventRow,
+    for model in (UserRow, LearningTaskRow, AgentBudgetRow, TaskAttemptRow, TaskStateRow, TaskEventRow,
         ConversationRow, CourseRow, CourseUnitRow, LearningRouteRow, LessonRow,
         PlanningDraftRow, PlanningTaskStateRow, CoverAssetRow, PlanningDialogueRow,
         PreparedFirstSegmentRow, UnitAssessmentRow, AssessmentAttemptRow, MaterialRow,

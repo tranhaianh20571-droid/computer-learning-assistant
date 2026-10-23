@@ -88,6 +88,8 @@ class PlanningTaskIn(BaseModel):
     target_course_id: str | None = None
     target_route_id: str | None = None
     source_route_node_id: str | None = None
+    # v3：time_budget/target_outcome/stack_preference；缺省时服务端用显式默认假设。
+    constraints: dict = Field(default_factory=dict)
 
 
 class DraftSaveIn(BaseModel):
@@ -101,6 +103,7 @@ class DraftConfirmIn(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=128)
     allow_duplicate: bool = False
     duplicate_fingerprint: str | None = Field(default=None, max_length=80)
+    acknowledge_issues: bool = False
 
 
 class DraftDuplicateIn(BaseModel):
@@ -147,7 +150,7 @@ class ResumePlanningIn(BaseModel):
 
 class AnswerDraftIn(BaseModel):
     revision: int = Field(ge=0)
-    answers: list[dict] = Field(default_factory=list, max_length=6)
+    answers: list[dict] = Field(default_factory=list, max_length=7)
 
 
 class CourseShellIn(BaseModel):
@@ -164,8 +167,9 @@ class ChatCreateIn(BaseModel):
 
 class ChatSendIn(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
-    use_search: bool = False
+    use_search: bool | None = None
     idempotency_key: str = Field(min_length=1, max_length=128)
+    material_ids: list[str] | None = Field(default=None, max_length=10)
 
 
 class ChatResumeIn(BaseModel):
@@ -198,6 +202,25 @@ def create_planning_router(
 
     def _user(request: Request):
         return resolve_user(request)
+
+    @router.get("/api/tasks/{task_id}/search-status")
+    def search_status(task_id: str, request: Request) -> dict:
+        from ..tasks.service import LearningTaskRow
+        from ..search.repository import SearchCallRow
+        actor = _user(request).user_id
+        with db.session() as sess:
+            task = sess.get(LearningTaskRow, task_id)
+            if task is None or task.owner_user_id != actor:
+                raise error("task_not_found", status=404)
+            call = sess.scalars(select(SearchCallRow).where(SearchCallRow.task_id == task_id,
+                SearchCallRow.owner_user_id == actor).order_by(SearchCallRow.created_at.desc()).limit(1)).first()
+            if call is None:
+                return {"phase": "not_started", "state": None, "continuation_mode": None, "result_count": 0}
+            state = "failed" if call.state == "interrupted" else call.state
+            return {"phase": "running" if state in ("reserved", "sending") else "completed",
+                "state": None if state in ("reserved", "sending") else state,
+                "continuation_mode": call.continuation_mode, "result_count": call.result_count,
+                "error_code": call.error_code}
 
     # ------------------------------------------------------------------
     # 规划实体（壳）与任务创建（四入口）
@@ -263,6 +286,7 @@ def create_planning_router(
             target_id=body.target_course_id or body.target_route_id,
             source_route_node_id=body.source_route_node_id,
             signals=None,
+            constraints=body.constraints,
             idempotency_key=body.idempotency_key,
         )
         # signals 以字段传入（范围解析纯函数在 worker 内使用）
@@ -306,6 +330,7 @@ def create_planning_router(
         planning.get_planning_state(task_id, actor_id=user.user_id)  # ownership
         # 用户显式重试：failed/expired 任务先重排队（generation+1、刷新截止），
         # 否则 claim 会以 TASK_NOT_CLAIMABLE / TASK_EXPIRED 直接失败。已终态成功的任务不改。
+        planning.prepare_execution(task_id, actor_id=user.user_id)
         tasks.requeue_for_retry(task_id, actor_id=user.user_id)
         return planning.run_task(task_id)
 
@@ -313,6 +338,13 @@ def create_planning_router(
     def get_planning_task(task_id: str, request: Request) -> dict:
         user = _user(request)
         return planning.get_planning_state(task_id, actor_id=user.user_id)
+
+    @router.get("/api/planning/tasks/{task_id}/process")
+    def get_planning_process(task_id: str, request: Request):
+        from fastapi.responses import JSONResponse
+        from .process import read_process
+        return JSONResponse(read_process(planning, task_id, _user(request).user_id),
+                            headers={"Cache-Control": "no-store"})
 
     @router.post("/api/planning/tasks/{task_id}/decision")
     def decide(task_id: str, body: DecisionIn, request: Request) -> dict:
@@ -322,18 +354,21 @@ def create_planning_router(
             tasks.requeue_after_wait(task_id, actor_id=user.user_id)
             if body.background:
                 return planning.workspace.resume(task_id, user.user_id)
+            planning.prepare_execution(task_id, actor_id=user.user_id)
             return result | planning.run_task(task_id)
         if body.resolved_scope is not None:
             result = planning.decide_scope(task_id, actor_id=user.user_id, resolved_scope=body.resolved_scope)
             tasks.requeue_after_wait(task_id, actor_id=user.user_id)
             if body.background:
                 return planning.workspace.resume(task_id, user.user_id)
+            planning.prepare_execution(task_id, actor_id=user.user_id)
             return result | planning.run_task(task_id)
         if body.decision is not None:
             result = planning.decide_search(task_id, actor_id=user.user_id, decision=body.decision)
             tasks.requeue_after_wait(task_id, actor_id=user.user_id)
             if body.background:
                 return planning.workspace.resume(task_id, user.user_id)
+            planning.prepare_execution(task_id, actor_id=user.user_id)
             return result | planning.run_task(task_id)
         raise error("invalid_field", "decision payload required")
 
@@ -367,6 +402,7 @@ def create_planning_router(
             draft_id, actor_id=user.user_id,
             revision=body.revision, idempotency_key=body.idempotency_key,
             allow_duplicate=body.allow_duplicate, duplicate_fingerprint=body.duplicate_fingerprint,
+            acknowledge_issues=body.acknowledge_issues,
         )
         if teaching and teaching.server_managed:
             item = drafts.get_draft(draft_id, actor_id=user.user_id)
@@ -386,6 +422,9 @@ def create_planning_router(
             try:
                 cover = (features.cover(kind, target_id, user.user_id) if result.get("deduped")
                          else features.enqueue_cover(kind, target_id, user.user_id, "automatic", automatic=True))
+                if cover is None:
+                    # ADR-034: no enabled image model — keep the deterministic local cover instead.
+                    cover = features.enqueue_cover(kind, target_id, user.user_id, "automatic")
                 result["covers"] = [{"target_kind": kind, "target_id": target_id, **cover}]
             except Exception as exc:
                 result["covers"] = [{"target_kind": kind, "target_id": target_id, "status": "failed",
@@ -648,7 +687,7 @@ def create_planning_router(
 
     @router.delete("/api/planning/routes/{route_id}")
     def delete_route(route_id: str, request: Request) -> dict:
-        """删除路线：课程保留，编排解除，写墓碑与审计。"""
+        """删除路线：连同当前编排中的成员课程一并删除，写墓碑与审计。"""
         user = _user(request)
         return deletion.delete_route(route_id, actor_id=user.user_id)
 
@@ -695,6 +734,7 @@ def create_planning_router(
         return chat.send_message(
             conversation_id, actor_id=user.user_id, content=body.content,
             use_search=body.use_search, idempotency_key=body.idempotency_key,
+            **({"new_material_ids": body.material_ids} if body.material_ids is not None else {}),
         )
 
     @router.post("/api/chat/{conversation_id}/messages/stream")
@@ -704,6 +744,7 @@ def create_planning_router(
         meta, gen = chat.stream_answer(
             conversation_id, actor_id=user.user_id, content=body.content,
             use_search=body.use_search, idempotency_key=body.idempotency_key,
+            **({"new_material_ids": body.material_ids} if body.material_ids is not None else {}),
         )
         return _ChatStreamingResponse(meta, gen)
 

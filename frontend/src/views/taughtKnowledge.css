@@ -1,0 +1,12 @@
+.taught-page{padding:30px 42px;max-width:1400px;margin:auto;color:#24392c;background:#f8faf7;min-height:100%}
+.taught-page>header{display:flex;align-items:flex-start;gap:14px;border-bottom:1px solid #becdbe;padding-bottom:22px}
+.taught-page>header>div{min-width:0;flex:1}.taught-page>header>div>p{font-size:12px;color:#5b7160;margin:0 0 12px}
+.taught-title{display:flex;align-items:center;gap:10px;min-width:0}.taught-title h1{font-size:27px;line-height:1.6;overflow-wrap:anywhere;margin:0}
+.taught-title button{flex:none}.taught-page form{display:flex;gap:8px}.taught-page form input{min-width:0;width:100%;padding:8px}
+.taught-count{font-size:14px;padding:18px 0}.taught-count strong{font-size:24px;margin:0 6px}
+.taught-list article{display:grid;grid-template-columns:28px minmax(0,1fr) 110px 36px;gap:18px;border-top:1px solid #d5dfd5;padding:22px 0}
+.taught-number{font:15px/1.8 Consolas,monospace;color:#56735f}.taught-list h2{font-size:17px;margin:0;line-height:1.6}.taught-list p{font-size:14px;line-height:1.9;color:#59705f;margin:8px 0}.taught-list small{font-size:12px;color:#687c6e}
+.taught-status{font-size:12px;line-height:2;white-space:nowrap;color:#68746b}.taught-status.passed{color:#356645}.taught-status.pending{color:#506c87}.taught-status.review{color:#886327}
+.taught-list details{font-size:12px;margin-top:12px}.taught-list summary{cursor:pointer;color:#526e5b}.taught-empty{padding:70px 0;text-align:center}.taught-empty h2{font-size:18px}.taught-empty p{font-size:14px;color:#607967}
+.character-preference{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 0}
+@media(max-width:600px){.taught-page{padding:20px 14px}.taught-page>header{gap:6px;flex-wrap:wrap}.taught-title h1{font-size:22px}.taught-page>header>.btn{margin-left:40px}.taught-list article{grid-template-columns:24px minmax(0,1fr) 32px;gap:10px}.taught-status{grid-column:2;grid-row:auto}.taught-list article>.iconbtn{grid-column:3;grid-row:1/3}.taught-page form{flex-wrap:wrap}}

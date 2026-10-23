@@ -57,6 +57,8 @@ class ModelCallMetrics:
         capability: Optional[str] = None,
         task_id: Optional[str] = None,
         reason: Optional[str] = None,
+        config_version: Optional[int | str] = None,
+        requests: Optional[int] = None,
     ) -> None:
         from .instrumentation import safe_attributes
         dimensions = safe_attributes({"stage": stage, "mode": mode, "outcome": outcome, "error_code": error_code}, metrics=True)
@@ -74,6 +76,7 @@ class ModelCallMetrics:
             stage=stage, outcome=outcome, duration_ms=positive, mode=mode,
             error_code=error_code, attempts=attempts, config_id=config_id,
             capability=capability, task_id=task_id, reason=reason,
+            config_version=config_version, requests=requests,
         )
 
     def snapshot(self) -> dict:
@@ -115,6 +118,9 @@ class ModelCallMetrics:
             value = kw.get(name)
             if value:
                 fields[name] = value
+        for name in ("config_version", "requests"):
+            if kw.get(name) is not None:
+                fields[name] = kw[name]
         if kw.get("attempts") is not None:
             fields["attempt"] = kw["attempts"]
         level = "INFO"

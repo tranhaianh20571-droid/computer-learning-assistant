@@ -111,9 +111,13 @@ class TeachingAuthorization:
     def enforced(self):
         return self.service.disclosures is not None or self.service.configs is not None
 
-    def _config(self, sess, owner, kind):
+    def _config(self, sess, owner, kind, *, role="teaching"):
         configs = self.service.configs
-        view = configs.latest_active_for_owner(owner, kind) if configs else None
+        if configs and kind == "content_model":
+            from ..agents.model_routing import role_config
+            view = role_config(configs, owner, role)
+        else:
+            view = configs.latest_active_for_owner(owner, kind) if configs else None
         if not view:
             factory = self.service.model_adapter_factory if kind == "content_model" else self.service.tts_adapter_factory
             getter = getattr(factory, "config_for_owner", None)
@@ -135,7 +139,8 @@ class TeachingAuthorization:
             raise error("invalid_field")
         course = sess.get(CourseRow, course_id, with_for_update=True, populate_existing=True)
         lesson = sess.get(LessonRow, lesson_id, populate_existing=True)
-        outline = sess.get(OutlineVersionRow, course.current_outline_version_id) if course else None
+        outline = (sess.get(OutlineVersionRow, course.current_outline_version_id)
+            if course and course.current_outline_version_id else None)
         if not course or course.owner_user_id != owner or course.deleted_at:
             raise error("course_not_found", status=404)
         if not outline or outline.course_id != course_id or not lesson or lesson.outline_version_id != course.current_outline_version_id:
@@ -147,6 +152,8 @@ class TeachingAuthorization:
         target = conv or SimpleNamespace(owner_user_id=owner, course_id=course_id, lesson_id=lesson_id,
             outline_version_id=course.current_outline_version_id, conversation_id="preflight")
         context = lesson_context(self.service, target)
+        context.pop("scope_capabilities", None)
+        context.pop("unit_scope_hash", None)
         materials = []
         for material_id in sorted(set(context.get("material_ids", []))):
             material = sess.get(MaterialRow, material_id, populate_existing=True)
@@ -162,14 +169,32 @@ class TeachingAuthorization:
                 for name in ("teaching_step_v1", "lesson_blueprint_v1", "followup_v1")}}
         if conv:
             blueprint = sess.get(LessonBlueprintRow, conv.conversation_id)
-            if blueprint and {k:v for k,v in json.loads(blueprint.context_json).items() if not k.startswith("_")} != context:
+            frozen_context = ({k:v for k,v in json.loads(blueprint.context_json).items()
+                if not k.startswith("_") and k not in ("scope_capabilities", "unit_scope_hash")}
+                if blueprint else None)
+            if blueprint and frozen_context != context:
                 raise error("disclosure_required", "lesson context changed; start a new session")
+            if blueprint:
+                # A template deployment cannot invalidate a running lesson's
+                # authorization while its tasks still use frozen prompt snapshots.
+                from ..prompts.service import PromptBindingRow
+                for name in data["templates"]:
+                    binding=sess.scalar(select(PromptBindingRow).where(
+                        PromptBindingRow.task_id==blueprint.source_task_id,
+                        PromptBindingRow.prompt_name==name).order_by(PromptBindingRow.created_at))
+                    if binding:
+                        if hashlib.sha256(binding.template_snapshot.encode()).hexdigest()!=binding.template_sha256:
+                            raise error("prompt_unavailable")
+                        data["templates"][name]=binding.template_sha256
         content_config = self._config(sess, owner, "content_model")
+        planning_config = self._config(sess, owner, "content_model", role="planning")
+        if planning_config and content_config and planning_config != content_config:
+            data["planning_model"] = planning_config
         tts_config = self._config(sess, owner, "tts")
         scope = {"course_id": course_id, "lesson_id": lesson_id, "outline_version_id": course.current_outline_version_id,
             "material_ids": context.get("material_ids", [])}
         snapshot = {"purpose": purpose, "conversation_id": conversation_id, "scope": scope, "data": data,
-            "content_model": content_config, "tts": tts_config}
+            "content_model": content_config, "planning_model": planning_config, "tts": tts_config}
         snapshot["fingerprint"] = digest(snapshot)
         return snapshot
 
@@ -231,6 +256,14 @@ class TeachingAuthorization:
         root = disclosures.create(actor_id=owner, task_id=task_id, config_id=content["config_id"],
             content_category="material" if snapshot["scope"]["material_ids"] else "query",
             scope_snapshot=snapshot["scope"], config_version=content["config_version"], session=sess)
+        from ..agents.model_routing import pin_role
+        pin_role(sess, task_id, "teaching", content, root["grant_id"],rebind=True)
+        planner = snapshot.get("planning_model") or content
+        planner_root = disclosures.create(actor_id=owner, task_id=task_id, config_id=planner["config_id"],
+            content_category="material" if snapshot["scope"]["material_ids"] else "query",
+            scope_snapshot=snapshot["scope"], config_version=planner["config_version"], session=sess
+        ) if planner["config_id"] != content["config_id"] else root
+        pin_role(sess, task_id, "planning", planner, planner_root["grant_id"],rebind=True)
         voice = snapshot["tts"] if snapshot["tts_confirmed"] else None
         audio = disclosures.create(actor_id=owner, task_id=task_id, config_id=voice["config_id"],
             content_category="audio_text", scope_snapshot={k:v for k,v in snapshot["scope"].items() if k != "material_ids"},
@@ -283,13 +316,24 @@ class TeachingAuthorization:
         if not row:
             return
         root_id = row.tts_root_grant_id if audio else row.content_root_grant_id
+        from ..agents.model_routing import TaskModelRoleRow, role_for_task, pin_role
+        task = sess.get(LearningTaskRow, task_id)
+        role = role_for_task(task)
+        root = sess.get(DisclosureGrantRow, row.content_root_grant_id)
+        planning = sess.get(TaskModelRoleRow, (root.task_id, "planning")) if root else None
+        if not audio and role == "planning" and planning:
+            root_id = planning.grant_id
+        model_root = sess.get(DisclosureGrantRow, root_id)
         scope = audio_scope(conv) if audio else {"material_ids": json.loads(row.context_json)["context"]["material_ids"]}
         material_ids = json.loads(row.context_json)["context"]["material_ids"]
-        self.service.disclosures.derive(actor_id=conv.owner_user_id, task_id=task_id,
+        derived = self.service.disclosures.derive(actor_id=conv.owner_user_id, task_id=task_id,
             parent_grant_id=root_id, scope_snapshot=scope,
-            config_id=row.tts_config_id if audio else row.content_config_id,
-            config_version=row.tts_config_version if audio else row.content_config_version,
+            config_id=model_root.config_id,
+            config_version=model_root.config_version,
             content_category="audio_text" if audio else "material" if material_ids else "query", session=sess)
+        if not audio:
+            pin_role(sess, task_id, role, {"config_id":model_root.config_id,
+                "config_version":model_root.config_version}, derived["grant_id"],rebind=True)
 
     def check_task(self, sess, task, *, audio=False):
         if not self.enforced:
@@ -309,11 +353,29 @@ class TeachingAuthorization:
             row = self.require(sess, conv, audio=audio)
         consent = row
         material_ids = json.loads(consent.context_json)["context"]["material_ids"]
-        config = self._config(sess, task.owner_user_id, "tts" if audio else "content_model")
+        from ..agents.model_routing import TaskModelRoleRow, role_for_task
+        pinned = sess.get(TaskModelRoleRow, (task.task_id, role_for_task(task))) if not audio else None
+        config = self._config(sess, task.owner_user_id, "tts" if audio else "content_model",
+            role=role_for_task(task) if not audio else "teaching")
         if not config:
             raise error("config_not_found")
         self.service.disclosures.verify_or_audit(task_id=task.task_id, config_id=config["config_id"],
             content_category="audio_text" if audio else "material" if material_ids else "query",
             actor_id=task.owner_user_id, session=sess,
-            expected_root_grant_id=consent.tts_root_grant_id if audio else consent.content_root_grant_id,
+            expected_root_grant_id=consent.tts_root_grant_id if audio else
+                self._planning_root(sess,consent) if pinned and role_for_task(task)=="planning"
+                else consent.content_root_grant_id,
             scope_snapshot=audio_scope(conv) if audio else {"material_ids": material_ids})
+        if pinned and role_for_task(task) == "planning":
+            return SimpleNamespace(**{column.name:getattr(consent,column.name)
+                for column in LessonAuthorizationRow.__table__.columns
+                if column.name not in ("content_config_id","content_config_version")},
+                content_config_id=pinned.config_id,content_config_version=pinned.config_version)
+        return consent
+
+    @staticmethod
+    def _planning_root(sess,consent):
+        from ..agents.model_routing import TaskModelRoleRow
+        root=sess.get(DisclosureGrantRow,consent.content_root_grant_id)
+        planning=sess.get(TaskModelRoleRow,(root.task_id,"planning")) if root else None
+        return planning.grant_id if planning else consent.content_root_grant_id

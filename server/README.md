@@ -51,7 +51,9 @@ server/
 
 ## 当前边界
 
-本地验证以 `uv` 后端工作区和根目录 `frontend/` 为准。模板遗留的 Docker、CI 和部署文件仍在整理，不能把它们视为已经完成的生产部署方案；真实邮件投递、Langfuse 生产 SDK、同域 CSRF 联调和后续生成场景仍按切片 0 交接文档验收。
+本地验证以 `uv` 后端工作区和根目录 `frontend/` 为准。[部署配置](../deploy/README.md)已集中到根 deploy；模板 CI、发布脚本和开发部署说明保存在[历史目录](../文档/历史/服务端模板/README.md)，不作为当前执行入口。真实邮件、观测与生产部署仍需独立验收。
+
+产品前端使用根 frontend 的 npm 锁文件。此目录 package.json 仅将 dev/build/lint 转发到产品前端，并为 packages/react-email 保留 Bun 工作区；不再声明不存在的 frontend 成员。
 
 ## 后端说明
 

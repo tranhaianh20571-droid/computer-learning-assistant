@@ -1,0 +1,79 @@
+/* Match the approved settings prototype, including its responsive breakpoints. */
+.settings-app{--ink:#202422;--ink2:#626965;--rule:#e5e8e5;--rule2:#cbd0cc;--surface:#fff;--ground:#fff;--accent:#285a47;--sans:"Microsoft YaHei","Segoe UI",sans-serif;color:var(--ink);background:#fff;font:14px/1.65 var(--sans);min-height:100vh;letter-spacing:0}
+.settings-app *{letter-spacing:0;box-sizing:border-box}
+.settings-app svg{stroke-width:1.6}
+.settings-app button,.settings-app input,.settings-app select{font-family:var(--sans)}
+.settings-app button{cursor:pointer}
+.settings-app button:focus-visible,.settings-app input:focus-visible,.settings-app select:focus-visible,.settings-app a:focus-visible{outline:2px solid #285a47;outline-offset:3px}
+.settings-app-nav.side{width:196px;position:fixed;inset:0 auto 0 0;background:#111;color:#c2c8c4;display:flex;flex-direction:column;padding:32px 16px 0;transform:none;z-index:30;overflow:visible}
+.settings-brand{display:block;text-align:left;background:none;border:0;font:30px/1.25 "SimSun",serif!important;color:#f6f7f6;padding:0 12px}
+.settings-brand span{font:12px/1.6 "Microsoft YaHei",sans-serif;color:#a8b0aa;display:block;margin-top:12px}
+.settings-workspace-links{margin-top:48px}
+.settings-nav-caption{font-size:12px;padding:0 12px;color:#a8b0aa}
+.settings-workspace-links button,.settings-current{display:flex;align-items:center;gap:12px;padding:10px 12px;margin-top:8px;font-size:14px;border-radius:6px;background:none;border:0;color:inherit;width:100%;text-align:left;line-height:1.65}
+.settings-app-nav svg{width:18px;height:18px;flex-shrink:0}
+.settings-app-bottom{margin-top:auto}
+.settings-app-nav .settings-current{background:#282828;color:#fff}
+.settings-account{position:relative;border-top:1px solid #383838;margin-top:20px;padding:24px 8px}
+.settings-account-trigger{display:flex;align-items:center;gap:12px;border:0;background:none;color:inherit;padding:0;text-align:left;max-width:100%}
+.settings-avatar{display:grid;place-items:center;width:32px;height:32px;flex-shrink:0;background:#dce4de;color:#334338;border-radius:50%;font-size:12px}
+.settings-account-name{font-size:13px;color:#f1f3f1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-account-name small{display:block;color:#b0b8b2;font-size:12px}
+.settings-account-menu{position:fixed;top:52px;right:28px;min-width:160px;background:#fff;border:1px solid var(--rule2);border-radius:6px;padding:4px;box-shadow:0 6px 18px #1a2b1f14;z-index:50}
+.settings-account-menu button{border:0;background:none;display:block;width:100%;text-align:left;padding:10px 12px;color:var(--ink);font-size:13px;border-radius:4px}
+.settings-account-menu button:hover{background:#eaf1ed}
+.settings-workspace{margin-left:196px}
+.settings-topbar{height:64px;border-bottom:1px solid var(--rule);padding:0 36px;display:flex;justify-content:space-between;align-items:center;font-size:13px}
+.settings-topbar>div{display:flex;gap:12px;align-items:center}
+.settings-workspace-crumb,.settings-private-scope{color:var(--ink2)}
+.settings-topbar svg{width:14px;height:14px}
+.settings-private-scope{display:flex;align-items:center;gap:8px;border:0;background:none;padding:0;font:inherit}
+.settings-mobile-brand{display:none}
+.settings-scroll{height:calc(100vh - 64px);overflow:auto}
+.settings-app .capabilities-page{max-width:1230px;margin:0 auto;padding:40px 36px 0;display:grid;grid-template-columns:180px minmax(0,1fr);gap:44px;font:14px/1.65 var(--sans)}
+.settings-app .settings-heading{padding:0 12px 24px}.settings-app .settings-heading h1{font-size:16px;font-weight:600;line-height:1.65}
+.settings-app .settings-tabs{gap:0}
+.settings-app .settings-tabs button{display:flex;align-items:center;gap:12px;width:100%;min-height:40px;padding:8px 12px;margin:0 0 4px;font-size:13px;font-weight:400;color:var(--ink2);line-height:1.65}
+.settings-app .settings-tabs button[aria-current=page]{font-weight:600}
+.settings-category-icon{display:inline-flex}.settings-category-icon svg{width:16px;height:16px}
+.settings-category-separator{height:1px;background:var(--rule);margin:16px 12px}
+.settings-app .settings-body{max-width:792px;padding-bottom:32px}
+.settings-app .purpose-field .help{font-size:12px;line-height:1.6;margin:6px 0 0}
+.settings-app .purpose-control .purpose-test{width:38px;height:38px;min-height:38px;padding:0}
+.settings-app .purpose-heading{margin:0;padding-bottom:28px}.settings-app .purpose-heading h2{font-size:26px;line-height:1.4}
+.settings-app .purpose-heading p{margin:8px 0 0;color:var(--ink2);font-size:14px;line-height:1.65}
+.settings-app .purpose-tabs{gap:24px;margin:0 0 24px;overflow:visible}
+.settings-app .purpose-tabs button{min-height:40px;line-height:1.65;padding:0 0 12px}
+.settings-app .purpose-tabs button[aria-current=page]{margin-bottom:-1px}
+.settings-app .purpose-connection h3{margin:0 0 8px;font-size:16px;line-height:1.65}
+.settings-app .purpose-field{grid-template-columns:132px minmax(0,1fr);gap:24px;padding:10px 0}
+.settings-app .purpose-field>label{padding-top:7px;font-weight:400;line-height:1.65}
+.settings-app .purpose-field input,.settings-app .purpose-field select,.settings-app .purpose-model input{height:38px;min-height:38px;padding:8px 12px;font-size:13px;line-height:20px}
+.settings-app .purpose-field input[type=url]{font-family:"Cascadia Code",Consolas,monospace;font-size:12px}
+.settings-app .purpose-field input[type=password]{font-family:monospace;font-size:14px}
+.settings-app .purpose-secret input{padding-right:44px}
+.settings-app .purpose-model .model-picker{grid-template-columns:132px minmax(0,1fr);gap:24px;margin-bottom:6px;padding-bottom:0}
+.settings-app .purpose-model .model-picker>label{font-weight:400;font-size:14px}
+.settings-app .purpose-model input{padding-right:44px}
+.settings-app .purpose-model .model-picker-menu{left:156px;width:calc(100% - 156px)}
+.settings-app .purpose-capability-area{padding-bottom:10px}
+.settings-app .purpose-capabilities{margin-left:156px;gap:16px;padding-top:8px}
+.settings-app .purpose-reasoning{margin-left:156px}
+.settings-app .purpose-save{margin-top:20px;padding:20px 0 0}
+.settings-app .purpose-save .help{display:flex;align-items:center;gap:6px}
+.settings-app .purpose-save .help svg{width:14px;height:14px}
+.settings-app .purpose-connection .purpose-scope{display:flex;align-items:center;gap:8px;margin:24px 0 0;padding:20px 0 0;line-height:1.65}
+.settings-app .purpose-scope svg{flex-shrink:0}
+.settings-app .provider-connection+.provider-connection{margin-top:36px;padding-top:28px;border-top:1px solid var(--rule)}
+.settings-app .provider-connection>p{margin:0 0 16px;line-height:1.65}
+.settings-app .provider-connection .purpose-control select{min-width:0;flex:1}
+.settings-app .provider-connection .purpose-save{flex-wrap:wrap}
+.settings-app .provider-connection .purpose-save>div{margin-left:auto}
+@media(max-width:600px){.settings-app .purpose-control .purpose-test{width:44px;height:44px;min-height:44px}}
+@media(max-width:600px){.settings-app .purpose-save{padding-bottom:0!important}.settings-app .purpose-scope{margin-top:16px}}
+@media(max-width:600px){.settings-app .purpose-field input[type=url]{font-size:14px}}
+@media(max-width:600px){.settings-app .purpose-model .model-picker{padding-bottom:0!important}.settings-app .purpose-capability-area{padding-bottom:8px}.settings-app .purpose-connection .purpose-scope{margin-top:16px}}
+@media(min-width:1500px){.settings-app .capabilities-page{margin-left:16px}}
+@media(max-width:1150px){.settings-app-nav.side{width:76px;padding:28px 12px 0}.settings-brand{font-size:22px!important;padding:0;text-align:center}.settings-brand span,.settings-workspace-links button>span,.settings-nav-caption,.settings-account-name,.settings-current>span{display:none}.settings-workspace-links button,.settings-current{justify-content:center;padding:12px 0}.settings-account{padding:24px 8px}.settings-workspace{margin-left:76px}.settings-app .capabilities-page{gap:28px;grid-template-columns:152px minmax(0,1fr);padding:32px 28px 0}.settings-app .purpose-field{grid-template-columns:132px minmax(0,1fr);gap:16px}.settings-app .purpose-model .model-picker{grid-template-columns:132px minmax(0,1fr);gap:16px}.settings-app .purpose-model .model-picker-menu{left:148px;width:calc(100% - 148px)}.settings-app .purpose-capabilities,.settings-app .purpose-reasoning{margin-left:148px}.settings-topbar{padding:0 28px}}
+@media(max-width:900px){.settings-app .capabilities-page{display:block;padding:28px 28px 0}.settings-app .settings-heading{display:none}.settings-app .settings-tabs{display:flex;flex-direction:row;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--rule);padding-bottom:16px;margin-bottom:28px;overflow:visible}.settings-app .settings-tabs button{width:auto;margin:0;min-height:36px;padding:6px 12px}.settings-category-separator,.settings-category-icon{display:none}.settings-app .settings-body{max-width:none}.settings-app .purpose-heading h2{font-size:24px}}
+@media(max-width:600px){.settings-app-nav.side{display:none}.settings-workspace{margin:0}.settings-topbar{height:56px;padding:0 20px}.settings-scroll{height:calc(100vh - 56px)}.settings-workspace-crumb{display:none}.settings-mobile-brand{display:inline;border:0;background:none;padding:0;font:20px "SimSun",serif!important}.settings-private-scope{font-size:12px}.settings-app .capabilities-page{padding:20px 20px 0}.settings-app .settings-tabs{flex-wrap:nowrap;gap:0;overflow-x:auto;padding:0 0 8px;margin-bottom:24px;scrollbar-width:thin}.settings-app .settings-tabs button{font-size:13px;min-height:44px;padding:8px 10px}.settings-app .purpose-heading{padding-bottom:20px}.settings-app .purpose-heading h2{font-size:24px}.settings-app .purpose-heading p{font-size:13px}.settings-app .purpose-tabs{gap:24px!important;margin-bottom:20px}.settings-app .purpose-tabs button{min-height:44px}.settings-app .purpose-field{grid-template-columns:1fr;gap:8px;padding:8px 0}.settings-app .purpose-field>label{padding:0}.settings-app .purpose-field input,.settings-app .purpose-field select,.settings-app .purpose-model input{height:44px;min-height:44px;font-size:14px}.settings-app .purpose-model .model-picker{grid-template-columns:1fr;gap:8px;padding:8px 0}.settings-app .purpose-model .model-picker-menu{left:0;width:100%}.settings-app .purpose-model .model-picker>label{padding:0}.settings-app .purpose-capabilities{gap:12px}.settings-app .purpose-capabilities,.settings-app .purpose-reasoning{margin-left:0}.settings-app .purpose-save{margin-top:12px;padding:16px 0 20px}}

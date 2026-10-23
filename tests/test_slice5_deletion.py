@@ -34,10 +34,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from common_fixtures import (  # noqa: E402
     ROUTE_OK_PAYLOAD,
+    OUTLINE_OK_PAYLOAD,
     SyntheticModelAdapter,
+    SkeletonThenOutlineAdapter,
     SyntheticSearchAdapter,
     make_user,
-    run_route_generate,
+    run_legacy_route_generate as run_route_generate,
 )
 
 
@@ -107,11 +109,12 @@ def _upload_material(env, owner_token: str) -> str:
 
 
 class TestRouteDeletion:
-    def test_delete_route_keeps_courses(self, env) -> None:
+    def test_delete_route_cascades_current_member_courses(self, env) -> None:
         user_id, token = make_user(env["client"], env["database"])
         client = env["client"]
         H = {"Authorization": f"Bearer {token}"}
-        env["container"]["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
+        env["container"]["model"] = SkeletonThenOutlineAdapter(
+            payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD)
         env["container"]["search"] = SyntheticSearchAdapter()
         route_id = client.post("/api/planning/routes", headers=H,
                                json={"title": "待删路线", "scenario": "self_study"}).json()["route_id"]
@@ -125,15 +128,18 @@ class TestRouteDeletion:
         client.post(f"/api/planning/drafts/{body['draft']['draft_id']}/confirm", headers=H,
                     json={"revision": draft["revision"], "idempotency_key": f"c{uuid.uuid4().hex[:8]}"})
         overview = client.get(f"/api/routes/{route_id}/overview", headers=H).json()
-        course_id = overview["stages"][0]["courses"][0]["course_id"]
+        member_ids = [c["course_id"] for stage in overview["stages"] for c in stage["courses"]]
+        assert member_ids
 
-        # 删除路线
+        # 删除路线：当前编排中的成员课程连同大纲、讲次一起删除
         r = client.delete(f"/api/planning/routes/{route_id}", headers=H)
         assert r.status_code == 200, r.text
-        # 课程保留且可访问
-        r2 = client.get(f"/api/courses/{course_id}/overview", headers=H)
-        assert r2.status_code == 200
-        # 墓碑记录
+        payload = r.json()
+        assert payload["deleted"] is True and payload["courses_deleted"] == len(member_ids)
+        assert sorted(payload["course_ids"]) == sorted(member_ids)
+        for course_id in member_ids:
+            assert client.get(f"/api/courses/{course_id}/overview", headers=H).status_code == 404
+        # 墓碑记录：路线与每个被级联删除的课程
         with env["database"].session() as sess:
             tomb = sess.execute(
                 select(DeletionTombstoneRow).where(
@@ -142,6 +148,13 @@ class TestRouteDeletion:
                 )
             ).scalars().first()
             assert tomb is not None and tomb.cleanup_stage == "pending"
+            course_tombs = sess.execute(
+                select(DeletionTombstoneRow).where(
+                    DeletionTombstoneRow.object_type == "course",
+                    DeletionTombstoneRow.object_id.in_(member_ids),
+                )
+            ).scalars().all()
+            assert {row.object_id for row in course_tombs} == set(member_ids)
 
     def test_cross_user_delete_denied(self, env) -> None:
         user_id, token = make_user(env["client"], env["database"])
@@ -158,7 +171,8 @@ class TestCourseDeletion:
         user_id, token = make_user(env["client"], env["database"])
         client = env["client"]
         H = {"Authorization": f"Bearer {token}"}
-        env["container"]["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
+        env["container"]["model"] = SkeletonThenOutlineAdapter(
+            payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD)
         env["container"]["search"] = SyntheticSearchAdapter()
         route_id = client.post("/api/planning/routes", headers=H,
                                json={"title": "r", "scenario": "self_study"}).json()["route_id"]
@@ -319,7 +333,7 @@ class TestBackupRotation:
 
             row = sess.get(BackupRunRow, result["run_id"])
             key = row.backup_key
-        data = storage.get(key)
+        data = cleanup.backup_storage.get(key)
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
             manifest = json.load(tar.extractfile("manifest.json"))
         ids = [t["object_id"] for t in manifest["tombstones"]]
@@ -333,3 +347,25 @@ class TestAdminGuard:
         assert env["client"].post("/api/admin/cleanup/run", headers=H).status_code == 403
         assert env["client"].post("/api/admin/backup", headers=H).status_code == 403
         assert env["client"].post("/api/admin/restore/begin", headers=H).status_code == 403
+
+    def test_backup_reports_restore_lock_and_storage_failure_without_paths(self, env, tmp_path, monkeypatch):
+        _, token = _admin(env)
+        cleanup = env["state"].cleanup
+        storage = MaterialStorage(tmp_path / "objects")
+        monkeypatch.setattr(cleanup, "storage", storage)
+        monkeypatch.setattr(cleanup, "_backup_storage", None)
+        monkeypatch.setenv("BACKUP_STORAGE_DIR", str(storage.base_dir))
+        headers = {"Authorization": f"Bearer {token}"}
+        cleanup.set_state("restore_locked", "1")
+        try:
+            locked = env["client"].post("/api/admin/backup", headers=headers)
+            assert locked.status_code == 423
+            assert locked.json()["error_code"] == "restore_locked"
+        finally:
+            cleanup.set_state("restore_locked", "0")
+        monkeypatch.setattr(cleanup, "_backup_storage", None)
+        monkeypatch.setenv("BACKUP_STORAGE_DIR", str(storage.base_dir))
+        failed = env["client"].post("/api/admin/backup", headers=headers)
+        assert failed.status_code == 500
+        assert failed.json() == {"error_code": "INTERNAL_ERROR", "message": "Object backup failed"}
+        assert str(tmp_path) not in failed.text

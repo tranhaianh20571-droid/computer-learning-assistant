@@ -33,6 +33,9 @@ class PlanningFeatureService:
         self.active = set()
         self.lock = threading.Lock()
         self.automatic_cover_lock = threading.RLock()
+        # ADR-034: production enables configured covers (slice3_app); injected legacy callers keep
+        # explicit consent, and a user without an enabled image model keeps the local fallback.
+        self.cover_automatic_authorization = False
         from .cover_background import CoverBackground
         self.cover_background = CoverBackground(self)
         planning.cover_service = self
@@ -90,8 +93,20 @@ class PlanningFeatureService:
                     base_json=json.dumps(baseline, ensure_ascii=False)))
             sess.commit()
         self._bind(task["task_id"], ["planning_dialogue_v1", "planning_revise_v1"])
+        self.prepare_dialogue(task["task_id"], owner)
         self.kick(task["task_id"])
         return {"task_id": task["task_id"], "draft": self.drafts.get_draft(draft_id, actor_id=owner)}
+
+    def prepare_dialogue(self, task_id, owner):
+        if self.planning.authorization is None:
+            return
+        from .authorization import dialogue_state
+        from .locking import planning_target
+        with self.db.session() as session:
+            state = dialogue_state(session, task_id, owner)
+            planning_target(session, state.target_kind, state.target_id, owner, mutable=True)
+            task = session.get(LearningTaskRow, task_id, with_for_update=True)
+            self.planning.authorization.prepare(session, task, state, owner, allow_refresh=True)
 
     def _latest_turn(self, sess, draft_id):
         return sess.execute(select(PlanningDialogueRow).where(PlanningDialogueRow.draft_id == draft_id)
@@ -104,12 +119,13 @@ class PlanningFeatureService:
     def dialogue(self, draft_id, owner):
         with self.db.session() as sess:
             draft = self.draft(sess, draft_id, owner)
-            rows = sess.execute(select(PlanningDialogueRow).where(PlanningDialogueRow.draft_id == draft_id)
-                .order_by(PlanningDialogueRow.created_at, PlanningDialogueRow.task_id)).scalars().all()
+            rows = sess.execute(select(PlanningDialogueRow, LearningTaskRow).outerjoin(
+                LearningTaskRow, LearningTaskRow.task_id == PlanningDialogueRow.task_id)
+                .where(PlanningDialogueRow.draft_id == draft_id)
+                .order_by(PlanningDialogueRow.created_at, PlanningDialogueRow.task_id)).all()
             result, pending = [], []
-            latest = rows[-1].task_id if rows else None
-            for row in rows:
-                task = sess.get(LearningTaskRow, row.task_id)
+            latest = rows[-1][0].task_id if rows else None
+            for row, task in rows:
                 output = load_json_field(row.result_json, {})
                 item = {"task_id": row.task_id, "content": row.user_content, "base_revision": row.base_revision,
                     "status": task.status if task else "failed", "decision": row.decision,
@@ -161,6 +177,12 @@ class PlanningFeatureService:
         return preflight(self, kind, ident, owner)
 
     def enqueue_cover(self, kind, ident, owner, key, method="procedural", automatic=False, regenerate=False):
+        if automatic and method == "procedural" and self.cover_automatic_authorization:
+            from .automatic_cover import enqueue
+            with self.automatic_cover_lock:
+                automatic_view = enqueue(self, kind, ident, owner, authorized=False, automatic=True)
+            if automatic_view is not None:
+                return automatic_view
         if method != "procedural":
             raise error("disclosure_required", "图片封面请先确认主题与模型")
         from .automatic_cover import topic_hash
@@ -426,7 +448,10 @@ class PlanningFeatureService:
         prompt = self.prompts.resolve_for_task(turn.task_id, "planning_dialogue_v1")["template_snapshot"]
         context = json.dumps({"kind": kind, "plan": base, "nodes": catalog, "profile": profile,
                               "selected_node": turn.selected_node}, ensure_ascii=False)
-        if len(context) > 48000: raise error("OUTPUT_INVALID")
+        if len(context) > 48000:
+            context = json.dumps({"kind": kind, "nodes": catalog, "profile": profile,
+                "selected_node": turn.selected_node, "full_plan_available_via": "get_current_plan"},
+                ensure_ascii=False)
         run = dialogue_agent.answer(adapter, DialogueInput.from_messages([{"role": "system", "content": prompt},
             {"role": "user", "content": context+"\n用户修改要求："+turn.user_content}],history),
             deps_for_source(adapter), tools=tools)

@@ -28,7 +28,8 @@ class OpenAIAdapter(AdapterBase):
         return headers
 
     def _chat_url(self) -> str:
-        return f"{self.endpoint}/chat/completions"
+        from ..model_catalog import canonical_endpoint
+        return f"{canonical_endpoint(self.endpoint)}/chat/completions"
 
     def generate(self, messages: list[dict], **options: Any) -> dict:
         """切片 3/4 结构化与文字生成（OpenAI 兼容 chat.completions）。
@@ -160,6 +161,7 @@ class OpenAIAdapter(AdapterBase):
         elif capability == "cancel":
             # 取消能力：能拿到响应即可，具体中断由切片 3 的流式实现负责。
             pass
+        self._apply_probe_reasoning(payload)
         status, body, _ = self._request("POST", self._chat_url(), json_body=payload)
         self._map_status(status, body)
 
@@ -170,6 +172,7 @@ class OpenAIAdapter(AdapterBase):
             "max_tokens": 8,
             "stream": True,
         }
+        self._apply_probe_reasoning(payload)
         try:
             with self._stream_request(
                 "POST",

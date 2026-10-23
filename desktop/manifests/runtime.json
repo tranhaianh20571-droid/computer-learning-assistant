@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "version": "0.1.0",
+  "platform": "win32-x64",
+  "components": [
+    {
+      "id": "core",
+      "version": "0.1.0",
+      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/v0.1.0/core-0.1.0-win32-x64.zip",
+      "bytes": 133653655,
+      "unpackedBytes": 361639711,
+      "sha256": "c999b0062ce0ade8c579e326d3522672bd39912846414cd2707e15eab9e7aa04"
+    },
+    {
+      "id": "postgres",
+      "version": "0.1.0",
+      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/v0.1.0/postgres-0.1.0-win32-x64.zip",
+      "bytes": 62425297,
+      "unpackedBytes": 176181173,
+      "sha256": "ea2394a6a9d9cee42176fa99f3ad74ff4cd34574ce11d34fbd13824e04a3fa4c"
+    },
+    {
+      "id": "video",
+      "version": "0.1.0",
+      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/v0.1.0/video-0.1.0-win32-x64.zip",
+      "bytes": 168944302,
+      "unpackedBytes": 456045903,
+      "sha256": "794b3d5edcfa238230dcab1bd68e36e615192094e6753a7587cb82d02e571801"
+    },
+    {
+      "id": "asr-small",
+      "version": "0.1.0",
+      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/v0.1.0/asr-small-0.1.0-win32-x64.zip",
+      "bytes": 448998026,
+      "unpackedBytes": 486213874,
+      "sha256": "2f06d3b5e1907f6fd539f4ba2b66392b2e28b042ebed11a0f2d90a7c82db2563"
+    },
+    {
+      "id": "memory",
+      "version": "0.1.0",
+      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/v0.1.0/memory-0.1.0-win32-x64.zip",
+      "bytes": 467649097,
+      "unpackedBytes": 1142643472,
+      "sha256": "3fb444f0addcc38015a0a20b6976a9903e30103ddade64d066125336f99e974c"
+    },
+    {
+      "id": "classroom",
+      "version": "0.1.0",
+      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/v0.1.0/classroom-0.1.0-win32-x64.zip",
+      "bytes": 614114618,
+      "unpackedBytes": 1776461385,
+      "sha256": "2aadfaf78e81d4918d0697074dd3ffa02d2e1ab3c74c5f6f5ef0bfae023ce9fd"
+    }
+  ]
+}

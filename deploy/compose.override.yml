@@ -1,0 +1,71 @@
+services:
+
+  proxy:
+    image: traefik:v3.7
+    ports:
+      - "80:80"
+      - "8090:8080"
+    # Duplicate the command from compose.yml to add --api.insecure=true
+    command:
+      # Enable Docker in Traefik, so that it reads labels from Docker services
+      - --providers.docker
+      # Do not expose all Docker services, only the ones explicitly exposed
+      - --providers.docker.exposedbydefault=false
+      # Create an entrypoint "http" listening on port 80
+      - --entrypoints.http.address=:80
+      # Enable the access log, with HTTP requests
+      - --accesslog
+      # Enable the Traefik log, for configurations and errors
+      - --log
+      # Enable debug logging for local development
+      - --log.level=DEBUG
+      # Enable the Dashboard and API
+      - --api
+      # Enable the Dashboard and API in insecure mode for local development
+      - --api.insecure=true
+  db:
+    ports:
+      - "5432:5432"
+
+  adminer:
+    ports:
+      - "8080:8080"
+
+  backend:
+    ports:
+      - "8000:8000"
+    build:
+      context: ../server
+      dockerfile: backend/Dockerfile
+    # command: sleep infinity  # Infinite loop to keep container alive doing nothing
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+    develop:
+      watch:
+        - path: ../server/backend
+          action: sync
+          target: /app/backend
+          ignore:
+            - .venv
+        - path: ../server/backend/pyproject.toml
+          action: rebuild
+    # TODO: remove once coverage is done locally
+    volumes:
+      - ../server/backend/htmlcov:/app/backend/htmlcov
+    environment:
+      FASTAPI_ENV: "development"
+      SMTP_HOST: "mailpit"
+      SMTP_PORT: "1025"
+      SMTP_TLS: "false"
+
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "8025:8025"
+      - "1025:1025"

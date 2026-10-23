@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .auth import AuthError, AuthService
 from .auth.router import create_auth_router
-from .auth.guest import GUEST_COOKIE, GUEST_TOKEN_STATE, resolve_user_or_guest
+from .auth.guest import resolve_user_or_guest
 from .db import Database, get_db
 from .logging_audit.app import AppState, create_app as create_logging_app
 from .logging_audit.repositories import PgAuditLog, PgTaskEventStore
@@ -55,20 +55,48 @@ def create_slice0_app(state: Optional[Slice0State] = None) -> FastAPI:
 
     app.include_router(create_auth_router(state.auth))
 
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(_: Request, exc: RequestValidationError):
+        return JSONResponse({"detail": {"error_code": "INVALID_FIELD",
+            "message": "提交的字段不符合要求，请检查后重试。"}}, status_code=422)
+
     @app.middleware("http")
-    async def guest_cookie(request: Request, call_next):
+    async def authentication_boundary(request: Request, call_next):
+        from fastapi.responses import JSONResponse
+        if request.url.path.startswith(("/tasks", "/audit", "/logs", "/metrics")):
+            return JSONResponse({"error_code": "ACCESS_DENIED"}, status_code=404)
+        # Anonymous entry points: market sign-in and first-launch binding must work
+        # before any local account exists; the bind code is the credential.
+        anonymous = (request.url.path.startswith("/api/auth/")
+                     or request.url.path.startswith("/api/market/bind/")
+                     or request.url.path == "/api/market/login")
+        if (request.url.path.startswith("/api/") and not anonymous
+                and request.method != "OPTIONS"):
+            try:
+                request.state.user = resolve_user_or_guest(request, state.auth)
+                if request.url.path.startswith("/api/tasks/"):
+                    task_id = request.url.path.split("/")[3]
+                    task = state.tasks.get_task(task_id)
+                    if task["owner_user_id"] != request.state.user.user_id:
+                        return JSONResponse({"error_code": "TASK_NOT_FOUND"}, status_code=404)
+            except HTTPException as exc:
+                return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+            except LeaseError:
+                return JSONResponse({"error_code": "TASK_NOT_FOUND"}, status_code=404)
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("Origin")
+            from urllib.parse import urlsplit
+            if origin and urlsplit(origin).netloc != request.headers.get("host"):
+                import os
+                if origin not in ("http://localhost:5173", "http://127.0.0.1:5173",
+                                   os.environ.get("FRONTEND_HOST", "")):
+                    return JSONResponse({"error_code": "ACCESS_DENIED"}, status_code=403)
         response = await call_next(request)
-        token = getattr(request.state, GUEST_TOKEN_STATE, None)
-        if token and not request.cookies.get(GUEST_COOKIE):
-            response.set_cookie(
-                GUEST_COOKIE,
-                token,
-                httponly=True,
-                secure=request.url.scheme == "https",
-                samesite="lax",
-                max_age=30 * 24 * 60 * 60,
-                path="/",
-            )
+        if request.cookies.get("guest_id"):
+            response.delete_cookie("guest_id", path="/")
         return response
 
     @app.exception_handler(LeaseError)

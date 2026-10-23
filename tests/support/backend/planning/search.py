@@ -1,104 +1,88 @@
-"""网络搜索消费（T04）：真实尝试、失败等待、external 标记。
-
-- 走切片 1 的 Tavily Hikari 适配器（统一 20 秒总截止）；
-- 搜索失败 → WaitStateSignal(awaiting_search_decision)；
-  用户选择重试或明确离线继续后才进入生成；
-- 结果标记 `source="external"`，带获取时间与来源，与资料内容分开；
-- 不伪造联网依据；查询正文不进日志（只有 query_id 与结果数量）。
-"""
-
+"""Planning facade over the personal-search service and explicit synthetic adapters."""
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
 
-from .errors import WaitStateSignal
+from .errors import PlanningError
+from ..search.contracts import Failed, Skipped, SearchOutcome, SearchArgs, RawSearchEnvelope
+from ..search.contracts import SearchProviderError
+from ..search.policy import derive_query, normalize_envelope, decide_continuation, requirement_for
 
 
 @dataclass
-class SearchOutcome:
-    attempted: bool = True
-    ok: bool = False
-    query_id: str = ""
-    results: list[dict] = field(default_factory=list)
-    error_code: Optional[str] = None
-    detail: str = ""
+class SearchPlanOutcome:
+    """覆盖驱动的多 query 结果；保留逐 query 状态，供进度和评审使用。"""
 
-    @property
-    def external_refs(self) -> list[dict]:
-        """供 manifest 引用的 external 结果引用（不含正文快照）。"""
-        return [
-            {
-                "query_id": self.query_id,
-                "result_index": i,
-                "source": "external",
-                "fetched_at": r.get("fetched_at", ""),
-                "domain": _domain(r.get("url", "")),
-            }
-            for i, r in enumerate(self.results)
-        ]
+    state: str
+    results: list = field(default_factory=list)
+    error_code: str | None = None
+    reason: str | None = None
+    queries: list[dict] = field(default_factory=list)
 
 
-def _domain(url: str) -> str:
-    from urllib.parse import urlparse
+class CompositeSearchBinding:
+    """多个 query 共享同一任务围栏；任一配置失效都拒绝发布。"""
 
-    try:
-        return urlparse(url).hostname or ""
-    except ValueError:
-        return ""
+    def __init__(self, bindings=None):
+        self.bindings = [binding for binding in (bindings or []) if binding is not None]
+
+    def check_state(self):
+        for binding in self.bindings:
+            binding.check_state()
+
+    def check_in_session(self, session):
+        for binding in self.bindings:
+            binding.check_in_session(session)
 
 
 class SearchGate:
-    """搜索真实尝试与等待决策状态机。
-
-    adapter：具备 `search(query, ...)` 的适配器（切片 1 TavilyHikariAdapter 或
-    测试注入的合成适配器）。注入 None 表示本任务无搜索配置——此时按未配置
-    处理：不伪造外部结果，直接以「离线继续」语义放行并在结果中标注。
-    """
-
-    def __init__(self, adapter: Any | None = None) -> None:
+    def __init__(self, adapter=None):
         self.adapter = adapter
+        self.binding = None
+        self.continuation = None
 
-    def attempt(self, query: str, *, max_results: int = 5) -> SearchOutcome:
-        if self.adapter is None:
-            return SearchOutcome(attempted=False, detail="no_search_config")
-        query_id = f"qry_{uuid.uuid4().hex[:12]}"
-        try:
-            raw = self.adapter.search(query, max_results=max_results)
-        except Exception as exc:  # noqa: BLE001 - 适配器异常映射为受控错误码
-            code = getattr(exc, "code", "") or ""
-            error_code = "SEARCH_TIMEOUT" if code in ("timeout", "") else "RETRIEVAL_UNAVAILABLE"
-            return SearchOutcome(
-                query_id=query_id, error_code=error_code, detail=code or type(exc).__name__
-            )
-        results = [
-            {
-                "title": str(r.get("title", ""))[:300],
-                "url": str(r.get("url", "")),
-                "snippet": str(r.get("snippet", ""))[:2000],
-                "fetched_at": str(r.get("fetched_at", "")),
-                "source": "external",
-            }
-            for r in raw.get("results", [])
-            if isinstance(r, dict)
-        ]
-        return SearchOutcome(query_id=str(raw.get("query_id", query_id)), ok=True, results=results)
+    def attempt(self, query, *, max_results=10, disabled=False, offline=False, logical_slot=1):
+        requirement = requirement_for(query)
+        if disabled or offline:
+            outcome = Skipped(reason="disabled" if disabled else "offline_continue")
+        elif self.adapter is None:
+            outcome = Skipped(reason="no_config")
+        elif hasattr(self.adapter, "attempt"):
+            options = {"max_results": max_results}
+            if logical_slot != 1:
+                options["logical_slot"] = logical_slot
+            outcome = self.adapter.attempt(query, **options)
+            self.binding = self.adapter.binding
+        else:
+            # Only caller-injected, in-process synthetic adapters use this legacy test seam.
+            topic = derive_query(query)
+            if topic is None:
+                outcome = Skipped(reason="query_unavailable")
+            else:
+                args = SearchArgs(query=topic, max_results=max_results)
+                query_id = uuid.uuid4()
+                try:
+                    raw = self.adapter.search(args.query, max_results=args.max_results)
+                except SearchProviderError as exc:
+                    outcome = Failed(query_id=query_id, error_code=exc.code,
+                        retryable=exc.retryable, external_request_id=exc.external_request_id)
+                else:
+                    if "data" not in raw:
+                        results = raw.get("results", [])
+                        raw = {"code": 0, "request_id": str(uuid.uuid4()), "data": {
+                            "results": results, "metadata": {"total_results": len(results), "search_time_ms": 0}}}
+                    try:
+                        envelope = RawSearchEnvelope.model_validate_json(__import__("json").dumps(raw))
+                        outcome = normalize_envelope(envelope, query_id=query_id)
+                    except ValueError:
+                        outcome = Failed(query_id=query_id, error_code="SEARCH_OUTPUT_INVALID", retryable=False)
+        self.continuation = decide_continuation(outcome, requirement=requirement)
+        return outcome
 
-    def require_success_or_wait(self, outcome: SearchOutcome, *, decision: Optional[str] = None) -> SearchOutcome:
-        """成功或已离线放行 → 返回；失败且无决策 → 等待态。"""
-        if outcome.ok or not outcome.attempted:
-            return outcome
-        if decision == "offline_continue":
-            out = SearchOutcome(
-                attempted=True, ok=False, query_id=outcome.query_id,
-                error_code=outcome.error_code, detail="offline_continue",
-            )
-            return out
-        if decision == "retry":
-            # retry 由调用方重新 attempt 后再次进入本函数；此处防御性等待
-            raise WaitStateSignal("awaiting_search_decision")
-        raise WaitStateSignal("awaiting_search_decision")
+    def require_success_or_wait(self, outcome, *, decision=None):
+        """Compatibility only: optional provider failures no longer create learner waits."""
+        return outcome
 
 
-__all__ = ["SearchGate", "SearchOutcome"]
+__all__ = ["SearchGate", "SearchOutcome", "SearchPlanOutcome", "CompositeSearchBinding"]

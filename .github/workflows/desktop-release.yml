@@ -1,0 +1,49 @@
+name: Desktop Build
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.5"
+      - run: npm ci
+        working-directory: desktop
+      - run: npm ci
+        working-directory: frontend
+      - run: node --test tests/desktop_install_unit.mjs tests/desktop_browsers_unit.mjs
+      - run: node desktop/scripts/verify-publication.mjs
+      - run: npm run build
+        working-directory: frontend
+      - run: npm run components
+        working-directory: desktop
+      - run: node tests/desktop_archive_contents.mjs
+      - run: node --test tests/desktop_pipe_unit.mjs
+      - run: node tests/desktop_clean_install.mjs
+        timeout-minutes: 20
+      - run: npm run dist
+        working-directory: desktop
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-x64
+          path: |
+            .backup/desktop-dist/*Setup.exe
+            .backup/desktop-components/*.zip
+            .backup/desktop-components/runtime.json
+          retention-days: 7

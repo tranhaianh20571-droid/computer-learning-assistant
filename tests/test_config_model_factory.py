@@ -1,4 +1,4 @@
-"""配置驱动模型工厂：latest_active_for_owner 选择与协议映射（设置页为真相源）。"""
+"""Configured model factory: owned task routing and protocol mapping."""
 
 from __future__ import annotations
 
@@ -72,9 +72,16 @@ def _claimed_task(configs: ConfigService, owner: str, view: dict, *, claim: bool
         idempotency_key=f"factory-{suffix}", stage="generate",
         model_config_version=f"{view['config_id']}:{view['config_version']}",
     )["task_id"]
+    from backend.planning.authorization import PlanningAuthorization
+    from backend.slice1.disclosure_service import DisclosureService
+    from backend.tasks.service import LearningTaskRow
     with configs.db.session() as sess:
-        sess.add(PlanningTaskStateRow(task_id=task_id, owner_user_id=owner,
-            planning_scope="route", resolved_scope="route", target_kind="route", target_id=route_id))
+        state = PlanningTaskStateRow(task_id=task_id, owner_user_id=owner,
+            planning_scope="route", resolved_scope="route", target_kind="route", target_id=route_id)
+        sess.add(state)
+        sess.flush()
+        PlanningAuthorization(configs, DisclosureService(configs.db)).prepare(sess,
+            sess.get(LearningTaskRow, task_id, with_for_update=True), state, owner, allow_refresh=True)
     if claim:
         tasks.claim(task_id, lease_owner=f"synthetic-worker-{suffix}")
     return task_id
@@ -105,7 +112,15 @@ class TestLatestActiveForOwner:
 class TestConfigModelFactory:
     def test_no_config_returns_none(self, configs: ConfigService):
         factory = _config_model_factory(configs)
-        assert factory(_owner(), "task_x") is None
+        owner=_owner()
+        task=TaskService(configs.db,PgTaskEventStore(configs.db)).create_task(
+            owner_user_id=owner,kind="generic",subject_id="synthetic-no-config",
+            idempotency_key=uuid.uuid4().hex,stage="generate")
+        assert factory(owner,task["task_id"]) is None
+        from backend.slice1.errors import Slice1Error
+        with pytest.raises(Slice1Error) as caught:
+            factory(owner,"task_x")
+        assert caught.value.status==404
 
     def test_openai_endpoint_kept(self, configs: ConfigService):
         owner = _owner()

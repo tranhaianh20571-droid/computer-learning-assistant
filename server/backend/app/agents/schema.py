@@ -1,4 +1,9 @@
-"""Generation-only strict subclasses; persisted model parsing is unchanged."""
+"""Generation-only schema subclasses; persisted model parsing is unchanged.
+
+Extra keys produced by the model stay permissive (pydantic default ``ignore``): the
+provider-side response schema must not carry ``additionalProperties: false``, or a
+model that volunteers an undeclared key fails the whole generation.
+"""
 from __future__ import annotations
 
 from threading import RLock
@@ -39,7 +44,12 @@ def _rewrite(annotation: Any, references: dict[type[BaseModel], ForwardRef]) -> 
 
 
 def generation_model(model: type[BaseModel]) -> type[BaseModel]:
-    """Cache a recursive extra-forbid subclass without modifying domain classes."""
+    """Cache a recursive generation subclass without modifying domain classes.
+
+    Only nested types are rewritten to their cached variants; field metadata and
+    validators are preserved. Extra keys are ignored (pydantic default), matching
+    persisted parsing and keeping the provider schema free of ``additionalProperties``.
+    """
     if not isinstance(model, type) or not issubclass(model, BaseModel):
         raise TypeError("generation_model requires a Pydantic BaseModel")
     with _LOCK:
@@ -65,8 +75,6 @@ def generation_model(model: type[BaseModel]) -> type[BaseModel]:
                     annotation = Annotated[annotation, *details["metadata"]]
                 fields[name] = (annotation, Field(**details["attributes"]))
             config = ConfigDict(**original.model_config)
-            if not original.__pydantic_root_model__:
-                config["extra"] = "forbid"
             variants[original] = create_model(f"{original.__name__}Generation",
                 __base__=original, __config__=config, __module__=__name__, **fields)
         namespace = {reference.__forward_arg__: variants[original]

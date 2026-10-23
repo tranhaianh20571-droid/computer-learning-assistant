@@ -47,6 +47,21 @@ def test_denied_gate_never_opens_wire(monkeypatch):
     assert not calls
 
 
+def test_reference_edit_uses_pinned_multipart_and_preserves_generation_path(monkeypatch):
+    monkeypatch.setattr("backend.slice1.adapters.imagegen.validate_endpoint", lambda endpoint: None)
+    calls = []
+    def respond(request):
+        calls.append(request)
+        assert request.url.path == "/v1/images/edits"
+        assert request.url.host == "93.184.216.34"
+        assert request.headers["content-type"].startswith("multipart/form-data;")
+        assert b'name="image"' in request.content and b'synthetic-png' in request.content
+        return httpx.Response(200, json={"data": []})
+    instance = adapter(respond)
+    assert instance._image_request({"model": "synthetic-image", "prompt": "synthetic pose"}, reference=b"synthetic-png") == {"data": []}
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("status,code", [(302, "invalid_response"), (401, "credential_invalid"),
     (429, "rate_limited"), (503, "provider_unavailable")])
 def test_status_classification_and_no_redirect(monkeypatch, status, code):

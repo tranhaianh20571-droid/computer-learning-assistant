@@ -1,6 +1,13 @@
 .backup/
+/文档/
+/output/
+/desktop/sandbox/bin/
+/desktop/sandbox/obj/
+.archify/
+/文档/测试归档/anysearch/
+/文档/测试归档/model-settings-recovery/
+/文档/测试归档/anysearch-guest-recovery/
 .mimocode/
-diagrams/
 .DS_Store
 Thumbs.db
 # Local environments and credentials
@@ -8,11 +15,19 @@ Thumbs.db
 .env.*
 !.env.example
 .venv/
+.venv-*/
+.runtime/
+tests/.secrets/
+*.private.zip
+/实验/
+server/asr-models/
 venv/
 node_modules/
+*.tsbuildinfo
 
 # Generated logs, reports and test caches
 *.log
+.runtime-logs/
 coverage/
 .pytest_cache/
 __pycache__/
@@ -24,3 +39,11 @@ slice2-ocr-spike-result.json
 server/storage/
 tests/support/storage/
 server/backend/storage/
+server/backend/storage-backups/
+tests/support/storage-backups/
+server/backend/storage-control/
+server/backend/storage-backups-control/
+tests/support/storage-control/
+tests/support/storage-backups-control/
+server/backend/probe_*.py
+deploy/market/backups/

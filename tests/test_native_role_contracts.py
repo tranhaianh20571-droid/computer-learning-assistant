@@ -3,8 +3,10 @@ import pytest
 from pydantic import ValidationError
 from pydantic_ai.models.test import TestModel
 
-from backend.agents.contracts import AgentDeps, GenerationInput, IntakeInput, TeachingStepInput
-from backend.agents.roles import intake_agent
+from backend.agents.contracts import (AgentDeps, GenerationInput, IntakeInput, TeachingStepInput,
+                                     UnitScopeInput, UnitScopeReviewInput, UnitScopeCoverageInput)
+from backend.agents.roles import (intake_agent, unit_scope_agent, unit_scope_review_agent,
+                                 unit_scope_coverage_agent)
 
 
 def test_role_rejects_other_role_input_before_execution():
@@ -17,6 +19,28 @@ def test_role_rejects_other_role_input_before_execution():
 def test_role_requires_explicit_trusted_deps():
     with pytest.raises(TypeError, match="trusted AgentDeps"):
         intake_agent.interview(TestModel(), IntakeInput.from_messages([
+            {"role": "user", "content": "synthetic"}]), None)
+
+
+def test_scope_role_rejects_generic_or_teaching_input_and_untrusted_deps():
+    for input_type in (GenerationInput, TeachingStepInput):
+        with pytest.raises(TypeError, match="role-specific typed input"):
+            unit_scope_agent.plan_scope(TestModel(), input_type.from_messages([
+                {"role": "user", "content": "synthetic"}]), AgentDeps())
+    with pytest.raises(TypeError, match="trusted AgentDeps"):
+        unit_scope_agent.plan_scope(TestModel(), UnitScopeInput.from_messages([
+            {"role": "user", "content": "synthetic"}]), None)
+    with pytest.raises(TypeError, match="role-specific typed input"):
+        unit_scope_review_agent.review_scope(TestModel(), UnitScopeInput.from_messages([
+            {"role": "user", "content": "synthetic"}]), AgentDeps())
+    with pytest.raises(TypeError, match="trusted AgentDeps"):
+        unit_scope_review_agent.review_scope(TestModel(), UnitScopeReviewInput.from_messages([
+            {"role": "user", "content": "synthetic"}]), None)
+    with pytest.raises(TypeError, match="role-specific typed input"):
+        unit_scope_coverage_agent.plan_coverage(TestModel(), UnitScopeReviewInput.from_messages([
+            {"role": "user", "content": "synthetic"}]), AgentDeps())
+    with pytest.raises(TypeError, match="trusted AgentDeps"):
+        unit_scope_coverage_agent.plan_coverage(TestModel(), UnitScopeCoverageInput.from_messages([
             {"role": "user", "content": "synthetic"}]), None)
 
 

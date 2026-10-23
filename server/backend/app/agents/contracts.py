@@ -69,6 +69,9 @@ class AgentDeps:
     omit_content_trace: bool = False
     run_request_limit: int = 8
     parent_traceparent: str | None = None
+    search_executor: Callable | None = None
+    # Private business progress only; never passed to instrumentation/task events.
+    on_process: Callable[..., None] | None = None
 
     def check(self) -> None:
         self.budget.check()
@@ -115,6 +118,27 @@ class RoutePlanningInput(GenerationInput):
     pass
 
 @dataclass(frozen=True)
+class CoveragePlanningInput(GenerationInput):
+    pass
+
+@dataclass(frozen=True)
+class UnitScopeInput(GenerationInput):
+    pass
+
+@dataclass(frozen=True)
+class UnitScopeReviewInput(GenerationInput):
+    pass
+
+
+@dataclass(frozen=True)
+class UnitScopeCoverageInput(GenerationInput):
+    pass
+
+@dataclass(frozen=True)
+class ReviewInput(GenerationInput):
+    pass
+
+@dataclass(frozen=True)
 class OutlinePlanningInput(GenerationInput):
     pass
 
@@ -136,6 +160,10 @@ class AssessmentInput(GenerationInput):
 
 @dataclass(frozen=True)
 class EvaluationInput(GenerationInput):
+    pass
+
+@dataclass(frozen=True)
+class FeynmanInput(GenerationInput):
     pass
 
 @dataclass(frozen=True)

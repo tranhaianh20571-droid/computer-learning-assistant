@@ -5,7 +5,7 @@ from pydantic_ai.exceptions import ModelRetry
 from backend.teaching.learning_outputs import LessonBlueprint, teaching_schedule, validate_blueprint
 from backend.teaching.pedagogy import lightweight_plan
 from backend.teaching.learning_models import LessonBlueprintRow
-from test_teaching_assessments import env,database,lesson  # noqa: F401
+from test_teaching_assessments import env,database,lesson,recap_for  # noqa: F401
 from test_teaching_latency import TEXT
 
 
@@ -44,6 +44,7 @@ def test_preview_cannot_change_an_already_saved_block():
 
 def test_same_stage_keeps_board_references_until_stage_finishes(env):
     _,_,start=lesson(env);client,state,user,headers=env
+    state.teaching.feynman.kick=lambda task_id:None
     with state.db.session() as sess:
         row=sess.get(LessonBlueprintRow,start["conversation_id"])
         row.plan_json=lightweight_plan(json.loads(row.context_json)).model_dump_json()
@@ -57,10 +58,24 @@ def test_same_stage_keeps_board_references_until_stage_finishes(env):
             phase=context["current_stage"];identifier=f"s{phase['stage_no']}_{phase['stage_segment_no']}"
             block={"id":identifier,"type":"text","text":f"本段新增合成知识 {identifier}"}
             previous=list(context["existing_board"].values())
-            beats=[{"id":identifier,"blocks":[block],"text":TEXT[:70],"highlight_ids":[previous[0]["id"] if previous else identifier]},
+            first_text=block["text"]+"。"+TEXT[:70]
+            beats=[{"id":identifier,"blocks":[block],"text":first_text,
+                    "cues":[{"block_id":identifier,"target":"text","quote":block["text"]}],
+                    "highlight_ids":[previous[0]["id"] if previous else identifier]},
                 {"id":identifier+"b","blocks":[],"text":TEXT[70:],"highlight_ids":[identifier]}]
-            output={"steps":[{"beats":beats,"text":TEXT,"title":"自然讲解","board":{"title":"字典","blocks":previous},
-                "phase":phase["phase"],"covered_goal_ids":phase["goal_ids"],"lesson_finished":context["is_final"]}]}
+            output={"steps":[{"alignment_version":1,"beats":beats,"text":first_text+TEXT[70:],"title":"自然讲解","board":{"title":"字典","blocks":previous},
+                "phase":phase["phase"],"covered_goal_ids":phase["goal_ids"],"lesson_finished":context["is_final"],
+                "covered_scope_capability_ids":phase.get("scope_capability_ids", []),
+                "knowledge_recap":recap_for(context)}]}
+            if phase["phase"]=="example":
+                earlier=context.get("previous_examples", [])
+                example={"prompt":first_text,"source_use":"generated",
+                    "selection_reason":"Synthetic example checks this segment."}
+                if earlier:
+                    example={**earlier[0],"continues_example_id":earlier[0]["id"]}
+                    beats[0]["text"]=example["prompt"]+"。"+first_text
+                    output["steps"][0]["text"]="".join(beat["text"] for beat in beats)
+                output["steps"][0]["examples"]=[example]
             raw=json.dumps(output,ensure_ascii=False)
             for n in range(0,len(raw),23):yield raw[n:n+23]
     state.teaching.model_adapter_factory=lambda *args:Adapter()
@@ -81,8 +96,23 @@ def test_same_stage_keeps_board_references_until_stage_finishes(env):
         assert workspace["planned_steps"]==7
         assert saved["lesson_finished"]==(number==7)
         client.post(f"/api/teaching/{start['conversation_id']}/checkpoint",headers=headers,
-            json={"client_seq":number,"step_no":number,"position_ms":0})
+            json={"client_seq":number*2,"step_no":number,"position_ms":0,
+                "board_state":{"presentation":{"text_complete":True}}})
         workspace=client.get(f"/api/teaching/{start['conversation_id']}",headers=headers).json()
+        for point in workspace["feynman"]["checkpoints"]:
+            if point["after_step_no"]==number and not point["resolved"]:
+                if point.get("scope")=="lesson":
+                    assert number==7
+                    assert client.post(f"/api/teaching/{start['conversation_id']}/complete",headers=headers).status_code==409
+                    continue
+                opened=client.post(f"/api/teaching/{start['conversation_id']}/feynman/start",headers=headers,
+                    json={"checkpoint_id":point["checkpoint_id"]})
+                assert opened.status_code==200,opened.text
+                assert client.post(f"/api/teaching/{start['conversation_id']}/feynman/skip",headers=headers,
+                    json={"revision":opened.json()["revision"]}).status_code==200
+                client.post(f"/api/teaching/{start['conversation_id']}/checkpoint",headers=headers,
+                    json={"client_seq":number*2+1,"step_no":number,"position_ms":0})
+                workspace=client.get(f"/api/teaching/{start['conversation_id']}",headers=headers).json()
         if number<7:task=next(t["task_id"] for t in workspace["queued_tasks"] if t["step_no"]==number+1)
     assert not any(t["step_no"]==8 for t in workspace["queued_tasks"])
-    assert client.post(f"/api/teaching/{start['conversation_id']}/complete",headers=headers).status_code==200
+    assert client.post(f"/api/teaching/{start['conversation_id']}/complete",headers=headers).status_code==409

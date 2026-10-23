@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>如何导入 · 学伴角色卡市集</title>
+<style>
+  :root{
+    --black:#090909;--coal:#0F0F0E;--ivory:#F1EEE6;--ivory-2:#CFCABE;
+    --dim:#8C887E;--dim-2:#615E57;--line:rgba(241,238,230,.14);--line-soft:rgba(241,238,230,.08);
+    --serif:"Noto Serif SC","Source Han Serif SC","Songti SC",STSong,SimSun,serif;
+    --sans:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+    --mono:"Cascadia Mono","JetBrains Mono",Consolas,monospace;
+    --r-md:12px;--r-lg:18px;--r-xl:24px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--black);color:var(--ivory);font:15px/1.75 var(--sans);-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:900px;margin:0 auto;padding:0 32px}
+  header{border-bottom:1px solid var(--line-soft)}
+  .bar{display:flex;align-items:center;justify-content:space-between;height:82px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .logo{width:34px;height:34px;border:1px solid rgba(241,238,230,.26);border-radius:12px;display:grid;place-items:center}
+  .logo img{width:21px;height:21px;opacity:.95}
+  .brand b{font:500 17px/1 var(--serif);letter-spacing:.08em}
+  .brand small{display:block;font:500 8px/1 var(--mono);letter-spacing:.2em;color:var(--dim);margin-top:5px}
+  .back{font-size:12px;color:var(--ivory-2);border:1px solid var(--line);border-radius:999px;padding:9px 18px}
+  .back:hover{border-color:rgba(241,238,230,.45);color:var(--ivory)}
+  main{padding:54px 0 70px}
+  .kicker{display:flex;align-items:center;gap:12px;font:600 9px/1 var(--mono);letter-spacing:.24em;text-transform:uppercase;color:var(--dim)}
+  .kicker::before{content:"";width:32px;height:1px;background:var(--dim-2)}
+  h1{font:300 clamp(32px,4vw,46px)/1.15 var(--sans);letter-spacing:-.03em;margin-top:20px}
+  h1 em{font-family:var(--serif);font-style:normal}
+  .lede{font-size:14px;line-height:1.95;color:var(--ivory-2);margin-top:16px;max-width:60ch}
+  h2{font:400 21px/1.4 var(--serif);margin:44px 0 16px;padding-top:22px;border-top:1px solid var(--line)}
+  p{font-size:13.5px;line-height:1.95;color:var(--ivory-2);margin-top:10px}
+  ol,ul{margin:14px 0 0 20px;display:grid;gap:10px}
+  li{font-size:13px;line-height:1.9;color:var(--ivory-2)}
+  code{font-family:var(--mono);font-size:12px;background:rgba(241,238,230,.08);border-radius:5px;padding:2px 6px}
+  .callout{margin-top:18px;padding:16px 18px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--coal)}
+  .callout b{display:block;font-size:12.5px;margin-bottom:6px;color:var(--ivory)}
+  .callout p{margin-top:0;font-size:12.5px;color:var(--dim)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:18px}
+  .box{padding:16px 18px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--coal)}
+  .box h3{font:500 14px/1.4 var(--sans);margin-bottom:6px}
+  .box p{font-size:12px;color:var(--dim);margin-top:0}
+  footer{border-top:1px solid var(--line-soft);padding:24px 0;font:500 9px/1.7 var(--mono);letter-spacing:.06em;color:var(--dim-2)}
+  @media (max-width:600px){.wrap{padding:0 20px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap bar">
+    <a class="brand" href="/">
+      <span class="logo"><img src="/assets/logo.png" alt="学伴"></span>
+      <span><b>学伴</b><small>Card Market</small></span>
+    </a>
+    <a class="back" href="/">返回市集</a>
+  </div>
+</header>
+
+<main class="wrap">
+  <p class="kicker">How to import</p>
+  <h1>把卡片<br><em>装进你的学伴。</em></h1>
+  <p class="lede">卡片不是聊天提示词，而是一份完整的人物包：人物设定、教学方法、状态素材都在里面。导入后它会出现在你本机的「我的人物」，学习记录不会上传到市集。</p>
+
+  <h2>为什么要在本地操作</h2>
+  <p>市集只保存卡片本身。你的课程、教材、对话和记忆都在这台电脑上，所以导入动作必须由本机完成 —— 市集只能"把卡片交给你"，不能直接写进你的电脑。</p>
+  <div class="callout">
+    <b>按账号接收，按账号保存</b>
+    <p>市集 A 账号的卡片只进入 A 的本地空间。本机未登录或当前登录 B 都能后台接收，切换到 A 后即可查看；不会写进 B 的人物列表。</p>
+  </div>
+
+  <h2>方式一：直接导入到本机（推荐）</h2>
+  <ol>
+    <li>先在电脑上打开学伴，保持运行。</li>
+    <li>第一次使用：在学伴登录页点击「仅开启市集接收」，或在网页离线提示中点「开启账号接收」，然后在市集登录需要接收的账号并确认授权。本机无需登录，也不会切换当前账号。</li>
+    <li>回到市集页面，打开任意卡片，点「导入到学伴」。</li>
+    <li>弹窗里点「直接导入到本机」，后台会接收并保存到该市集账号的本地空间。登录该账号后，在「我的人物」查看。</li>
+  </ol>
+  <div class="grid">
+    <div class="box"><h3>能直接导入</h3><p>学伴服务正在运行，并且当前市集账号已开启本地接收。本机页面可以停留在登录页。</p></div>
+    <div class="box"><h3>提示本地离线</h3><p>请启动学伴，或为当前市集账号开启接收；如果此前暂停接收，请登录对应本机账号后恢复。启动后等待片刻再重试。</p></div>
+  </div>
+
+  <h2>方式二：下载 ZIP 手动导入</h2>
+  <ol>
+    <li>在导入弹窗右下角点「下载 ZIP」。</li>
+    <li>打开学伴 →「我的人物」→「导入卡片」。</li>
+    <li>选择刚下载的 <code>.studycard.zip</code> 文件，支持一次选多个。</li>
+  </ol>
+  <p>ZIP 里包含人物设定、对话方法和全部状态素材；不包含任何人的学习记录，也不包含语音服务凭据。</p>
+
+  <h2>方式三：上传自己的卡到市集</h2>
+  <ol>
+    <li>在学伴里建好人物、补齐设定和状态素材。</li>
+    <li>「我的人物」→「上传到市集」，勾选要上传的卡片。</li>
+    <li>上传成功后会出现在市集；同一张卡重复上传会被识别为已存在。</li>
+  </ol>
+
+  <h2>常见问题</h2>
+  <p><b style="color:var(--ivory)">导入后在哪里找？</b><br>学伴左侧「人物导师」→「我的人物」，打开后即可选择该导师开始上课。</p>
+  <p><b style="color:var(--ivory)">会覆盖我现有的卡吗？</b><br>不会。导入会用新 ID 创建一份可编辑副本，原有的卡和记忆不受影响。</p>
+  <p><b style="color:var(--ivory)">换账号或换电脑了怎么办？</b><br>每个账号分别授权接收，互不混用；退出本机登录不停止接收。暂停或撤销可在对应账号的「上传到市集」窗口操作。换电脑时重新授权即可，学习记录需另行迁移备份。</p>
+  <p><b style="color:var(--ivory)">下载会计入热度吗？</b><br>会。同一账号对同一张卡每天只计一次，用来生成近 3 天热门。</p>
+</main>
+
+<footer>
+  <div class="wrap">© 2026 学伴 · 角色卡市集</div>
+</footer>
+</body>
+</html>

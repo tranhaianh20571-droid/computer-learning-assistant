@@ -1,30 +1,34 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { parseSseFrames } from "./lib/sse";
+import SourceComposer from "./ui/SourceComposer";
+import {useSourceImports} from "./hooks/useSourceImports";
 
 /**
  * 即时对话（设计稿 9 节 chat 布局）：
  * - turn me/ai 消息流；新追问 generation 加一；旧回答留历史不回填；
  * - 刷新只恢复已保存消息，不自动重发；
- * - 搜索失败 → searchfail 等待决策（重试/离线继续）；模型不可用等失败按错误码标注轮次；
+ * - 搜索由后台按个人设置自动执行并降级；模型不可用等失败按错误码标注轮次；
  * - 外部结果仅计数标记；
  * - 边界：即时路径不调用板书、TTS 或播放 API。
  */
 
 type Msg = { message_id: string; generation: number; role: string; content: string; status: string };
 
-export default function ChatView({ onErr, onOk, needLogin }: {
+export default function ChatView({ onErr, onOk, needLogin, ownerId="" }: {
   onErr: (s: string) => void; onOk: (s: string) => void; needLogin: boolean;
+  ownerId?:string;
 }) {
   const [convId, setConvId] = useState<string>("");
   const [messages, setMessages] = useState<Msg[]>([]);
   const [generation, setGeneration] = useState(0);
   const [input, setInput] = useState("");
-  const [useSearch, setUseSearch] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [composerKey,setComposerKey]=useState(0);
+  const sources=useSourceImports(ownerId,onErr);
   const [lastExternal, setLastExternal] = useState<number | null>(null);
   const [liveText, setLiveText] = useState<string | null>(null);
-  // 本会话内各轮失败原因（generation → 错误码/"search_wait"）；刷新后丢失，回退到会话级等待语义
+  // 本会话内各轮失败原因；刷新后只读取已保存消息，不推断搜索故障。
   const [turnNotes, setTurnNotes] = useState<Record<number, string>>({});
   const bootRef = useRef(false);
   const streamRef = useRef<HTMLDivElement | null>(null);
@@ -77,24 +81,30 @@ export default function ChatView({ onErr, onOk, needLogin }: {
 
   const send = useCallback(async () => {
     const id = await ensureConversation();
-    if (!id || !input.trim()) return;
-    const question = input;
+    if (!id || (!input.trim()&&!sources.hasSources)) return;
+    const question = input.trim()||"请帮助我理解所附资料";
     setBusy(true);
+    setLastExternal(null);
+    let typewriterTimer: number | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
+      const materialIds=await sources.ingest();
       const res = await api.streamChat(id, {
-        content: question, use_search: useSearch, idempotency_key: `web-${Date.now()}`,
+        content: question, idempotency_key: `web-${Date.now()}`,
+        ...(materialIds.length?{material_ids:materialIds}:{}),
       });
       if (!res.ok || !res.body) {
         let code = "ERROR";
         try { code = (await res.json())?.error_code || code; } catch { /* keep */ }
-        if (res.status === 409 && code === "AWAITING_SEARCH_DECISION") {
-          await refresh(id);
-          onErr("联网搜索失败：请选择重试或离线继续。");
+        if (code === "AWAITING_SEARCH_DECISION" || code.startsWith("SEARCH_")) {
+          const got = await refresh(id);
+          if (got) setTurnNotes(p => ({ ...p, [got.generation]: "ANSWER_INTERRUPTED" }));
           return;
         }
         throw new Error(code);
       }
       setInput("");
+      sources.clear();setComposerKey(value=>value+1);
       setLiveText("");
       // 打字机平滑渲染：网络增量先入缓冲，按固定速率上屏（积压越多追赶越快）。
       // 网关批量倒字时依旧呈现逐字效果；真流式供应商下自动表现为原生打字机。
@@ -114,8 +124,9 @@ export default function ChatView({ onErr, onOk, needLogin }: {
           revealed = Math.min(buffer.length, revealed + take);
           setLiveText(buffer.slice(0, revealed));
         }, 50);
+        typewriterTimer = iv;
       });
-      const reader = res.body.getReader();
+      reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
       let finished = false;
@@ -138,14 +149,14 @@ export default function ChatView({ onErr, onOk, needLogin }: {
           } else if (frame.event === "wait") {
             streamDone = true;
             const got = await refresh(id);
-            if (got) setTurnNotes((p) => ({ ...p, [got.generation]: "search_wait" }));
-            onErr("联网搜索失败：请选择重试或离线继续。");
+            if (got) setTurnNotes((p) => ({ ...p, [got.generation]: "ANSWER_INTERRUPTED" }));
             return;
           } else if (frame.event === "error") {
             streamDone = true;
             const code = String(data.error_code || "ERROR");
             const got = await refresh(id);
-            if (got) setTurnNotes((p) => ({ ...p, [got.generation]: code }));
+            if (got) setTurnNotes((p) => ({ ...p, [got.generation]: code.startsWith("SEARCH_") ? "ANSWER_INTERRUPTED" : code }));
+            if (code.startsWith("SEARCH_")) return;
             if (code === "MODEL_CAPABILITY_UNAVAILABLE") {
               onErr("未配置可用模型：请到设置页保存内容模型配置。");
             } else {
@@ -160,31 +171,17 @@ export default function ChatView({ onErr, onOk, needLogin }: {
       await refresh(id);
       onOk("已回答。");
     } catch (e: any) {
+      if(e?.code==="SOURCE_IMPORT_CANCELLED")return;
       onErr(e?.code === "MODEL_CAPABILITY_UNAVAILABLE"
         ? "该模型不支持所需能力，已停止调用。"
         : e?.message || "发送失败");
     } finally {
+      window.clearInterval(typewriterTimer);
+      if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
       setLiveText(null);
       setBusy(false);
     }
-  }, [ensureConversation, input, onErr, onOk, refresh, useSearch]);
-
-  const resume = useCallback(async (decision: string) => {
-    if (!convId) return;
-    setBusy(true);
-    try {
-      const r = await api.resumeChat(convId, decision);
-      await refresh(convId);
-      if (typeof r.external_result_count === "number" && r.external_result_count > 0) {
-        setLastExternal(r.external_result_count);
-      }
-      onOk(decision === "retry" ? "搜索已重试并完成回答。" : "已离线继续并完成回答。");
-    } catch (e: any) {
-      onErr(e?.message || "恢复失败");
-    } finally {
-      setBusy(false);
-    }
-  }, [convId, onErr, onOk, refresh]);
+  }, [ensureConversation, input, onErr, onOk, refresh, sources]);
 
   // 按 generation 分组成轮次（user + assistant）
   const turns: { gen: number; q?: Msg; a?: Msg }[] = [];
@@ -206,10 +203,6 @@ export default function ChatView({ onErr, onOk, needLogin }: {
           {(convId ? "会话进行中" : "尚无会话") + " · 不需要路线或课程 · 只有文字，没有板书和音频"}
         </span>
         <span className="sp" />
-        <label className="help" style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-          <input type="checkbox" checked={useSearch} onChange={(e) => setUseSearch(e.target.checked)} />
-          允许联网搜索（外部结果单独标记）
-        </label>
         <button
           className="btn btn-sm btn-quiet"
           onClick={async () => {
@@ -237,7 +230,7 @@ export default function ChatView({ onErr, onOk, needLogin }: {
                   <div className="body"><p>{t.a.content}</p></div>
                 </div>
               )}
-              {!t.a && (
+              {!t.a && !(busy && t.gen === generation) && (
                 <div className="turn ai">
                   <span className="who">学伴</span>
                   <div className="body">
@@ -247,21 +240,17 @@ export default function ChatView({ onErr, onOk, needLogin }: {
                         <div className="tt">未配置可用模型</div>
                         <div>当前账号没有已保存的内容模型配置。到设置页 → 个人内容模型保存后，重新提问即可。</div>
                       </div>
-                    ) : turnNotes[t.gen] && turnNotes[t.gen] !== "search_wait" ? (
+                    ) : turnNotes[t.gen] && turnNotes[t.gen] !== "ANSWER_INTERRUPTED" ? (
                       <div className="note note-warn" role="alert">
                         <span className="tag">未回答</span>
                         <div className="tt">回答失败：{turnNotes[t.gen]}</div>
                         <div>可直接重新提问（会开启新一轮）。</div>
                       </div>
                     ) : (
-                      <div className="note note-warn" role="alert">
-                        <span className="tag">等待</span>
-                        <div className="tt">联网搜索失败</div>
-                        <div>可以重试搜索，或明确选择离线继续（不会伪造联网依据）。</div>
-                        <div className="acts">
-                          <button className="btn btn-sm" onClick={() => resume("retry")} disabled={busy}>重试搜索</button>
-                          <button className="btn btn-sm btn-ink" onClick={() => resume("offline_continue")} disabled={busy}>离线继续</button>
-                        </div>
+                      <div className="note note-info" role="status">
+                        <span className="tag">未完成</span>
+                        <div className="tt">这一轮回答尚未完成</div>
+                        <div>可以继续提问。</div>
                       </div>
                     )}
                   </div>
@@ -304,21 +293,12 @@ export default function ChatView({ onErr, onOk, needLogin }: {
           <div className="composer2">
             <div className="box">
               <label className="sr" htmlFor="ch-q">继续提问</label>
-              <textarea
-                className="ta"
-                id="ch-q"
-                placeholder="继续问，比如：连接池一般怎么避免 CLOSE_WAIT？"
-                value={input}
-                maxLength={4000}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault();
-                    send();
-                  }
-                }}
-              />
-              <button className="btn btn-pri" onClick={send} disabled={busy || !input.trim()}>发送</button>
+              <div style={{minWidth:0,flex:1}}>
+                <SourceComposer key={composerKey} label="继续提问" placeholder="继续提问" disabled={busy}
+                  onChange={(text,links)=>{setInput(text);sources.setLinks(links);}} onFiles={sources.addFiles} onSubmit={()=>void send()}/>
+                {sources.tray}{sources.pickerControl}
+              </div>
+              <button className="btn btn-pri" onClick={send} disabled={busy || (!input.trim()&&!sources.hasSources)}>发送</button>
             </div>
             <div className="hint">
               <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 发送</span>

@@ -1,4 +1,4 @@
-"""full-stack-fastapi-template 集成：模板 JWT 登录 + 切片 0 任务/租约/SSE。"""
+"""Production assembler: one public login boundary and task lease/SSE contracts."""
 
 from __future__ import annotations
 
@@ -29,23 +29,21 @@ def client():
 
 
 def _login(client) -> str:
-    """用模板 FIRST_SUPERUSER 登录获取 JWT。"""
-    from app.infrastructure.config import settings
-
-    r = client.post(
-        f"{settings.API_V1_STR}/login/access-token",
-        data={"username": str(settings.FIRST_SUPERUSER), "password": settings.FIRST_SUPERUSER_PASSWORD},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
+    email = "synthetic.template." + uuid.uuid4().hex + "@example.com"
+    password = "Synthetic-template-password-12345"
+    registered = client.post("/api/auth/register", json={"email": email, "password": password})
+    assert registered.status_code == 201
+    assert registered.json()["status"] == "approved"
+    r = client.post("/api/auth/login", json={"email": email, "password": password})
     assert r.status_code == 200, r.text
-    return r.json()["access_token"]
+    return r.json()["session_token"]
 
 
 class TestTemplateLearningAPI:
     def test_health(self, client):
         from app.infrastructure.config import settings
 
-        r = client.get(f"{settings.API_V1_STR}/utils/health-check/")
+        r = client.get("/healthz")
         assert r.status_code == 200
 
     def test_login_and_create_task_with_lease(self, client):
@@ -55,7 +53,7 @@ class TestTemplateLearningAPI:
         h = {"Authorization": f"Bearer {token}"}
 
         r = client.post(
-            f"{settings.API_V1_STR}/learning/tasks",
+            "/api/tasks",
             json={"idempotency_key": f"tpl-{uuid.uuid4().hex[:8]}", "kind": "generic", "subject_id": "mat_1"},
             headers=h,
         )
@@ -64,20 +62,20 @@ class TestTemplateLearningAPI:
         assert r.json().get("prompt_binding_id")
 
         # SSE
-        r = client.get(f"{settings.API_V1_STR}/learning/tasks/{tid}/events", headers=h)
+        r = client.get(f"/api/tasks/{tid}/sse", headers=h)
         assert r.status_code == 200
         assert "data: " in r.text
 
         # claim + result
         r = client.post(
-            f"{settings.API_V1_STR}/learning/tasks/{tid}/claim",
+            f"/api/tasks/{tid}/claim",
             json={"lease_owner": "worker-1", "lease_seconds": 60},
         )
         assert r.status_code == 200, r.text
         lease = r.json()
 
         r = client.post(
-            f"{settings.API_V1_STR}/learning/tasks/{tid}/result",
+            f"/api/tasks/{tid}/result",
             json={
                 "attempt_id": lease["attempt_id"],
                 "lease_token": lease["lease_token"],
@@ -92,7 +90,7 @@ class TestTemplateLearningAPI:
         assert r.status_code == 200, r.text
         assert r.json()["accepted"] is True
 
-        r = client.get(f"{settings.API_V1_STR}/learning/tasks/{tid}/status", headers=h)
+        r = client.get(f"/api/tasks/{tid}/status", headers=h)
         assert r.status_code == 200
         assert r.json()["status"] == "succeeded"
 
@@ -102,28 +100,28 @@ class TestTemplateLearningAPI:
         token = _login(client)
         h = {"Authorization": f"Bearer {token}"}
         r = client.post(
-            f"{settings.API_V1_STR}/learning/tasks",
+            "/api/tasks",
             json={"idempotency_key": f"tpl-{uuid.uuid4().hex[:8]}", "kind": "generic", "subject_id": "s"},
             headers=h,
         )
         tid = r.json()["task_id"]
         old = client.post(
-            f"{settings.API_V1_STR}/learning/tasks/{tid}/claim",
+            f"/api/tasks/{tid}/claim",
             json={"lease_owner": "w-old", "lease_seconds": 60},
         ).json()
         new = client.post(
-            f"{settings.API_V1_STR}/learning/tasks/{tid}/claim",
+            f"/api/tasks/{tid}/claim",
             json={"lease_owner": "w-new", "lease_seconds": 60},
         ).json()
 
         r_old = client.post(
-            f"{settings.API_V1_STR}/learning/tasks/{tid}/result",
+            f"/api/tasks/{tid}/result",
             json={**old, "stage": "ocr", "status": "succeeded", "duration_ms": 1},
         )
         assert r_old.json()["accepted"] is False
 
         r_new = client.post(
-            f"{settings.API_V1_STR}/learning/tasks/{tid}/result",
+            f"/api/tasks/{tid}/result",
             json={**new, "stage": "ocr", "status": "succeeded", "duration_ms": 1},
         )
         assert r_new.json()["accepted"] is True
@@ -134,12 +132,12 @@ class TestTemplateLearningAPI:
         token = _login(client)
         h = {"Authorization": f"Bearer {token}"}
         r = client.post(
-            f"{settings.API_V1_STR}/learning/tasks",
+            "/api/tasks",
             json={"idempotency_key": f"tpl-{uuid.uuid4().hex[:8]}", "kind": "generic", "subject_id": "s"},
             headers=h,
         )
         tid = r.json()["task_id"]
-        r = client.get(f"{settings.API_V1_STR}/learning/tasks/{tid}/prompt", headers=h)
+        r = client.get(f"/api/tasks/{tid}/prompt", headers=h)
         assert r.status_code == 200
         assert r.json()["template_sha256"]
         assert r.json()["source"] == "local_fallback"
@@ -147,8 +145,12 @@ class TestTemplateLearningAPI:
     def test_unauthenticated_rejected(self, client):
         from app.infrastructure.config import settings
 
-        r = client.get(f"{settings.API_V1_STR}/learning/tasks/unknown/status")
+        client.cookies.clear()
+        r = client.get("/api/tasks/unknown/status")
         assert r.status_code == 401
+        token = _login(client)
+        assert client.post(f"{settings.API_V1_STR}/login/access-token",
+            headers={"Authorization": "Bearer " + token}).status_code == 404
 
     def test_product_slice0_auth_task_sse(self, client):
         """产品前端使用的身份/审批/任务链路也必须挂在模板主应用上。"""
@@ -166,7 +168,7 @@ class TestTemplateLearningAPI:
                 existing = session.execute(select(UserRow).where(UserRow.is_admin.is_(True))).scalars().first()
                 assert existing is not None
                 existing.password_hash = slice0_app.state.slice0.auth._hash_password(admin_password)
-                admin_email = existing.email
+                existing.email = admin_email
 
         suffix = uuid.uuid4().hex[:10]
         user_email = f"synthetic.slice0.{suffix}@example.com"
@@ -178,11 +180,8 @@ class TestTemplateLearningAPI:
         )
         assert r.status_code == 201, r.text
         user_id = r.json()["user_id"]
-        verify_token = r.json()["verify_token"]
-
-        r = client.post("/api/auth/verify-email", json={"token": verify_token})
-        assert r.status_code == 200
-        assert r.json()["status"] == "pending_approval"
+        assert r.json()["status"] == "approved"
+        assert "verify_token" not in r.json()
 
         admin = client.post(
             "/api/auth/login",
@@ -190,8 +189,6 @@ class TestTemplateLearningAPI:
         )
         assert admin.status_code == 200, admin.text
         admin_headers = {"Authorization": f"Bearer {admin.json()['session_token']}"}
-        r = client.post("/api/auth/admin/approve", json={"user_id": user_id}, headers=admin_headers)
-        assert r.status_code == 200, r.text
 
         user = client.post(
             "/api/auth/login",

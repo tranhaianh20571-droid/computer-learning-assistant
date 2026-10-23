@@ -194,6 +194,7 @@ class ChunkIndexService:
                 chunk_index=chunk_index,
                 tsvector=ts_expr,  # type: ignore[arg-type]
                 source_version=tokenized.source_version,
+                private_text=text,
             )
             sess.add(row)
             sess.flush()

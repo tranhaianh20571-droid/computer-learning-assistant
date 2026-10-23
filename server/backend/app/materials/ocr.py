@@ -319,11 +319,12 @@ class OcrPipelineService:
                 material_region_id=region.region_id,
                 page_no=page_no,
                 chunk_index=0,
+                private_text=text,
                 source_version=SOURCE_VERSION,
             )
             sess.add(chunk)
             sess.flush()
-            # tsvector 用数据库函数生成，正文本身不落任何表（§4.6 索引约定）
+            # Body is private business storage; only token metadata enters the index.
             from sqlalchemy import func as sa_func
 
             from .chunk_index import build_tokens, to_tsvector_expr
@@ -508,6 +509,7 @@ class OcrPipelineService:
                         material_region_id=region_row.region_id,
                         page_no=page_no,
                         chunk_index=applied,
+                        private_text=reg["text"],
                         source_version=SOURCE_VERSION,
                     )
                     sess.add(chunk)

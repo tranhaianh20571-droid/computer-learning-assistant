@@ -59,13 +59,18 @@ try {
   assert.equal(await page.locator('.ink-cover-art img').count(), 0);
   checks.push('invalid_image_bytes_use_local_fallback');
   await page.goto(base + '/#/home');
-  assert.equal(await page.locator('#planning-cover-notice').count(), 0);
+  await page.locator('#goal').waitFor();
+  // ADR-034 automatic mode: the plan tab now states that confirming the plan generates the cover.
+  await page.getByText('规划确认后会自动生成封面。已启用图片模型时只发送主题与画面描述，可能计费；未配置则使用本地水墨封面。', { exact: true }).waitFor();
+  checks.push('planning_notice_describes_automatic_cover');
   await page.locator('#goal').fill('学习 Python');
   await page.getByRole('button', { name: '生成规划草稿', exact: true }).click();
   await page.waitForURL('**/#/planning');
+  // ADR-034 automatic mode: the client still never authorizes an image request. The cover is enqueued
+  // by the server when the draft is confirmed, so the planning submission body carries no cover field.
   assert.equal(submitted.cover_auto_generate, undefined);
   assert.equal(submitted.target_route_id, 'synthetic-route');
-  checks.push('planning_submission_never_implicitly_authorizes_cover');
+  checks.push('planning_submission_keeps_cover_authorization_server_side');
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ checks, synthetic: true, pageErrors: errors }));
 } finally { await browser.close(); }

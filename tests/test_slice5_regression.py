@@ -37,10 +37,11 @@ from common_fixtures import (  # noqa: E402
     OUTLINE_OK_PAYLOAD,
     ROUTE_OK_PAYLOAD,
     SyntheticModelAdapter,
+    SkeletonThenOutlineAdapter,
     SyntheticSearchAdapter,
     TeachingModelAdapter,
     make_user,
-    run_route_generate,
+    run_legacy_route_generate as run_route_generate,
 )
 
 
@@ -84,7 +85,8 @@ def env(database: Database):
     assert up.status_code == 201
     material_id = up.json()["data"][0]["material_id"]
 
-    container["model"] = SyntheticModelAdapter(payload=ROUTE_OK_PAYLOAD)
+    container["model"] = SkeletonThenOutlineAdapter(
+        payload=ROUTE_OK_PAYLOAD, outline_payload=OUTLINE_OK_PAYLOAD)
     container["search"] = SyntheticSearchAdapter()
     route_id = client.post("/api/planning/routes", headers=HA,
                            json={"title": "回归路线", "scenario": "self_study"}).json()["route_id"]

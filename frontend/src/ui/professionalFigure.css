@@ -1,0 +1,61 @@
+.professional-figure { --figure-ink:#303b4a; --figure-bg:#fff; --figure-accent:#2959b6; color:var(--figure-ink); width:100%; height:100%; min-width:0; }
+.professional-figure[data-ink=true] { --figure-ink:#e5eee0; --figure-bg:#17382d; --figure-accent:#f2d38c; }
+.function-plot-wrap { width:100%; height:100%; min-height:230px; position:relative; }
+.function-plot-host { width:100%; height:100%; min-height:230px; border:0; background:transparent; touch-action:none; }
+.professional-figure .JXGtext,.drawing-workspace .JXGtext { font-family:"Segoe UI","Microsoft YaHei",sans-serif!important; }
+.professional-figure .jxgbox,.drawing-workspace .jxgbox { border:0; border-radius:0; background:transparent; }
+.surface-plot { display:flex; flex-direction:column; width:100%; height:100%; min-height:280px; }
+.surface-plot-host { flex:1; position:relative; min-height:220px; width:100%; overflow:hidden; touch-action:none; }
+.surface-plot-host canvas { display:block; width:100%; height:100%; }
+.surface-axis { position:absolute; font:italic 16px Georgia,serif; pointer-events:none; color:var(--figure-ink); }
+.surface-range { font-size:12px; line-height:1.6; padding:6px 0; overflow-wrap:anywhere; }
+.figure-tools { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.figure-tools button,.drawing-expression button,.drawing-item button,.circuit-remove { display:inline-flex; align-items:center; justify-content:center; min-width:36px; min-height:36px; padding:6px 9px; border:1px solid #cbd2de; background:transparent; color:inherit; border-radius:4px; cursor:pointer; font:inherit; }
+.professional-figure[data-ink=true] .figure-tools button { border-color:#527963; color:#d5e4d8; }
+.figure-tools button[aria-pressed=true] { background:#edf2fc; color:#2959b6; border-color:#2959b6; }
+.figure-tools label { display:flex; gap:5px; align-items:center; font-size:12px; }
+.figure-tools label:first-of-type { text-decoration:underline; text-decoration-color:#d4a942; text-underline-offset:5px; }
+.figure-tools label:nth-of-type(2) { text-decoration:underline; text-decoration-color:#cd8b7c; text-underline-offset:5px; }
+.figure-error { padding:12px; font-size:14px; }
+.circuit-viewport { position:relative; width:100%; overflow:auto; overscroll-behavior:contain; }
+.circuit-container { position:relative; min-width:0; }
+.professional-figure .circuit-container { height:100%; display:flex; flex-direction:column; }
+.professional-figure .circuit-viewport { flex:1; min-height:0; }
+.circuit-fit { display:flex; align-items:center; justify-content:center; width:36px; height:36px; background:var(--figure-bg,#fff); color:inherit; border:1px solid #8a9d91; border-radius:4px; margin:4px 12px 8px auto; cursor:pointer; }
+.circuit-diagram { display:block; width:100%; min-width:570px; min-height:260px; color:var(--figure-ink,#303b4a); touch-action:none; }
+.circuit-diagram text { fill:currentColor; font:16px "Segoe UI",sans-serif; }
+.circuit-diagram .gate-label { font-size:12px; }
+.circuit-wire { stroke:currentColor; stroke-width:2; fill:none; stroke-linejoin:round; }
+.circuit-wire.selected { stroke:var(--figure-accent,#2959b6); stroke-width:3; }
+.circuit-bridge-cut { fill:none; stroke:var(--figure-bg,#fff); stroke-width:6; stroke-linecap:round; }
+.circuit-bridge { fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; }
+.circuit-junction { fill:currentColor; stroke:none; pointer-events:none; }
+.circuit-symbol { stroke:currentColor; stroke-width:2; fill:var(--figure-bg,#fff); }
+.circuit-selection { fill:none; stroke:var(--figure-accent,#2959b6); stroke-dasharray:4 3; }
+.pin-mark { stroke:var(--figure-accent,#2959b6); stroke-width:1.5; fill:var(--figure-bg,#fff); }
+.circuit-pin[role=button],.circuit-gate[role=button] { cursor:pointer; }
+.circuit-gate[role=button] { cursor:move; }
+.circuit-pin.pending .pin-mark { fill:var(--figure-accent,#2959b6); }
+.circuit-remove { margin:4px 12px; font-size:12px; }
+.circuit-pending { display:inline-block; font-size:12px; padding:8px; }
+.drawing-workspace { --figure-ink:var(--ink,#23262d); --figure-bg:var(--bg,#fff); --figure-accent:var(--accent,#2959b6); border:1px solid var(--border,#cbd2de); border-radius:6px; overflow:hidden; color:var(--figure-ink); }
+.drawing-workspace .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+.drawing-tools { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; padding:10px; border-bottom:1px solid var(--line,#e1e5ed); }
+.drawing-tools select { min-height:36px; padding:4px 8px; color:inherit; background:var(--figure-bg); border:1px solid var(--border,#cbd2de); border-radius:4px; font:inherit; max-width:150px; }
+.drawing-tools button:disabled,.drawing-expression button:disabled,.drawing-item button:disabled { opacity:.4; cursor:default; }
+.drawing-mode { display:inline-flex; align-items:center; gap:6px; font-size:12px; }
+.drawing-plot { height:320px; }
+.drawing-expression { display:flex; gap:8px; align-items:center; padding:10px 12px; border-top:1px solid var(--line,#e1e5ed); }
+.drawing-expression input { min-width:0; width:100%; max-width:400px; height:36px; border:1px solid var(--border,#cbd2de); border-radius:4px; background:var(--figure-bg); color:inherit; padding:6px 8px; }
+.drawing-expression label { flex:none; white-space:nowrap; }
+.drawing-item { display:flex; justify-content:space-between; align-items:center; padding:4px 12px; font-size:13px; overflow-wrap:anywhere; }
+.drawing-footer { padding:8px 12px; background:var(--panel,#f5f7fa); border-top:1px solid var(--line,#e1e5ed); font-size:12px; display:flex; flex-wrap:wrap; gap:12px; }
+.drawing-error { color:#b34837; }
+.drawing-workspace .circuit-viewport { background-image:radial-gradient(#a8b5c4 .7px,transparent .7px); background-size:16px 16px; }
+.assessment-screen .assessment-figure:has(.professional-figure) { height:350px; margin-bottom:40px; }
+.assessment-screen .drawing-feedback { margin:16px 0; height:350px; }
+.assessment-screen[data-theme=dark] .professional-figure { --figure-ink:#edf0f7; --figure-bg:#222429; }
+.teaching-figure-overlay { position:absolute; transform-origin:top left; pointer-events:auto; z-index:2; }
+.teaching-figure-overlay[data-cue-active=true] { box-shadow:inset 0 -2px #ffe5a3; }
+@media(pointer:coarse) { .figure-tools button,.drawing-tools select,.drawing-expression button,.drawing-item button,.circuit-remove { min-width:44px; min-height:44px; } .drawing-expression input { font-size:16px; min-height:44px; } }
+@media(max-width:600px) { .drawing-plot { height:270px; } .figure-tools { gap:4px; } .surface-range { font-size:11px; } }

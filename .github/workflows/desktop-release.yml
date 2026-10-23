@@ -24,7 +24,7 @@ jobs:
         working-directory: desktop
       - run: npm ci
         working-directory: frontend
-      - run: node --test tests/desktop_install_unit.mjs tests/desktop_browsers_unit.mjs
+      - run: node --test tests/desktop_install_unit.mjs tests/desktop_browsers_unit.mjs tests/desktop_account_unit.mjs
       - run: node desktop/scripts/verify-publication.mjs
       - run: npm run build
         working-directory: frontend

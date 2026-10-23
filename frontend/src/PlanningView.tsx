@@ -228,7 +228,8 @@ function PlanningAcknowledgement({ review, accepted, onAccept }: {
   review: any; accepted: boolean; onAccept: (value: boolean) => void;
 }) {
   if (!review?.acknowledgement_required) return null;
-  const issues: any[] = Array.isArray(review.issues) ? review.issues : [];
+  const issues: any[] = Array.isArray(review.issues)
+    ? review.issues.filter((issue: any) => issue.dimension !== "prerequisites") : [];
   return (
     <div>
       {issues.length > 0 && (
@@ -242,7 +243,7 @@ function PlanningAcknowledgement({ review, accepted, onAccept }: {
       )}
         <label className="help" style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 8 }}>
           <input type="checkbox" checked={accepted} onChange={(event) => onAccept(event.target.checked)} />
-          我已了解并接受以上缺口，仍然使用这份规划
+          {issues.length ? "我已了解并接受以上缺口，仍然使用这份规划" : "我确认使用这份规划"}
         </label>
     </div>
   );

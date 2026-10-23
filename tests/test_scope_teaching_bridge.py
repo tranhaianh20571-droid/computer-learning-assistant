@@ -1,9 +1,15 @@
 import pytest
 from pydantic_ai.exceptions import ModelRetry
+from sqlalchemy import select, func
+from test_course_library import database, env, draft, confirm  # noqa: F401
 
 from backend.teaching.learning_outputs import validate_new_blueprint
 from backend.teaching.pedagogy import lightweight_plan
 from backend.teaching.unit_scope import scope_capabilities
+from backend.planning.models import ConversationRow, CourseRow, CourseUnitRow, LessonRow
+from backend.tasks.service import LearningTaskRow
+from backend.planning.models import utcnow
+from datetime import timedelta
 
 
 def requirements(point_count=3):
@@ -105,3 +111,47 @@ def test_legacy_blueprint_contract_remains_valid_without_scope():
     plan = lightweight_plan({"lesson_goal": "Legacy goal"})
     validate_new_blueprint({"lesson_goal": "Legacy goal"}, plan)
     assert not any(goal.scope_capability_ids for goal in plan.goals)
+
+
+def test_pending_scope_has_a_wait_state_and_reentry_reuses_the_session(env, monkeypatch):
+    _, state, owner, _ = env
+    course, editable = draft(env, {"title": "Synthetic pending scope", "units": [
+        {"title": "Synthetic unit", "lessons": [{"title": "Synthetic lesson", "goal": "Explain lookup"}]}
+    ]}, kind="course_outline")
+    assert confirm(env, editable).status_code == 200
+    scopes = state.assessments.scopes
+    monkeypatch.setattr(scopes, "kick", lambda _: None)
+    with state.db.session() as sess:
+        outline = sess.get(CourseRow, course).current_outline_version_id
+        unit = sess.scalar(select(CourseUnitRow).where(CourseUnitRow.outline_version_id == outline))
+        lesson = sess.scalar(select(LessonRow).where(LessonRow.unit_id == unit.unit_id))
+        lesson_id, unit_id = lesson.lesson_id, unit.unit_id
+    first = state.teaching.start_lesson(course, lesson_id, actor_id=owner)
+    for _ in range(3):
+        assert state.teaching.start_lesson(course, lesson_id, actor_id=owner)["conversation_id"] == first["conversation_id"]
+    view = state.teaching.get_workspace(first["conversation_id"], actor_id=owner)
+    assert view["scope_preparation"] == {"status": "queued", "error_code": None}
+    assert view["needs_upgrade"] is False and view["authorization_required"] is False
+    assert view["steps"] == []
+    with state.db.session() as sess:
+        assert sess.scalar(select(func.count()).select_from(ConversationRow).where(
+            ConversationRow.owner_user_id == owner, ConversationRow.kind == "teaching")) == 1
+    scoped = scopes.get(course, unit_id, owner)
+    task = state.tasks.get_task(scoped["task_id"], actor_id=owner)
+    state.tasks.fail_queued(task["task_id"], expected_generation=task["generation"],
+        expected_revision=task["revision"], error_code="MODEL_PROVIDER_ERROR")
+    failed = state.teaching.get_workspace(first["conversation_id"], actor_id=owner)
+    assert failed["scope_preparation"] == {"status": "failed", "error_code": "MODEL_PROVIDER_ERROR"}
+    assert failed["needs_upgrade"] is False
+    recovered = state.teaching.start_lesson(course, lesson_id, actor_id=owner)
+    assert recovered["conversation_id"] == first["conversation_id"]
+    assert scopes.get(course, unit_id, owner)["status"] == "queued"
+    calls = []
+    monkeypatch.setattr(scopes, "kick", calls.append)
+    lease = state.tasks.claim(scoped["task_id"], lease_owner="synthetic-previous-process", lease_seconds=60)
+    scopes.resume(course, unit_id, owner)
+    assert calls == []
+    with state.db.session() as sess:
+        sess.get(LearningTaskRow, lease.task_id).lease_until = utcnow() - timedelta(seconds=1)
+    scopes.resume(course, unit_id, owner)
+    assert calls == [lease.task_id]

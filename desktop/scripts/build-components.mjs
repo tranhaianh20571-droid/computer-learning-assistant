@@ -74,7 +74,8 @@ async function python(name, pythonVersion, requirements, extraArgs = []) {
     await run(uv, ["pip", "install", "--compile-bytecode", "--break-system-packages", "--python", path.join(directory, "python.exe"),
       "--requirements", requirements, ...extraArgs]);
     await run(path.join(directory, "python.exe"), ["-m", "compileall", "-q", "-f",
-      "--invalidation-mode=unchecked-hash", path.join(directory, "Lib")]);
+      "--invalidation-mode=unchecked-hash", "-x", String.raw`[\\/]olefile2\.py$`,
+      path.join(directory, "Lib")]);
     await fs.writeFile(path.join(directory, ".dependencies-ready"), version);
   }
   await runtimeLibraries(directory);

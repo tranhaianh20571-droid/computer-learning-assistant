@@ -42,6 +42,7 @@ type Workspace = {
   queued_tasks?: { task_id: string; kind: string; status: string; step_no: number; followup?: boolean; error_code?: string; deadline_at?: string; required_action?: string }[];
   authorization_required?: boolean; authorization_error?: string; required_action?: string;
   needs_upgrade?: boolean;
+  scope_preparation?: {status: string; error_code?: string | null} | null;
   tts_authorized?:boolean;
   audio_mode?:"text"|"tts";
   artifact_recovery?:{status?:"missing"|"repairing"|"exhausted";available?:boolean;required?:boolean;error_code?:string;missing_steps?:number[];step_no?:number;attempts?:number;max_attempts?:number}|boolean;
@@ -590,7 +591,7 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
     if (!ws?.course_id || !ws.lesson_id || busy) return;
     setBusy(true);
     try {
-      const result = ws.needs_upgrade ? await api.startLessonV2(ws.course_id, ws.lesson_id) : await api.recoverLesson(ws.course_id, ws.lesson_id, conversationId);
+      const result = ws.needs_upgrade || ws.scope_preparation ? await api.startLessonV2(ws.course_id, ws.lesson_id) : await api.recoverLesson(ws.course_id, ws.lesson_id, conversationId);
       if (!result) return;
       if (result.conversation_id !== conversationId) { go(`/lecture/${result.conversation_id}`); return; }
       attemptedTasks.current.clear(); await refresh();
@@ -634,11 +635,16 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
   const artifactRepairing=typeof ws.artifact_recovery==="object"&&ws.artifact_recovery?.status==="repairing";
   const artifactMissing=ws.artifact_recovery===true || Boolean(typeof ws.artifact_recovery==="object"&&(ws.artifact_recovery?.available||ws.artifact_recovery?.required));
   const blocked = ws.authorization_required || ws.required_action === "authorize" || ws.needs_upgrade;
+  const scopeWaiting = !!ws.scope_preparation && !blocked;
+  const scopeFailed = scopeWaiting && ["failed", "expired", "cancelled", "not_generated"].includes(ws.scope_preparation!.status);
   const generationRetry=failedTasks.some(task=>task.required_action==="retry");
   const recoveryNeeded=!artifactExhausted&&(artifactMissing || generationRetry || failedTasks.length>0);
   const failureCode=failedTasks[0]?.error_code;
   const failureMessage=!failureCode||failureCode==="INTERNAL_ERROR"?"本段准备中断，可重试恢复。":errText({code:failureCode});
-  const emptyMessage = artifactExhausted ? "讲解补生成已达到重试上限，请检查模型设置。" : artifactRepairing ? "正在重新准备首段讲解…" : artifactMissing ? "首段讲解内容缺失，点击恢复讲解可重新准备。" : blocked ? "讲解配置暂不可用，请检查模型设置或恢复讲解。" : failedTasks.length ? failureMessage : "正在准备首段讲解…";
+  const emptyMessage = scopeWaiting ? scopeFailed
+    ? `单元考纲准备未完成。${ws.scope_preparation?.error_code ? errText({code: ws.scope_preparation.error_code}) : "可以重试准备。"}`
+    : ws.scope_preparation?.status === "succeeded" ? "单元考纲已就绪，正在准备首段讲解…" : "正在准备本单元考纲，完成后继续讲解…"
+    : artifactExhausted ? "讲解补生成已达到重试上限，请检查模型设置。" : artifactRepairing ? "正在重新准备首段讲解…" : artifactMissing ? "首段讲解内容缺失，点击恢复讲解可重新准备。" : blocked ? "讲解配置暂不可用，请检查模型设置或恢复讲解。" : failedTasks.length ? failureMessage : "正在准备首段讲解…";
 
   return (
     <div className="ink-classroom" data-nav-collapsed={navCollapsed}><aside id="classroom-navigation" className="classroom-nav" aria-label="课堂导航">
@@ -758,7 +764,8 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
           <div className="lecture-actions">
             {connectionWaiting&&<p className="help" role="status">连接暂不可用，已保留当前讲解，恢复连接后继续准备。</p>}
             {recordError&&<p role="alert">{recordError}<button className="btn btn-sm" onClick={()=>void recordPoint()}>重试保存</button></p>}
-            {(blocked || recoveryNeeded || artifactExhausted) && <div role="status"><p>{emptyMessage}</p>
+            {scopeFailed && <button className="btn btn-sm" disabled={busy} onClick={recover}>重试准备考纲</button>}
+            {!scopeWaiting && (blocked || recoveryNeeded || artifactExhausted) && <div role="status"><p>{emptyMessage}</p>
               {(blocked || recoveryNeeded) && <button className="btn btn-sm" disabled={busy} onClick={recover}>{artifactMissing || blocked ? "恢复讲解" : "重试生成"}</button>}
               <a className="btn btn-sm" href="#/capabilities">模型设置</a>
             </div>}

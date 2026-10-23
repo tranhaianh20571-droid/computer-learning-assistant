@@ -166,10 +166,6 @@ class SourceImports:
                     if not config:
                         raise Slice1Error("config_not_found", "请先配置文档识别服务。", 409)
                     binding["document"] = {k: config[k] for k in ("config_id", "config_version", "endpoint")}
-                for role, model in self.attachments.questions.defaults(owner).items():
-                    if model:
-                        binding[role] = {k: model[k] for k in
-                            ("config_id", "config_version", "endpoint", "protocol", "model_name")}
             for slot in ("reader", "model", "document", "semantic", "visual"):
                 if slot in binding:
                     config = binding[slot]
@@ -284,7 +280,7 @@ class SourceImports:
                         content_category="material", scope_snapshot={"material_ids": [material_id]},
                         session=session)
                     binding["grants"][target["config_id"]] = grant["grant_id"]
-            state = {}
+            state = {"ocr_mode": "full" if binding.get("semantic") else "direct"}
             if binding.get("document", {}).get("protocol") == "paddleocr_vl":
                 from ..slice1.adapters.paddle_vl import document_options, crop_document_options
                 state["ocr_options"] = document_options()
@@ -751,7 +747,7 @@ class SourceImports:
             state = self.attachments.process_document(path, validated.kind, state,
                 adapter=adapter, protocol=view["protocol"] if view else None, guard=guard,
                 checkpoint=checkpoint, stop=self.stop, material_id=material_id)
-            if state is not None:
+            if state is not None and state.get("extraction_binding"):
                 self.attachments.questions.run(state, owner=owner, lease=lease, source=path,
                     kind=validated.kind, guard=guard, checkpoint=checkpoint)
             if state is not None:

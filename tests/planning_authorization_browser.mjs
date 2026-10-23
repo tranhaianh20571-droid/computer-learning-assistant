@@ -38,6 +38,7 @@ async function scenario(name, test, { planning, resumeResponse, draft, onApi } =
     state.requests.push({ path: url.pathname, method, body });
     if (onApi && await onApi({ route: routed, url, method, body, state })) return;
     if (url.pathname === '/api/auth/me') return json(routed, me);
+    if (url.pathname === '/api/market/profile') return json(routed, { display_name: me.display_name });
     if (url.pathname === '/api/auth/guest') return json(routed, { ...me, is_guest: false });
     if (url.pathname === '/api/navigation') return json(routed, {});
     if (url.pathname === '/api/materials' || url.pathname === '/api/connectors') return json(routed, { data: [] });
@@ -245,6 +246,53 @@ try {
     assert.equal(await dialog(page).count(), 0);
     assert.equal(state.resumeCalls, 0);
   }, { planning: { ...baseTask, error_code: 'SEARCH_TIMEOUT' } });
+
+  for (const width of [1280, 390]) {
+    await scenario(`draft_feedback_and_ai_edit_remain_reachable_${width}`, async ({ page, state }) => {
+      await page.setViewportSize({ width, height: 600 });
+      const panel = page.getByRole('complementary', { name: '提问与反馈' });
+      const edit = panel.getByRole('button', { name: '我想修改讲解结构', exact: true });
+      await edit.waitFor();
+      assert.equal(await panel.getByText('前置策略要求桥接合成基础', { exact: true }).count(), 0);
+      assert.equal(await panel.getByRole('button', { name: '没问题，确认草稿', exact: true }).isDisabled(), true);
+      await panel.getByRole('checkbox').check();
+      assert.equal(await panel.getByRole('button', { name: '没问题，确认草稿', exact: true }).isEnabled(), true);
+      await edit.scrollIntoViewIfNeeded();
+      assert(await edit.evaluate(button => {
+        const rect = button.getBoundingClientRect();
+        const panelRect = button.closest('.plan-qa').getBoundingClientRect();
+        return rect.top >= Math.max(0, panelRect.top) && rect.bottom <= Math.min(innerHeight, panelRect.bottom);
+      }), 'AI edit button must be inside the scroll viewport');
+      await edit.click();
+      await page.getByLabel('规划修改要求').fill('保留资料，调整讲解顺序');
+      await page.getByRole('button', { name: '发送修改要求', exact: true }).click();
+      assert.equal(state.editBody.content, '保留资料，调整讲解顺序');
+      assert.equal(state.editBody.revision, 1);
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: path.join(output, `draft-feedback-${width}.png`), fullPage: true });
+    }, {
+      planning: { ...baseTask, task_status: 'succeeded', error_code: null, draft_id: 'synthetic-draft',
+        structure_status: 'ready', intake: { answers: Array.from({ length: 7 }, (_, index) => ({
+          question_id: `question-${index}`, question: '合成访谈问题'.repeat(12),
+          free_text: '合成回答'.repeat(30), selections: []
+        })) } },
+      draft: { draft_id: 'synthetic-draft', draft_kind: 'route', target_id: 'synthetic-route',
+        revision: 1, locked: false, content: { stages: [{ title: '合成阶段', courses: [{
+          title: '合成课程', units: [{ title: '合成单元', lessons: [{ title: '合成讲次' }] }]
+        }] }] }, review: { acknowledgement_required: true, issues: [
+          { dimension: 'prerequisites', severity: 'critical', message: '前置策略要求桥接合成基础' },
+          ...Array.from({ length: 8 }, () => ({
+            dimension: 'coverage', severity: 'critical', message: '合成覆盖反馈'.repeat(16)
+          }))
+        ] } },
+      onApi: async ({ route, url, body, state }) => {
+        if (!url.pathname.endsWith('/dialogue')) return false;
+        if (body) state.editBody = body;
+        await json(route, { turns: [] });
+        return true;
+      },
+    });
+  }
 
   console.log(`planning_authorization_browser: ${checks.length}/${checks.length} passed`);
   for (const name of checks) console.log(`  ok ${name}`);

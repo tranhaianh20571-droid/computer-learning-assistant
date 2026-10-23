@@ -329,6 +329,21 @@ class UnitScopeService:
         self.kick(value["task_id"])
         return {"scope_id": value["scope_id"], "task_id": value["task_id"]}
 
+    def resume(self, course_id, unit_id, owner):
+        """Reconnect an owned task after restart without replacing a live lease."""
+        value = self.get(course_id, unit_id, owner)
+        if not value.get("task_id"):
+            return
+        with self.db.session() as sess:
+            task = sess.get(LearningTaskRow, value["task_id"])
+            if (not task or task.owner_user_id != owner or task.cancel_requested
+                    or task.status not in ("queued", "leased", "running")):
+                return
+            if (task.status != "queued" and task.lease_until
+                    and self.tasks._as_utc(task.lease_until) > utcnow()):
+                return
+        self.kick(value["task_id"])
+
     def _bound_prompt_name(self, task_id, names):
         from ..prompts.service import PromptBindingRow
         with self.db.session() as sess:

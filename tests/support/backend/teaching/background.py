@@ -176,7 +176,15 @@ class TeachingBackground:
         if monotonic()-self._last_reconcile>=15:
             self._last_reconcile=monotonic()
             for conv in active[:4]:
-                try:self.service.preparation.prepare_next(conv.conversation_id,conv.owner_user_id)
+                try:
+                    if getattr(self.service, "assessments", None):
+                        with self.service.db.session() as sess:
+                            blueprint = sess.get(LessonBlueprintRow, conv.conversation_id)
+                            pending_scope = bool(blueprint and json.loads(blueprint.context_json).get("_scope_pending"))
+                            lesson = sess.get(LessonRow, conv.lesson_id) if pending_scope else None
+                        if lesson:
+                            self.service.assessments.scopes.resume(conv.course_id, lesson.unit_id, conv.owner_user_id)
+                    self.service.preparation.prepare_next(conv.conversation_id,conv.owner_user_id)
                 except Exception as exc:self._report_failure(self.service._controlled_failure(exc))
             if not counts['text'] and not counts['audio']:
                 try:self.service.preparation.reconcile(limit=4)

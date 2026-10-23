@@ -7,6 +7,11 @@ installation. Web authentication and existing owner checks remain in force.
 - The desktop process creates a persistent local user during database bootstrap.
   It issues a normal expiring session directly through the owned startup channel.
   There is no anonymous HTTP auto-login endpoint or fixed default password.
+- Desktop startup restores the last session from a Windows safeStorage-encrypted
+  record and validates it with the owned backend before showing the workspace.
+  Expired, revoked or explicitly signed-out sessions open login; they never
+  silently switch to the bootstrap user. Cookie replacements and logout update
+  the encrypted record. A transient validation failure stops restoration for retry.
 - Local HTTP ports listen on loopback. The desktop gateway requires a random
   per-installation credential and validates Host and Origin. Renderer JavaScript
   receives no general command-execution interface.

@@ -25,13 +25,13 @@ def local_page_limit():
     return 10 if current_budget() or os.environ.get("LOCAL_PARSER_CHILD") == "1" else DIRECT_MAX_PAGES
 
 
-def document_strategy(pages, size, *, target_bytes=None):
+def document_strategy(pages, size, *, target_bytes=None, page_limit=None):
     target_bytes = BATCH_TARGET_BYTES if target_bytes is None else target_bytes
     if pages is None:
         return "direct"
     if pages <= SHORT_MAX_PAGES and size <= target_bytes:
         return "short"
-    if pages <= local_page_limit() and size <= target_bytes:
+    if pages <= (local_page_limit() if page_limit is None else page_limit) and size <= target_bytes:
         return "direct"
     return "batched"
 
@@ -46,10 +46,10 @@ def pdf_batch_bytes(source, start, end):
         return output.getvalue()
 
 
-def plan_batches(source, *, kind, pages, size, target_bytes=None, provider_bytes=None):
+def plan_batches(source, *, kind, pages, size, target_bytes=None, provider_bytes=None, page_limit=None):
     target_bytes = BATCH_TARGET_BYTES if target_bytes is None else target_bytes
     provider_bytes = PROVIDER_MAX_BYTES if provider_bytes is None else provider_bytes
-    strategy = document_strategy(pages, size, target_bytes=target_bytes)
+    strategy = document_strategy(pages, size, target_bytes=target_bytes, page_limit=page_limit)
     if kind != "pdf" or strategy != "batched":
         batches = [{"start": 1, "end": pages, "size_bytes": size, "status": "pending"}]
     else:
@@ -68,7 +68,7 @@ def plan_batches(source, *, kind, pages, size, target_bytes=None, provider_bytes
             else:
                 batches.append({"start": start, "end": end, "size_bytes": length, "status": "pending"})
 
-        page_limit = local_page_limit()
+        page_limit = local_page_limit() if page_limit is None else page_limit
         for start in range(1, pages + 1, page_limit):
             add(start, min(start + page_limit - 1, pages))
     return {"pipeline_version": 2, "pages": pages, "strategy": strategy,

@@ -266,13 +266,19 @@ def test_explicit_job_retry_requires_owner_and_resets_only_job_retry(env):
 
 
 def test_disk_and_memory_pressure_blocks_claim_and_queue_is_bounded(env):
+    from sqlalchemy import func
+    from backend.cleanup.budget import HEAVY_KINDS
     manager,owner=env
     manager.budget.sampler=lambda:{"physical_bytes":8*GIB,"available_bytes":GIB//2,"rss_bytes":2*GIB,
         "limit_bytes":2*GIB,"warning_bytes":int(1.5*GIB),"heavy_limit":1,"memory_paused":True}
     tasks=manager.state.tasks
     tasks.resource_budget=manager.budget
+    with manager.db.session() as session:
+        pending = session.scalar(select(func.count()).select_from(LearningTaskRow).where(
+            LearningTaskRow.kind.in_(HEAVY_KINDS), LearningTaskRow.status == "queued"))
     ids=[tasks.create_task(owner_user_id=owner,kind="material_parse",subject_id="synthetic",
-        idempotency_key=uuid.uuid4().hex,stage="parse")["task_id"] for _ in range(20)]
+        idempotency_key=uuid.uuid4().hex,stage="parse")["task_id"] for _ in range(20-pending)]
+    assert ids, "The shared synthetic queue must have room for this test's owned task."
     with pytest.raises(LeaseError) as rejected:
         tasks.create_task(owner_user_id=owner,kind="material_parse",subject_id="synthetic",
             idempotency_key=uuid.uuid4().hex,stage="parse")
@@ -392,6 +398,19 @@ def test_local_pdf_eleven_pages_are_split_at_ten(monkeypatch):
     plan = document_pipeline.plan_batches("synthetic", kind="pdf", pages=11, size=100)
     assert plan["strategy"] == "batched"
     assert [(batch["start"], batch["end"]) for batch in plan["batches"]] == [(1, 10), (11, 11)]
+
+
+def test_direct_ocr_uses_provider_page_limit_instead_of_local_parser_limit(monkeypatch):
+    from backend.materials import document_pipeline
+    monkeypatch.setenv("LOCAL_PARSER_CHILD", "1")
+    monkeypatch.setattr(document_pipeline, "pdf_batch_bytes", lambda *args: b"synthetic")
+    plan = document_pipeline.plan_batches("synthetic", kind="pdf", pages=36, size=954448,
+        target_bytes=45_000_000, provider_bytes=50_000_000, page_limit=50)
+    assert plan["strategy"] == "direct"
+    assert [(b["start"], b["end"]) for b in plan["batches"]] == [(1, 36)]
+    plan = document_pipeline.plan_batches("synthetic", kind="pdf", pages=51, size=100,
+        page_limit=50)
+    assert [(b["start"], b["end"]) for b in plan["batches"]] == [(1, 50), (51, 51)]
 
 
 def test_subprocess_cancellation_reaps_child(env,tmp_path,monkeypatch):

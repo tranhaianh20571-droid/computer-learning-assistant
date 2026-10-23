@@ -135,6 +135,8 @@ class TeachingService:
                         self.assessments.scopes.generate(course_id, unit.unit_id, actor_id)
                     scope = self.assessments.scopes.get(course_id, unit.unit_id, actor_id)
                     scope_input_hash = scope.get("input_hash", "")
+                else:
+                    self.assessments.scopes.resume(course_id, unit.unit_id, actor_id)
         with self.db.session() as sess:
             confirmation = self.authorization.prepare_confirmation(sess, course_id, lesson_id, actor_id,
                 **_confirmation) if _confirmation else None
@@ -196,8 +198,12 @@ class TeachingService:
                     .order_by(ConversationRow.created_at.desc())).scalars().first()
                 if existing:
                     existing_plan = sess.get(LessonBlueprintRow, existing.conversation_id)
+                    existing_context = load_json_field(existing_plan.context_json, {}) if existing_plan else {}
                     existing_scope_hash = load_json_field(
                         existing_plan.context_json, {}).get("unit_scope_hash", "") if existing_plan else ""
+                    if (existing_context.get("_scope_pending")
+                            and existing_context.get("_scope_pending_input_hash") == scope_input_hash):
+                        return self._reuse_lesson(sess, existing, lesson, confirmation)
                     if not scope_pending and existing_scope_hash == frozen_scope_hash:
                         return self._reuse_lesson(sess, existing, lesson, confirmation)
                     existing.session_state = "archived"
@@ -1564,8 +1570,9 @@ class TeachingService:
                 or task["followup"] or task["step_no"] not in (
                     ready_audio if task["kind"] == "tts" else ready_text)]
             blueprint = sess.get(LessonBlueprintRow, conversation_id)
+            scope_pending = bool(blueprint and load_json_field(blueprint.context_json, {}).get("_scope_pending"))
             total = len(schedule) if schedule else None
-            needs_upgrade = bool(conv.session_state == "active" and
+            needs_upgrade = bool(conv.session_state == "active" and not scope_pending and
                 (not schedule or any(s.stage_segment_count < 2 for s in schedule
                                      if s.phase in ("intuition", "concept", "example"))))
             lesson = sess.get(LessonRow,conv.lesson_id) if conv.lesson_id else None
@@ -1607,7 +1614,12 @@ class TeachingService:
                 try:authorization_preflight=self.preflight_lesson(conv.course_id,conv.lesson_id,
                     actor_id=actor_id,purpose="recover",conversation_id=conversation_id)
                 except Exception:authorization_preflight=None
+        scope_preparation = None
+        if scope_pending and lesson and getattr(self, "assessments", None):
+            scope = self.assessments.scopes.get(conv.course_id, lesson.unit_id, actor_id)
+            scope_preparation = {key: scope.get(key) for key in ("status", "error_code")}
         return {
+            "scope_preparation": scope_preparation,
             "code_feedback": feedback_view,
             "feynman": self.feynman.view(conversation_id, actor_id) if not authorization_required and conv.kind=="teaching" else None,
             "channel_checkpoint": self.knowledge.channel_state(conversation_id, actor_id) if conv.kind == "teaching" else None,

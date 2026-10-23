@@ -16,7 +16,7 @@ def main():
             from app.materials.document_pipeline import plan_batches
             result = plan_batches(source, kind="pdf", pages=request["pages"],
                 size=source.stat().st_size, target_bytes=request["target_bytes"],
-                provider_bytes=request["provider_bytes"])
+                provider_bytes=request["provider_bytes"], page_limit=request.get("page_limit"))
         elif operation == "pptx":
             from app.materials.pptx_documents import plan_pptx_batches
             result = plan_pptx_batches(source, provider_bytes=request["provider_bytes"])

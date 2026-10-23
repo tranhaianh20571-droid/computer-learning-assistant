@@ -101,6 +101,33 @@ def run(env, material):
         return session.get(MaterialRow, material).status, row.failure_code, json.loads(row.result_json)
 
 
+def test_remote_document_finishes_after_ocr_without_question_models(source_env, monkeypatch):  # noqa: F811
+    from test_material_questions import content_model
+
+    env = source_env
+    config, adapter = configure(env)
+    content_model(env)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Default remote documents must not resolve or call question models.")
+    monkeypatch.setattr(env.attachments.questions, "defaults", forbidden)
+    monkeypatch.setattr(env.attachments.questions, "run", forbidden)
+    monkeypatch.setattr("backend.materials.chart_crops.complete_chart_crops", forbidden)
+    download(monkeypatch, pdf(2), "pdf")
+    prepared, material = start(env, "pdf")
+    assert [(d["purpose"], d["config_id"]) for d in prepared["destinations"]] == [
+        ("document", config["config_id"])]
+    status, failure, state = run(env, material)
+    assert (status, failure) == ("parsed", None)
+    assert state["study_index"]["sections"]
+    assert len(state["page_results"]) == 2
+    assert "extraction_binding" not in state and "question_bank" not in state
+    assert state["ocr_mode"] == "direct"
+    assert adapter.calls == [("pdf", 2)]
+    with env.db.session() as session:
+        snapshot = freeze_sources(session, env.owner, [material])
+        assert verify_sources(session, env.owner, snapshot)
+
+
 def test_remote_view_retains_question_progress_with_document_metadata(source_env, monkeypatch):
     from backend.materials.source_models import SourceItemRow
     from sqlalchemy import select

@@ -8,12 +8,13 @@ const { prepare, validateManifest, atomicJson } = require("./install.cjs");
 const { protectHome } = require("./paths.cjs");
 const { externalUrl } = require("./external.cjs");
 const browsers = require("./browsers.cjs");
+const { DesktopAccount } = require("./account.cjs");
 
 function openLink(value) {
   try { window.webContents.send("browser:request", externalUrl(value)); } catch {}
 }
 
-let window, child, server, origin, running = false, quitting = false;
+let window, child, server, origin, account, accountListener, running = false, quitting = false;
 const browserChoices = new Map();
 let status = { stage: "checking" };
 const resources = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..");
@@ -51,6 +52,10 @@ async function secrets() {
 }
 
 async function stop() {
+  if (accountListener) session.defaultSession.cookies.removeListener("changed", accountListener);
+  accountListener = null;
+  if (account) await Promise.allSettled([...account.changes]);
+  if (account) await account.pending.catch(() => {});
   if (server) { server.closeAllConnections(); server.close(); server = null; }
   if (!child) return;
   const owned = child;
@@ -159,10 +164,25 @@ async function start() {
     });
     await serve(app.isPackaged ? path.join(resources, "frontend") : path.resolve(resources, "../frontend/dist"),
       ready.port, keys.gateway);
-    await session.defaultSession.cookies.set({
-      url: origin, name: "session_token", value: ready.token, httpOnly: true, sameSite: "lax", path: "/"
-    });
-    await window.loadURL(origin + "/#/home");
+    account = new DesktopAccount(home, safeStorage, session.defaultSession.cookies, token => new Promise((resolve, reject) => {
+      const request = http.get({ hostname: "127.0.0.1", port: ready.port, path: "/api/auth/me",
+        headers: { Authorization: `Bearer ${token}` }, timeout: 10000 }, response => {
+        response.resume();
+        if (response.statusCode === 200) resolve(true);
+        else if (response.statusCode === 401) resolve(false);
+        else reject(new Error("ACCOUNT_RESTORE_FAILED"));
+      });
+      request.on("timeout", () => request.destroy(new Error("ACCOUNT_RESTORE_FAILED")));
+      request.on("error", () => reject(new Error("ACCOUNT_RESTORE_FAILED")));
+    }));
+    const signedIn = await account.restore(origin, ready.token);
+    accountListener = (_event, cookie, cause, removed) => {
+      void Promise.resolve(account.changed(cookie, removed, cause)).catch(() => notify({
+        stage: "ready", code: "ACCOUNT_SAVE_FAILED"
+      }));
+    };
+    session.defaultSession.cookies.on("changed", accountListener);
+    await window.loadURL(origin + (signedIn ? "/#/home" : "/#/login"));
     notify({ stage: "ready" });
     if (app.isPackaged) {
       const { autoUpdater } = require("electron-updater");

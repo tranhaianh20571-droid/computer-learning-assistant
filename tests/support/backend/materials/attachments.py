@@ -44,7 +44,8 @@ def attachment_strategy(kind, pages, size, target_bytes=45_000_000):
         return "local"
     if kind == "pptx":
         return "batched" if size > 50_000_000 else "direct"
-    return document_strategy(pages, size, target_bytes=target_bytes) if kind == "pdf" else "direct"
+    return document_strategy(pages, size, target_bytes=target_bytes,
+                             page_limit=DIRECT_MAX_PAGES) if kind == "pdf" else "direct"
 
 
 def document_deadline(pages, *, semantic=False):
@@ -320,6 +321,7 @@ class AttachmentService:
                             semantic=bool(extraction and extraction.get("semantic"))),
                         progress_total=validated.page_count or 0, session=sess)
                     state = {"pages": validated.page_count,
+                        "ocr_mode": "full" if extraction and extraction.get("semantic") else "direct",
                         "unit": "document" if local else "slide" if validated.kind == "pptx" else "page",
                         "strategy": attachment_strategy(validated.kind, validated.page_count, validated.size_bytes,
                             45_000_000 if not destination or destination["protocol"] == "paddleocr_vl"
@@ -493,7 +495,7 @@ class AttachmentService:
                     state["ocr_crop_options"] = crop_document_options(state["ocr_options"])
             adapter.document_options = document_options(state["ocr_options"])
         extraction_context = {k: state[k] for k in
-            ("extraction_binding", "question_bank", "native_pdf_blocks", "ocr_options", "ocr_crop_options") if k in state}
+            ("extraction_binding", "question_bank", "native_pdf_blocks", "ocr_options", "ocr_crop_options", "ocr_mode") if k in state}
         from .local_execution import execute_local
         if kind in LOCAL_KINDS:
             state = execute_local("text", source, kind=kind, guard=guard, stop=stop)
@@ -504,6 +506,7 @@ class AttachmentService:
             return state
         provider_bytes = 50_000_000 if protocol == "paddleocr_vl" else PROVIDER_MAX_BYTES
         target_bytes = 45_000_000 if protocol == "paddleocr_vl" else 100_000_000
+        page_limit = DIRECT_MAX_PAGES if state.get("ocr_mode") == "direct" else None
         if not state.get("batches"):
             pages = state.get("pages") or (pdf_page_count(source) if kind == "pdf" else None)
             if kind == "pptx":
@@ -513,10 +516,10 @@ class AttachmentService:
                     state = plan_pptx_batches(source, provider_bytes=min(provider_bytes, 50_000_000), guard=guard)
             else:
                 state = execute_local("pdf", source, pages=pages, target_bytes=target_bytes,
-                    provider_bytes=provider_bytes, guard=guard, stop=stop) if kind == "pdf" else None
+                    provider_bytes=provider_bytes, page_limit=page_limit, guard=guard, stop=stop) if kind == "pdf" else None
                 if state is None:
                     state = plan_batches(source, kind=kind, pages=pages, size=source.stat().st_size,
-                        target_bytes=target_bytes, provider_bytes=provider_bytes)
+                        target_bytes=target_bytes, provider_bytes=provider_bytes, page_limit=page_limit)
             if external:
                 state["batches"][0]["job_id"] = external
             state.update(extraction_context)
@@ -558,7 +561,8 @@ class AttachmentService:
                         if protocol == "paddleocr_vl":
                             from .figure_crops import persist_crops
                             persist_crops(normalized, self.storage, material_id, adapter, guard)
-                            if kind == "pdf" and material_id and state.get("ocr_crop_options"):
+                            if (kind == "pdf" and material_id and state.get("ocr_crop_options")
+                                    and state.get("ocr_mode") != "direct"):
                                 from .chart_crops import complete_chart_crops
                                 if not complete_chart_crops(normalized, state, batch, source=source,
                                         storage=self.storage, material_id=material_id, adapter=adapter,
@@ -630,8 +634,9 @@ class AttachmentService:
                 material_id=ident)
             if state is None:
                 return
-            self.questions.run(state, owner=owner, lease=lease, source=source, kind=kind,
-                guard=guard, checkpoint=lambda value: self._checkpoint(lease, ident, owner, value))
+            if state.get("extraction_binding"):
+                self.questions.run(state, owner=owner, lease=lease, source=source, kind=kind,
+                    guard=guard, checkpoint=lambda value: self._checkpoint(lease, ident, owner, value))
             guard()
             def publish(sess):
                 self._publish(sess, lease, ident, owner, state)
@@ -694,7 +699,7 @@ def create_attachment_router(service, resolve_user):
     def config(request: Request):
         owner = resolve_user(request).user_id
         configured = service.config(owner)
-        return {"config": {**configured, "extraction": service.questions.defaults(owner)} if configured else None,
+        return {"config": {**configured, "extraction": {}} if configured else None,
                 "max_bytes": MAX_DOCUMENT_BYTES, "max_pages": MAX_DOCUMENT_PAGES,
                 "max_text_bytes": MAX_TEXT_BYTES, "max_pptx_bytes": MAX_PPTX_BYTES,
                 "max_pptx_slides": MAX_PPTX_SLIDES,

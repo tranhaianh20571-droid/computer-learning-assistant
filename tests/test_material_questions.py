@@ -422,29 +422,65 @@ def test_semantic_publication_rechecks_owner_config_grant_and_task(env, change):
             env.service._publish_guard(session, material, row, lease.task_id, env.owner)
 
 
-def test_unified_import_discloses_semantic_targets_and_checks_snapshot(source_env, tmp_path):
+def test_unified_import_uses_only_ocr_even_when_content_model_is_configured(source_env, tmp_path, monkeypatch):
     from backend.materials.source_router import ImportItemIn
     from backend.slice1.errors import Slice1Error
     from backend.slice1.models import PADDLE_VL_ENDPOINT, PADDLE_VL_MODEL
-    source_env.configs.create(actor_id=source_env.owner, is_admin=False, kind="document_parser",
+    config = source_env.configs.create(actor_id=source_env.owner, is_admin=False, kind="document_parser",
         protocol="paddleocr_vl", endpoint=PADDLE_VL_ENDPOINT, model_name=PADDLE_VL_MODEL,
         credentials={"api_key": "synthetic-ocr-key"})
     model = content_model(source_env)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Default document imports must not resolve or call question models.")
+    monkeypatch.setattr(source_env.attachments.questions, "defaults", forbidden)
+    monkeypatch.setattr(source_env.attachments.questions, "run", forbidden)
+    monkeypatch.setattr("backend.materials.chart_crops.complete_chart_crops", forbidden)
+    from test_remote_document_pipeline import DocumentAdapter
+    adapter = DocumentAdapter()
+    source_env.attachments.adapter_factory = lambda *_: adapter
     batch = source_env.service.create(source_env.owner, "synthetic-semantic-batch", [
         ImportItemIn(client_id="file", name="synthetic.pdf", mime="application/pdf")])
     path = tmp_path / "synthetic.pdf"
     path.write_bytes(pdf())
     source_env.service.upload(source_env.owner, batch["batch_id"], batch["items"][0]["item_id"], path)
     prepared = source_env.service.prepare(source_env.owner, batch["batch_id"])
-    assert any(d["purpose"] == "semantic" and d["config_id"] == model["config_id"]
-               for d in prepared["destinations"])
+    assert [(d["purpose"], d["config_id"]) for d in prepared["destinations"]] == [
+        ("document", config["config_id"])]
+    assert all(d["config_id"] != model["config_id"] for d in prepared["destinations"])
     with pytest.raises(Slice1Error):
         source_env.service.commit(source_env.owner, batch["batch_id"], "stale-manifest", True)
     committed = source_env.service.commit(source_env.owner, batch["batch_id"], prepared["manifest_hash"], True)
     from backend.materials.models import DocumentAttachmentRow
     with source_env.db.session() as session:
         row = session.get(DocumentAttachmentRow, committed["items"][0]["material_id"])
-        assert json.loads(row.result_json)["extraction_binding"]["targets"]["semantic"]["config_id"] == model["config_id"]
+        assert "extraction_binding" not in json.loads(row.result_json)
+        task_id, material_id = row.task_id, row.material_id
+    source_env.attachments.run(task_id)
+    assert source_env.service.view(source_env.owner, batch["batch_id"])["status"] == "ready"
+    assert source_env.attachments.markdown(material_id, source_env.owner)
+    with source_env.db.session() as session:
+        state = json.loads(session.get(DocumentAttachmentRow, material_id).result_json)
+        assert state["ocr_mode"] == "direct"
+        assert "question_bank" not in state
+        assert state["study_index"]["sections"]
+    assert adapter.calls == [("pdf", 1)]
+
+
+def test_attachment_configuration_does_not_automatically_select_question_models(env, monkeypatch):
+    from backend.materials.attachments import create_attachment_router
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(env.service, "config", lambda _: env.config)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Attachment configuration must not resolve question models.")
+    monkeypatch.setattr(env.service.questions, "defaults", forbidden)
+    app = FastAPI()
+    app.include_router(create_attachment_router(env.service, lambda _: SimpleNamespace(user_id=env.owner)))
+    with TestClient(app) as client:
+        response = client.get("/api/attachments/config")
+    assert response.status_code == 200
+    assert response.json()["config"]["extraction"] == {}
 
 
 def test_foreign_semantic_destination_rejected_before_calls(env):

@@ -93,3 +93,13 @@ def test_probe_requires_audio_and_subtitles(monkeypatch, result, state):
     monkeypatch.setattr(adapter, "synthesize", lambda *args, **kwargs: result)
     assert adapter.probe("text").state == state
     adapter.close()
+
+
+def test_insufficient_balance_is_nonretryable_quota_error(monkeypatch):
+    adapter=MiniMaxTTSAdapter(endpoint="https://voice.synthetic.test",voice_id="synthetic-voice")
+    monkeypatch.setattr(adapter,"_request",lambda *args,**kwargs:(200,
+        {"base_resp":{"status_code":1008,"status_msg":"insufficient balance"}},{}))
+    with pytest.raises(AdapterError) as caught:
+        adapter.synthesize("Synthetic source.")
+    assert caught.value.code=="MODEL_QUOTA_EXCEEDED"
+    adapter.close()

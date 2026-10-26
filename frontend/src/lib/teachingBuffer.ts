@@ -86,6 +86,12 @@ export class TeachingBuffer {
       if(entry.shown>beatOffset&&beat.pdf_focus)pdfFocus=beat.pdf_focus;
       beatOffset+=Array.from(beat.text).length;
     }
+    if(pdfFocus&&entry.board?.source_reading){
+      const base=(pdfFocus.regions||[]).filter((region:any)=>region.kind!=="emphasis");
+      const cues=(entry.board.source_cues||[]).filter((cue:any)=>entry.shown>cue.start&&entry.shown<=cue.end);
+      const figure=cues.find((cue:any)=>cue.pdf_focus);
+      pdfFocus=figure?.pdf_focus||{...pdfFocus,regions:[...base,...cues.flatMap((cue:any)=>cue.regions||[])]};
+    }
     const blocks = orderedBoardBlocks(entry.board?.presentation?.blocks || [],entry.beats);
     let visible = blocks, highlights: string[] = [];
     const progress = new Map<string, number>();

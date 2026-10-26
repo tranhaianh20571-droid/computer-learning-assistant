@@ -63,6 +63,23 @@ class RunGuard(AbstractCapability[AgentDeps]):
     async def before_run(self, ctx):
         ctx.deps.check()
 
+    async def on_output_validate_error(self, ctx, *, output_context, output, error):
+        from pydantic import ValidationError
+
+        if isinstance(error, ValidationError):
+            from ..logging_audit.logger import StructuredLogger
+            from ..logging_audit.exporter import HEALTH
+            from .validation import schema_constraint_reason
+
+            try:
+                StructuredLogger("api").log("model.output.validation", level="WARN",
+                    stage="generate", status="retry_scheduled", error_code="OUTPUT_INVALID",
+                    task_id=ctx.deps.task_id or None, attempt=ctx.deps.attempt,
+                    reason=schema_constraint_reason(error))
+            except Exception:
+                HEALTH.add("measurement_failures")
+        raise error
+
     async def before_model_request(self, ctx, request_context):
         ctx.deps.check()
         if self.logical_limit is not None and ctx.deps.budget.logical_requests >= self.logical_limit:
@@ -135,13 +152,13 @@ def _allowed_modes(source, model, *, text=False, streaming=False):
 
 def _build_agent(model, output_type, instructions, *, name, output_validator=None,
                  tools=None, capabilities=None, on_delta=None, logical_limit=None,
-                 on_request=None):
+                 on_request=None, output_retries=OUTPUT_RETRIES):
     context = Capability(id="bound_context", instructions=instructions)
     business_tools = Capability(id="business_tools")
     for tool in tools or ():
         business_tools.tool_plain(tool)
     agent = Agent(model, deps_type=AgentDeps, output_type=output_type,
-        retries=OUTPUT_RETRIES, name=name or "learning_agent",
+        retries=output_retries, name=name or "learning_agent",
         capabilities=[RunGuard(on_delta, logical_limit, on_request), context, business_tools,
             *(capabilities or ()), native_instrumentation()])
     if output_validator is not None:
@@ -197,6 +214,8 @@ async def execute_agent(source, output_cls, input: GenerationInput, deps: AgentD
                     # remains available; services may apply validated recipes.
                     enabled_tools = tools if model.profile.get("supports_tools", True) else None
                     agent = _build_agent(model, output_type, instructions, name=agent_name,
+                        output_retries=(min(deps.output_retries, max(0, deps.run_request_limit - 1))
+                            if deps.output_retries > OUTPUT_RETRIES else max(0, deps.output_retries)),
                         output_validator=output_validator, tools=enabled_tools,
                          capabilities=capabilities if model.profile.get("supports_tools", True) else None, on_delta=on_delta,
                         logical_limit=logical_limit,on_request=mark_progress)

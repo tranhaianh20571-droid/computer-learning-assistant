@@ -15,7 +15,9 @@ class TeachingBackground:
     def __init__(self,service):
         self.service=service;self.stop=Event();self.lock=Lock();self.pending={};self.thread=None
         self._last_reconcile=0
+        self.preparation_flow=getattr(service,"course_preparation",None)
         self.pools={"first":ThreadPoolExecutor(max_workers=1,thread_name_prefix="first-prewarm"),
+            "scope":ThreadPoolExecutor(max_workers=1,thread_name_prefix="scope-prepare"),
             "text":ThreadPoolExecutor(max_workers=2,thread_name_prefix="teaching-next"),
             "audio":ThreadPoolExecutor(max_workers=2,thread_name_prefix="teaching-audio"),
             "refine":ThreadPoolExecutor(max_workers=1,thread_name_prefix="lesson-refine")}
@@ -37,6 +39,10 @@ class TeachingBackground:
     def eligible(self,sess,task,*,authorization_checked=False):
         from ..slice1.errors import Slice1Error
         if task.cancel_requested:return False
+        if self.preparation_flow and not self.preparation_flow.eligible(sess,task):return False
+        if task.kind=="unit_scope_generate":
+            self.service.assessments._verify_boundary(sess,task.task_id)
+            return True
         if not authorization_checked:
             try:self.service.authorization.check_task(sess,task,audio=task.kind=='tts')
             except Slice1Error:return False
@@ -49,6 +55,8 @@ class TeachingBackground:
             if not self.service.preparation._model(cache.owner_user_id):return False
             if not cache.consumed_conversation_id:return True
             conv=sess.get(ConversationRow,cache.consumed_conversation_id)
+            if (cache.persistent and conv and not conv.deleted_at
+                    and conv.session_state=="active"):return True
         else:
             if ":followup:" in task.subject_id:return False
             conv=sess.get(ConversationRow,task.subject_id.split(":")[0])
@@ -71,7 +79,14 @@ class TeachingBackground:
         if task.kind!='lesson_first_prepare' and monotonic()-self.service.observed_sessions.get(conv.conversation_id,0)>90:return False
         checkpoint=sess.scalars(select(PlaybackCheckpointRow).where(PlaybackCheckpointRow.conversation_id==conv.conversation_id)
             .order_by(PlaybackCheckpointRow.client_seq.desc())).first()
-        if checkpoint and self.service._presentation(json.loads(checkpoint.board_state_json)).get('paused'):return False
+        if checkpoint and self.service._presentation(json.loads(checkpoint.board_state_json)).get('paused'):
+            cache=self.service.preparation._row_for_conv(sess,conv)
+            from .preparation_models import PreparationItemRow
+            durable=sess.scalar(select(PreparationItemRow.item_id).where(
+                PreparationItemRow.task_id==task.task_id,
+                PreparationItemRow.state.in_(("waiting","running"))))
+            if not (task.kind=="lesson_step_generate" and task.subject_id.split(":")[1]=="1"
+                    and ((cache and cache.persistent and cache.candidate_json!="{}") or durable)):return False
         if task.kind=="lesson_first_prepare":return True
         number=int(task.subject_id.split(":")[1]);current=max(1,checkpoint.step_no if checkpoint else 1)
         if number<current or not self.service._buffer_step_allowed(sess,conv,number):return False
@@ -89,7 +104,7 @@ class TeachingBackground:
         with self.lock:
             self.pending={task_id:value for task_id,value in self.pending.items() if not value[1].done()}
             counts={group:sum(value[0]==group for value in self.pending.values()) for group in self.pools}
-        self.service.tasks.sweep_expired_tasks(kinds=['lesson_first_prepare','lesson_step_generate','tts','lesson_plan_refine'])
+        self.service.tasks.sweep_expired_tasks(kinds=['lesson_first_prepare','lesson_step_generate','tts','lesson_plan_refine','unit_scope_generate'])
         from .recovery import recover_observed
         try:
             recover_observed(self)
@@ -97,7 +112,7 @@ class TeachingBackground:
             self._report_failure(self.service._controlled_failure(exc))
         with self.service.db.session() as sess:
             now=utcnow()
-            tasks=list(sess.scalars(select(LearningTaskRow).where(LearningTaskRow.kind.in_(['lesson_first_prepare','lesson_step_generate','tts','lesson_plan_refine']),
+            tasks=list(sess.scalars(select(LearningTaskRow).where(LearningTaskRow.kind.in_(['lesson_first_prepare','lesson_step_generate','tts','lesson_plan_refine','unit_scope_generate']),
                 LearningTaskRow.cancel_requested.is_(False),
                 LearningTaskRow.status.in_(['queued','leased','running']),LearningTaskRow.deadline_at>now,
                 (LearningTaskRow.status=='queued')|(LearningTaskRow.lease_until<=now)).order_by(LearningTaskRow.created_at).limit(100)))
@@ -108,10 +123,12 @@ class TeachingBackground:
                         .order_by(PlaybackCheckpointRow.client_seq.desc())):
                     positions.setdefault(point.conversation_id,max(1,point.step_no))
             def priority(task):
+                from .preparation_models import PreparationItemRow
+                item=sess.scalar(select(PreparationItemRow).where(PreparationItemRow.task_id==task.task_id)) if self.preparation_flow and self.preparation_flow.enabled else None
                 parts=task.subject_id.split(":")
                 distance=(max(0,int(parts[1])-positions.get(parts[0],1))
                     if task.kind in ("lesson_step_generate","tts") and parts[1].isdigit() else 0)
-                return (task.lane!='interactive',task.kind=='lesson_plan_refine',
+                return (task.lane!='interactive',item.priority if item else -3,task.kind=='lesson_plan_refine',
                     task.kind=='lesson_first_prepare',distance,task.kind!='tts',task.created_at)
             tasks.sort(key=priority)
             live=list(sess.scalars(select(LearningTaskRow).where(LearningTaskRow.status.in_(['leased','running']),
@@ -123,15 +140,16 @@ class TeachingBackground:
             from ..slice1.errors import Slice1Error
             for task in tasks:
                 group=('first' if task.kind=='lesson_first_prepare' else 'audio' if task.kind=='tts'
-                    else 'refine' if task.kind=='lesson_plan_refine' else 'text')
-                limit=1 if group in ('first','refine') else 2
+                    else 'refine' if task.kind=='lesson_plan_refine' else 'scope' if task.kind=='unit_scope_generate' else 'text')
+                limit=1 if group in ('first','refine','scope') else 2
                 if counts[group]>=limit or task.task_id in self.pending:continue
                 try:
                     with self.service.db.session() as check:
                         live_task=check.get(LearningTaskRow,task.task_id,with_for_update=True)
                         if not live_task or live_task.status not in ('queued','leased','running'):
                             continue
-                        self.service.authorization.check_task(check,live_task,audio=live_task.kind=='tts')
+                        if live_task.kind!="unit_scope_generate":
+                            self.service.authorization.check_task(check,live_task,audio=live_task.kind=='tts')
                         if not self.eligible(check,live_task,authorization_checked=True):
                             continue
                 except Slice1Error as exc:
@@ -182,16 +200,16 @@ class TeachingBackground:
                             blueprint = sess.get(LessonBlueprintRow, conv.conversation_id)
                             pending_scope = bool(blueprint and json.loads(blueprint.context_json).get("_scope_pending"))
                             lesson = sess.get(LessonRow, conv.lesson_id) if pending_scope else None
-                        if lesson:
+                        if lesson and not (self.preparation_flow and self.preparation_flow.enabled):
                             self.service.assessments.scopes.resume(conv.course_id, lesson.unit_id, conv.owner_user_id)
                     self.service.preparation.prepare_next(conv.conversation_id,conv.owner_user_id)
                 except Exception as exc:self._report_failure(self.service._controlled_failure(exc))
-            if not counts['text'] and not counts['audio']:
-                try:self.service.preparation.reconcile(limit=4)
-                except Exception as exc:self._report_failure(self.service._controlled_failure(exc))
+            try:self.service.preparation.reconcile(limit=4)
+            except Exception as exc:self._report_failure(self.service._controlled_failure(exc))
 
     def _execute(self,task_id,group):
         try:
+            if group=='scope':return self.service.assessments.scopes._run(task_id)
             if group=='first':return self.service.preparation.run(task_id)
             if group=='audio':return self.service.run_tts(task_id)
             if group=='refine':return self.service.preparation.run_refinement(task_id)

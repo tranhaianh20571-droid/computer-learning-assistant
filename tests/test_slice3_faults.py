@@ -250,6 +250,9 @@ class TestFaultTeachingGate:
         assert confirmed.status_code == 200
         overview = client.get(f"/api/routes/{route_id}/overview", headers=auth_headers(token)).json()
         course_id = overview["stages"][0]["courses"][0]["course_id"]
+        from backend.planning.models import CourseRow
+        with env["database"].session() as sess:
+            sess.get(CourseRow, course_id).current_outline_version_id = None
         # 门槛：大纲未确认 → 受控错误；路线总览不受影响
         blocked = client.post(f"/api/courses/{course_id}/lessons/les_x/start",
                               headers=auth_headers(token))

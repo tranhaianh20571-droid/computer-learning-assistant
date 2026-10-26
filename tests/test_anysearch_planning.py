@@ -265,7 +265,8 @@ def test_route_to_course_conversion_precedes_search_binding(env, monkeypatch):
     assert result["draft"]["applied"]
     assert observed == [("course", state.target_id)]
     assert state.target_id != "route_synthetic"
-    assert search.queries == ["数据库基础"]
+    assert 1 <= len(search.queries) <= 3
+    assert all(query.strip() and "route_synthetic" not in query for query in search.queries)
 
 
 @pytest.mark.parametrize("code", ["TASK_CANCELLED", "STALE_RESULT_DISCARDED"])

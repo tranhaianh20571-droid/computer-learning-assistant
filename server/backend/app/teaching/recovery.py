@@ -19,6 +19,7 @@ MAX_ATTEMPTS = 6
 def recover_observed(background):
     from .service import MAX_STEPS_PER_LESSON
     service = background.service
+    from .preparation_models import PreparationItemRow
     observed = [ident for ident, last in list(service.observed_sessions.items()) if monotonic() - last <= 90]
     if not observed:
         return
@@ -27,9 +28,13 @@ def recover_observed(background):
         for ident in observed:
             checkpoint = session.scalar(select(PlaybackCheckpointRow).where(
                 PlaybackCheckpointRow.conversation_id == ident).order_by(PlaybackCheckpointRow.client_seq.desc()))
+            from .learning_models import LessonBlueprintRow
+            from ..planning.models import load_json_field
+            blueprint = session.get(LessonBlueprintRow, ident)
+            cap = 240 if blueprint and load_json_field(blueprint.plan_json, {}).get("kind") == "source_reading" else MAX_STEPS_PER_LESSON
             current = max(1, checkpoint.step_no if checkpoint else 1)
             subjects.extend(LearningTaskRow.subject_id.startswith(f"{ident}:{number}:", autoescape=True)
-                for number in range(current, MAX_STEPS_PER_LESSON + 1))
+                for number in range(current, cap + 1))
         ids = list(session.scalars(select(LearningTaskRow.task_id).join(TaskStateRow,
             TaskStateRow.task_id == LearningTaskRow.task_id).where(
                 or_(*subjects),
@@ -37,7 +42,9 @@ def recover_observed(background):
                 LearningTaskRow.status.in_(("failed", "expired")),
                 LearningTaskRow.cancel_requested.is_(False),
                 LearningTaskRow.attempt < MAX_ATTEMPTS, LearningTaskRow.generation < MAX_ATTEMPTS,
-                TaskStateRow.error_code.in_(RETRY_CODES),
+                ~select(PreparationItemRow.item_id).where(
+                    PreparationItemRow.task_id==LearningTaskRow.task_id).exists() if getattr(service,"course_preparation",None) and service.course_preparation.enabled else True,
+                TaskStateRow.error_code.in_(RETRY_CODES | {"OUTPUT_INVALID"}),
             ).order_by(LearningTaskRow.updated_at).limit(32)))
     for ident in ids:
         with service.db.session() as session:
@@ -47,9 +54,20 @@ def recover_observed(background):
                     or task.idempotency_key.startswith("artifact-repair:")):
                 continue
             event = session.get(TaskStateRow, ident)
-            if not event or event.error_code not in RETRY_CODES:
+            if not event or event.error_code not in RETRY_CODES | {"OUTPUT_INVALID"}:
                 continue
             conv_id = task.subject_id.split(":")[0]
+            if event.error_code == "OUTPUT_INVALID":
+                from ..planning.models import ConversationRow
+
+                conv = session.get(ConversationRow, conv_id)
+                cached = (service.preparation.for_conversation(conv, 1)
+                          if conv and task.kind == "lesson_step_generate"
+                          and task.subject_id.split(":")[1] == "1" else None)
+                if (not cached or not cached.persistent) and (
+                        task.kind != "lesson_step_generate"
+                        or max(task.attempt, task.generation) >= 3):
+                    continue
             if monotonic() - service.observed_sessions.get(conv_id, 0) > 90:
                 continue
             updated = task.updated_at

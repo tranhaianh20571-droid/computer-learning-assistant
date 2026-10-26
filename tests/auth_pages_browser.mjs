@@ -41,6 +41,8 @@ try {
           return route.fulfill({ status: isGuest ? 401 : 200, json: isGuest ? {} : principal });
         }
         if (pathname === "/api/navigation") return route.fulfill({ json: {} });
+        if (pathname === "/api/planning/current") return route.fulfill({ json: { planning: null } });
+        if (pathname === "/api/market/profile") return route.fulfill({ json: { username: "member" } });
         if (pathname === "/api/materials") return route.fulfill({ json: { data: [] } });
         unexpected.push({ method: request.method(), pathname });
         return route.fulfill({ status: 404, json: {} });
@@ -70,8 +72,14 @@ try {
             await page.screenshot({ path: path.join(output, `${identity}-${width}.png`), fullPage: true });
           }
           if (width === 1280) {
-            // Tab from the last form link to the shared exit, then activate with Enter.
-            await page.locator(".auth-col a").last().focus();
+            // Registration is now a button; tab from the preceding visible control.
+            await exit.evaluate(element => {
+              const controls = [...element.closest(".auth-col").querySelectorAll("a[href],button,input")]
+                .filter(control => !control.disabled && control.getClientRects().length);
+              const previous = controls[controls.indexOf(element) - 1];
+              if (!previous) throw new Error("Auth exit has no preceding form control");
+              previous.focus();
+            });
             await page.keyboard.press("Tab");
             assert.ok(await exit.evaluate((element) => element === document.activeElement),
               `${identity} ${route}: exit is not next in keyboard order`);
@@ -83,7 +91,7 @@ try {
           await page.locator(".app").waitFor({ state: "visible" });
           assert.equal(await page.locator(".auth-col").count(), 0);
           assert.ok(await page.getByRole("textbox", { name: "学习目标", exact: true }).isEnabled());
-          assert.equal(await page.locator(".who").innerText(), isGuest ? "访客模式" : principal.email);
+          assert.equal(await page.locator(".who").innerText(), isGuest ? "访客模式" : "member");
           assert.equal(await page.getByRole("button", { name: "退出登录", exact: true }).count(), isGuest ? 0 : 1);
           checks.push(`${identity}_${width}_${route.slice(1)}`);
         }

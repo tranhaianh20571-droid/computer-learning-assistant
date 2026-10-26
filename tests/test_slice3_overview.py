@@ -159,6 +159,9 @@ class TestCourseOverview:
         # 找一个未确认大纲的课程
         overview = client.get(f"/api/routes/{route_id}/overview", headers=auth_headers(token)).json()
         other = [c for s in overview["stages"] for c in s["courses"] if c["course_id"] != course_id][0]
+        from backend.planning.models import CourseRow
+        with env["database"].session() as sess:
+            sess.get(CourseRow, other["course_id"]).current_outline_version_id = None
         r = client.post(
             f"/api/courses/{other['course_id']}/lessons/les_x/start", headers=auth_headers(token)
         )

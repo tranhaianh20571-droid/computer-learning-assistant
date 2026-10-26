@@ -1,10 +1,11 @@
 import {useEffect,useLayoutEffect,useRef,useState} from "react";
-import {ArrowLeft,ArrowRight,Download,FileText,Focus,Image as ImageIcon,Minus,Plus,RotateCcw} from "lucide-react";
+import {ArrowLeft,ArrowRight,Download,FileText,Focus,Image as ImageIcon,Minus,Plus,RotateCcw,LocateFixed} from "lucide-react";
 import {classroomApi} from "../api";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
+export type PdfFocusRegion={page_no:number;bbox:[number,number,number,number];kind?:"paragraph"|"emphasis"};
 export type PdfFocus={material_id:string;sha256:string;target_id:string;page_no:number;page_count:number;
-  text:string;bbox:[number,number,number,number]|null;precision:string;
+  text:string;bbox:[number,number,number,number]|null;precision:string;regions?:PdfFocusRegion[];
   crop_sha256?:string;block_no?:number;crop_width?:number;crop_height?:number};
 
 type LessonProps={conversation:string;focus:PdfFocus;active:boolean;
@@ -61,6 +62,7 @@ function PdfOriginal({conversation,focus,active,onTarget,onPainted,onCrop}:Lesso
   const [following,setFollowing]=useState(true),[error,setError]=useState(""),[retry,setRetry]=useState(0);
   const [size,setSize]=useState({width:640,height:900}),[width,setWidth]=useState(640),[painted,setPainted]=useState("");
   const canvas=useRef<HTMLCanvasElement>(null),viewport=useRef<HTMLDivElement>(null),box=useRef<HTMLDivElement>(null);
+  const regions=(focus.regions||[]).filter(region=>region.page_no===focus.page_no);
   const userScroll=useRef(false),programmatic=useRef(false);
   const key=`${focus.material_id}:${focus.sha256}`;
   const url=classroomApi.original(conversation,focus.material_id,focus.sha256);
@@ -79,7 +81,7 @@ function PdfOriginal({conversation,focus,active,onTarget,onPainted,onCrop}:Lesso
     const update=()=>setWidth(Math.max(220,node.clientWidth-24));
     update();const observer=new ResizeObserver(update);observer.observe(node);return()=>observer.disconnect();
   },[active]);
-  useEffect(()=>{if(following)setPage(focus.page_no);},[focus.target_id,focus.material_id,following]);
+  useEffect(()=>{if(following)setPage(focus.page_no);},[focus.target_id,focus.material_id,focus.page_no,following]);
   useEffect(()=>{
     if(!document||!canvas.current||!active)return;
     let cancelled=false,render:any;
@@ -96,19 +98,22 @@ function PdfOriginal({conversation,focus,active,onTarget,onPainted,onCrop}:Lesso
     }).catch((error:any)=>{if(!cancelled&&error?.name!=="RenderingCancelledException")setError("此页渲染失败，可重试。");});
     return()=>{cancelled=true;render?.cancel();};
   },[document,page,width,zoom,active,key,onPainted]);
-  const pointed=page===focus.page_no&&painted===`${key}:${page}`;
+  const pointed=page===focus.page_no&&painted===`${key}:${page}`&&(Boolean(focus.bbox)||regions.length>0);
+  const scrollRegion=regions[0]?.bbox||focus.bbox;
+  const pointerIndex=regions.findIndex(region=>region.kind==="emphasis");
+  const targetRegion=regions[pointerIndex<0?0:pointerIndex];
   useLayoutEffect(()=>{
     const node=viewport.current;
     if(!node||!following||!pointed||!active)return;
     programmatic.current=true;
     userScroll.current=false;
-    const y=focus.bbox?focus.bbox[1]*size.height:0,x=focus.bbox?focus.bbox[0]*size.width:0;
+    const y=scrollRegion?scrollRegion[1]*size.height:0,x=scrollRegion?scrollRegion[0]*size.width:0;
     node.scrollTop=Math.max(0,y-node.clientHeight*.3);node.scrollLeft=Math.max(0,x-24);
     const frame=requestAnimationFrame(()=>{programmatic.current=false;});
     return()=>cancelAnimationFrame(frame);
-  },[pointed,focus.target_id,following,size,active]);
+  },[pointed,focus.target_id,following,size,active,scrollRegion]);
   useEffect(()=>{
-    if(!active||!pointed||!following||!focus.bbox){onTarget(null);return;}
+    if(!active||!pointed||!following||(!targetRegion&&!focus.bbox)){onTarget(null);return;}
     const node=viewport.current;if(!node)return;
     const update=()=>{
       const rect=box.current?.getBoundingClientRect(),view=node.getBoundingClientRect();
@@ -119,7 +124,7 @@ function PdfOriginal({conversation,focus,active,onTarget,onPainted,onCrop}:Lesso
     update();node.addEventListener("scroll",update,{passive:true});
     window.addEventListener("resize",update);
     return()=>{node.removeEventListener("scroll",update);window.removeEventListener("resize",update);};
-  },[active,pointed,following,focus.target_id,focus.bbox,size,onTarget]);
+  },[active,pointed,following,focus.target_id,focus.page_no,focus.bbox,focus.regions,size,onTarget,targetRegion]);
   return <div className="pdf-lesson" data-pdf-target={pointed?focus.target_id:""} data-pdf-following={following}>
     <div className="pdf-tools">
       {onCrop&&<button aria-label="查看题图裁片" title="查看题图" onClick={onCrop}><ImageIcon size={17}/></button>}
@@ -128,7 +133,7 @@ function PdfOriginal({conversation,focus,active,onTarget,onPainted,onCrop}:Lesso
       <button aria-label="下一页原文" title="下一页" disabled={page>=(document?.numPages||focus.page_count)} onClick={()=>{setFollowing(false);setPage(p=>p+1);}}><ArrowRight size={17}/></button>
       <button aria-label="缩小原文" title="缩小" disabled={zoom<=.5} onClick={()=>setZoom(value=>Math.max(.5,value-.25))}><Minus size={17}/></button>
       <button aria-label="放大原文" title="放大" disabled={zoom>=3} onClick={()=>setZoom(value=>Math.min(3,value+.25))}><Plus size={17}/></button>
-      <button aria-label="回到原文讲解位置" title="回到讲解位置" onClick={()=>{setFollowing(true);setPage(focus.page_no);}}><Focus size={17}/></button>
+      <button aria-label="适应原文画面" title="适应画面" onClick={()=>setZoom(1)}><Focus size={17}/></button>
       <a href={`${url}/download`} download="source.pdf" title="下载原 PDF" aria-label="下载原 PDF"><Download size={17}/></a>
     </div>
     {error?<div role="alert">{error}<button title="重试原文" aria-label="重试原文" onClick={()=>setRetry(value=>value+1)}><RotateCcw size={17}/></button></div>:null}
@@ -140,10 +145,22 @@ function PdfOriginal({conversation,focus,active,onTarget,onPainted,onCrop}:Lesso
       onKeyDown={event=>{if(["ArrowUp","ArrowDown","PageUp","PageDown","Home","End"," "].includes(event.key))setFollowing(false);}}>
       <div className="pdf-page" style={size}>
         <canvas ref={canvas} aria-label={`原文第 ${page} 页`} style={size}/>
-        {pointed&&focus.bbox&&<div className="pdf-focus-box" ref={box} aria-label="当前讲解原文区域"
+        {pointed&&regions.map((region,index)=><div key={`${focus.target_id}:${index}`}
+          className={`pdf-focus-region pdf-focus-region--${region.kind==="emphasis"?"emphasis":"paragraph"}`}
+          ref={index===(pointerIndex<0?0:pointerIndex)?node=>{if(node)box.current=node;}:undefined}
+          aria-label={region.kind==="emphasis"?"当前讲解强调区域":"当前讲解段落区域"}
+          data-pdf-page={region.page_no} data-region-kind={region.kind||"paragraph"}
+          style={{left:region.bbox[0]*size.width,top:region.bbox[1]*size.height,
+            width:(region.bbox[2]-region.bbox[0])*size.width,height:(region.bbox[3]-region.bbox[1])*size.height}}/>)}
+        {pointed&&focus.bbox&&<div className="pdf-focus-box" ref={regions.length?undefined:box} aria-label="当前讲解原文区域"
           style={{left:focus.bbox[0]*size.width,top:focus.bbox[1]*size.height,
             width:(focus.bbox[2]-focus.bbox[0])*size.width,height:(focus.bbox[3]-focus.bbox[1])*size.height}}/>}
       </div>
     </div>
+    {active&&page!==focus.page_no&&<button className="pdf-return" aria-label="回到原文讲解位置"
+      title={`返回讲解页 · 第 ${focus.page_no} 页`}
+      onClick={()=>{userScroll.current=false;setFollowing(true);setPage(focus.page_no);}}>
+      <LocateFixed size={17}/>
+    </button>}
   </div>;
 }

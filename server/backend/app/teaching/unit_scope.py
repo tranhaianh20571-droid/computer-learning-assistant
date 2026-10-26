@@ -276,7 +276,7 @@ class UnitScopeService:
                 UnitScopeRow.unit_id == unit_id, UnitScopeRow.input_hash == current))
             return self._view(sess, row) if row else {"status": "not_generated", "scope": None}
 
-    def generate(self, course_id, unit_id, owner):
+    def generate(self, course_id, unit_id, owner, *, dispatch=True):
         with self.db.session() as sess:
             course, unit = self.assessment._unit(sess, course_id, unit_id, owner)
             sess.refresh(course, with_for_update=True)
@@ -284,10 +284,29 @@ class UnitScopeService:
             fingerprint = digest(context)
             row = sess.scalar(select(UnitScopeRow).where(UnitScopeRow.owner_user_id == owner,
                 UnitScopeRow.unit_id == unit_id, UnitScopeRow.input_hash == fingerprint))
+            if row is not None and not dispatch and self.teaching.configs:
+                from ..agents.model_routing import TaskModelRoleRow, role_config
+                from ..agents.task_binding import AgentBudgetRow
+                previous=sess.get(LearningTaskRow,row.task_id)
+                pinned=sess.get(TaskModelRoleRow,(row.task_id,"planning"))
+                current=role_config(self.teaching.configs,owner,"planning")
+                if (previous and previous.status in ("failed","expired") and not previous.cancel_requested
+                        and pinned and current and (pinned.config_id,pinned.config_version)!=(
+                            current["config_id"],current["config_version"])):
+                    created=self.tasks.create_task(owner_user_id=owner,kind="unit_scope_generate",
+                        subject_id=course_id,idempotency_key="scope-config:"+digest([
+                            owner,unit_id,fingerprint,current["config_id"],current["config_version"]]),
+                        stage="generate",lane="maintenance",deadline_seconds=86400,session=sess)
+                    old=sess.get(AgentBudgetRow,row.task_id)
+                    budget=sess.get(AgentBudgetRow,created["task_id"])
+                    if old:
+                        for name in ("logical_requests","wire_requests","tool_calls","request_limit","tool_limit"):
+                            setattr(budget,name,getattr(old,name))
+                    row.task_id=created["task_id"]
             if row is None:
                 task = self.tasks.create_task(owner_user_id=owner, kind="unit_scope_generate",
                     subject_id=course_id, idempotency_key="unit-scope:" + digest([owner, unit_id, fingerprint]),
-                    stage="generate", lane="maintenance", deadline_seconds=2400, session=sess)
+                    stage="generate", lane="maintenance", deadline_seconds=86400 if not dispatch else 2400, session=sess)
                 row = UnitScopeRow(scope_id="scope_" + uuid.uuid4().hex[:16], owner_user_id=owner,
                     course_id=course_id, unit_id=unit_id, outline_version_id=unit.outline_version_id,
                     input_hash=fingerprint, task_id=task["task_id"],
@@ -317,7 +336,8 @@ class UnitScopeService:
             if not bound:
                 self.prompts.bind_for_task(task_id, name,
                     agent_code_version=str(SCOPE_POLICY_VERSION), output_schema_version=schema)
-        self.kick(task_id)
+        if dispatch:
+            self.kick(task_id)
         return {"scope_id": ident, "task_id": task_id}
 
     def retry(self, course_id, unit_id, owner):
@@ -363,6 +383,13 @@ class UnitScopeService:
         try:
             lease = self.tasks.claim(task_id, lease_owner="unit-scope", lease_seconds=600,
                                      allow_reclaim_active=False)
+            from .preparation_models import PreparationItemRow
+            from datetime import timedelta
+            with self.db.session() as sess:
+                if self.teaching.course_preparation.enabled and sess.scalar(
+                        select(PreparationItemRow.item_id).where(PreparationItemRow.task_id==task_id)):
+                    task=sess.get(LearningTaskRow,task_id,with_for_update=True)
+                    task.deadline_at=min(self.tasks._as_utc(task.deadline_at),utcnow()+timedelta(seconds=2400))
             with ThreadPoolExecutor(max_workers=1) as worker:
                 future = worker.submit(copy_context().run, self._compute, task_id)
                 while True:
@@ -381,6 +408,7 @@ class UnitScopeService:
                                      duration_ms=0, publish=publish)
         except Exception as exc:
             if lease:
+                self.teaching.course_preparation.note_failure(task_id,exc)
                 from ..logging_audit.contracts import validate_error_code
                 try:
                     code = self.teaching._controlled_failure(exc)
@@ -406,6 +434,7 @@ class UnitScopeService:
             row = self._owned(sess, row.scope_id, row.owner_user_id)
             context, owner = load_json_field(row.context_json, {}), row.owner_user_id
             search_checkpoint = load_json_field(row.scope_json, {}).get("_material_search")
+            stage_checkpoint = load_json_field(row.scope_json, {}).get("_preparation", {})
             from ..tasks.service import Lease
             active_task = sess.get(LearningTaskRow, task_id)
             search_lease = Lease(active_task.task_id, active_task.attempt_id, active_task.lease_token,
@@ -446,6 +475,15 @@ class UnitScopeService:
         try:
             deps = replace(deps_for_source(adapter), omit_content_trace=True,
                            on_process=lambda *_args, **_kwargs: None)
+            def save_stage(**values):
+                deps.check()
+                with self.db.session() as sess:
+                    self.tasks.validate_lease(search_lease,actor_id=owner,session=sess)
+                    current=sess.scalar(select(UnitScopeRow).where(UnitScopeRow.task_id==task_id))
+                    self._owned(sess,current.scope_id,owner)
+                    saved=load_json_field(current.scope_json,{})
+                    saved["_preparation"]={**saved.get("_preparation",{}),**values}
+                    current.scope_json=json.dumps(saved,ensure_ascii=False)
             tools = []
             material_search = None
             if context.get("scope_version", 1) >= 8 and context["source_snapshot"].get("material_ids"):
@@ -465,7 +503,9 @@ class UnitScopeService:
                             # Lock/check the active lease in the same transaction as the write.
                             self.tasks.validate_lease(search_lease,
                                 actor_id=owner, session=sess)
-                            current.scope_json = json.dumps({"_material_search": value}, ensure_ascii=False)
+                            saved=load_json_field(current.scope_json,{})
+                            saved["_material_search"]=value
+                            current.scope_json = json.dumps(saved, ensure_ascii=False)
 
                     def decide_evidence(evidence_context):
                         def validate_evidence(_, output):
@@ -500,16 +540,23 @@ class UnitScopeService:
                 plan_prompt = self.prompts.resolve_for_task(
                     task_id, "unit_scope_coverage_v2" if review_name == "unit_scope_review_v5"
                     else "unit_scope_coverage_v1")
-                planned = unit_scope_coverage_agent.plan_coverage(
-                    adapter, UnitScopeCoverageInput.from_messages([
-                        {"role": "system", "content": plan_prompt["template_snapshot"] + "\n" + LEARNING_FOCUS_POLICY +
-                         ("\n" + SCOPE_MATERIAL_POLICY if material_search else "")},
-                        {"role": "user", "content": json.dumps(
-                            {"stage": "scope_coverage_plan", "context": context}, ensure_ascii=False)}]),
-                    deps, output_validator=lambda _, output: validate_coverage_plan(output, context),
-                    timeout_seconds=600, tools=tools)
-                plan = planned.payload
+                if stage_checkpoint.get("coverage"):
+                    plan=validate_coverage_plan(ScopeCoveragePlan.model_validate(stage_checkpoint["coverage"]),context)
+                else:
+                    planned = unit_scope_coverage_agent.plan_coverage(
+                        adapter, UnitScopeCoverageInput.from_messages([
+                            {"role": "system", "content": plan_prompt["template_snapshot"] + "\n" + LEARNING_FOCUS_POLICY +
+                             ("\n" + SCOPE_MATERIAL_POLICY if material_search else "")},
+                            {"role": "user", "content": json.dumps(
+                                {"stage": "scope_coverage_plan", "context": context}, ensure_ascii=False)}]),
+                        deps, output_validator=lambda _, output: validate_coverage_plan(output, context),
+                        timeout_seconds=600, tools=tools)
+                    plan = planned.payload
+                    save_stage(coverage=plan.model_dump())
             generation_context = {**context, **({"coverage_plan": plan.model_dump()} if plan else {})}
+            if stage_checkpoint.get("candidate"):
+                candidate=validate_scope(UnitScope.model_validate(stage_checkpoint["candidate"]),context)
+                seed_hash=digest(candidate.model_dump())
             if candidate is None:
                 result = unit_scope_agent.plan_scope(adapter, UnitScopeInput.from_messages([
                     {"role": "system", "content": prompt},
@@ -518,6 +565,7 @@ class UnitScopeService:
                     timeout_seconds=900, tools=tools)
                 candidate = result.payload
                 seed_hash = digest(candidate.model_dump())
+                save_stage(candidate=candidate.model_dump())
             review_prompt = self.prompts.resolve_for_task(
                 task_id, review_name)
             def validate_review(_, review):

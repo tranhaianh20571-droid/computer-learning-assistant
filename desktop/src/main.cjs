@@ -14,7 +14,7 @@ function openLink(value) {
   try { window.webContents.send("browser:request", externalUrl(value)); } catch {}
 }
 
-let window, child, server, origin, account, accountListener, running = false, quitting = false;
+let window, child, server, origin, account, accountListener, classroomMedia, running = false, quitting = false;
 const browserChoices = new Map();
 let status = { stage: "checking" };
 const resources = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..");
@@ -215,6 +215,7 @@ else {
       title: "学习助手伙伴", backgroundColor: "#f4f5f3",
       webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: true, nodeIntegration: false } });
     window.setMenuBarVisibility(false);
+    classroomMedia=require("./classroom-media.cjs").installClassroomMedia({window,origin:()=>origin,applicationFrame});
     window.webContents.setWindowOpenHandler(({ url }) => {
       if (url.startsWith("https://")) openLink(url);
       return { action: "deny" };
@@ -257,8 +258,9 @@ else {
   app.on("before-quit", event => {
     if (quitting) return;
     event.preventDefault(); quitting = true;
-    notify({ stage: "stopping" });
-    void stop().finally(() => app.quit());
+    void Promise.resolve(classroomMedia?.beforeClose()).then(() => {
+      notify({ stage: "stopping" });return stop();
+    }).finally(() => app.quit());
   });
   app.on("window-all-closed", () => app.quit());
 }

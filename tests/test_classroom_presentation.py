@@ -81,13 +81,18 @@ def test_real_agent_pipeline_saves_beats_in_authorized_workspace(env):
         supports_text_stream=True
         model_name="synthetic-beats"
         def stream(self,messages):
+            context = next(json.loads(message["content"]) for message in messages
+                if message["role"] == "user" and '"current_stage"' in message.get("content", ""))
             beats=json.loads(json.dumps(BEATS))
             beats[0]["blocks"]=[{**BLOCK,"title":"","columns":["键","值"],"rows":[["键","值"]]}]
             beats[0]["cues"]=[{"block_id":"mapping","target":f"cell:{row}:{column}","quote":"键和值"}
                 for row in range(2) for column in range(2)]
             beats[1]["blocks"][0]["text"]="每个键唯一"
             beats[1]["cues"]=[{"block_id":"boundary","target":"text","quote":"每个键唯一"}]
-            payload=candidate(alignment_version=1,beats=beats,phase="intuition",covered_goal_ids=["g1"],lesson_finished=False)
+            payload=candidate(alignment_version=1,beats=beats,phase=context["current_stage"]["phase"],
+                covered_goal_ids=context["current_stage"]["goal_ids"],
+                covered_scope_capability_ids=context["current_stage"].get("scope_capability_ids", []),
+                lesson_finished=False)
             value=json.dumps({"steps":[payload]},ensure_ascii=False)
             for pos in range(0,len(value),17):yield value[pos:pos+17]
     state.teaching.model_adapter_factory=lambda *args:Adapter()

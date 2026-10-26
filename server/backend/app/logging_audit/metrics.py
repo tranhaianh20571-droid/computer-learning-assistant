@@ -163,7 +163,7 @@ _TASK_DIAGNOSTICS: Dict[Tuple[str, str], int] = {}
 def record_task_diagnostic(*, reason: str, error_code: str, task_id=None, attempt=None) -> None:
     """Runtime diagnostics are best-effort, independent of terminal transactions."""
     from .contracts import normalize_error_code
-    reason = reason if reason in ("unknown_error_code", "worker_recovery_retry", "worker_recovery_failed") else "other"
+    reason = reason if reason in ("unknown_error_code", "worker_recovery_retry", "worker_recovery_failed", "resource_wait") else "other"
     error_code = normalize_error_code(error_code)
     with _TASK_DIAGNOSTICS_LOCK:
         key = (reason, error_code)

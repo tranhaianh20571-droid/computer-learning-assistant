@@ -23,9 +23,12 @@ class FollowupIn(BaseModel):
     content: str = Field(min_length=1, max_length=1000)
     idempotency_key: str = Field(min_length=1, max_length=128)
 
+class BackwardSeekIn(CheckpointIn):
+    expected_seq: int = Field(ge=1)
+
 
 class AudioIn(BaseModel):
-    step_no: int = Field(ge=1,le=24)
+    step_no: int = Field(ge=1,le=240)
 
 
 class FeynmanStartIn(BaseModel):
@@ -68,9 +71,17 @@ def create_teaching_router(
     router = APIRouter(tags=["slice4"])
     from .interactive import create_interactive_router
     router.include_router(create_interactive_router(teaching, resolve_user))
+    from .recordings import create_recording_router
+    router.include_router(create_recording_router(teaching, resolve_user))
 
     def _user(request: Request):
         return resolve_user(request)
+
+    @router.post("/api/teaching/{conversation_id}/seek-backward")
+    def seek_backward(conversation_id: str, body: BackwardSeekIn, request: Request):
+        return teaching.save_checkpoint(conversation_id, actor_id=_user(request).user_id,
+            client_seq=body.client_seq, step_no=body.step_no, position_ms=body.position_ms,
+            board_state=body.board_state, expected_seq=body.expected_seq, seek_back=True)
 
     @router.get("/api/teaching/{conversation_id}/knowledge")
     def knowledge(conversation_id: str, request: Request, after: int = 0, limit: int = 30):

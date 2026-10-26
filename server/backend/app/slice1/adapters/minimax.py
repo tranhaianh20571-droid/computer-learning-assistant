@@ -166,11 +166,16 @@ class MiniMaxTTSAdapter(AdapterBase):
         """返回含音频 hex、字幕与文本哈希的受控结果（不含原始供应商异常）。"""
         payload = self.build_request(text, voice_id=voice_id, emotion=emotion, **options)
         status, body, headers = self._request("POST", self._tts_url(), json_body=payload)
-        self._map_status(status, body)
+        try:
+            self._map_status(status, body)
+        except Exception as exc:
+            if status==429:
+                exc.retry_after=headers.get("retry-after",headers.get("Retry-After",""))[:100]
+            raise
         if isinstance(body,dict) and isinstance(body.get("base_resp"),dict) and str(body["base_resp"].get("status_code",0))!="0":
             from .base import AdapterError
             code=str(body["base_resp"]["status_code"])
-            raise AdapterError("credential_invalid" if code in ("1004","2049") else "rate_limited" if code=="1002" else "capability_test_failed")
+            raise AdapterError("credential_invalid" if code in ("1004","2049") else "rate_limited" if code=="1002" else "MODEL_QUOTA_EXCEEDED" if code=="1008" else "capability_test_failed")
         data = body.get("data") if isinstance(body, dict) else None
         audio_hex = ""
         if isinstance(data, dict):

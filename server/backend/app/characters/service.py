@@ -548,16 +548,16 @@ def segment_character(sess, conversation_id, step_no, *, freeze=False):
     return dict(card_id=binding.card_id, revision=binding.revision, profile=json.loads(binding.profile_json))
 
 
-def apply_default_mentor(sess, conversation):
+def default_mentor_snapshot(sess, owner):
     from .defaults import effective_preference
-    preference,builtin = effective_preference(sess, conversation.owner_user_id)
+    preference,builtin = effective_preference(sess, owner)
     if not preference or not preference.card_id:
         return
     card = sess.get(CharacterCardRow, preference.card_id)
     if not card or card.deleted_at:
         return
-    if not builtin and card.owner_user_id != conversation.owner_user_id and (
-            not card.published_revision or not sess.get(CharacterLibraryRow, (conversation.owner_user_id, card.card_id))):
+    if not builtin and card.owner_user_id != owner and (
+            not card.published_revision or not sess.get(CharacterLibraryRow, (owner, card.card_id))):
         return
     revision = sess.get(CharacterRevisionRow, (card.card_id, preference.revision))
     if revision:
@@ -567,16 +567,23 @@ def apply_default_mentor(sess, conversation):
             profile["_persona"] = package
         from .models import CharacterVoiceChoiceRow
         from .voice_policy import automatic_speaking_style
-        choice = sess.get(CharacterVoiceChoiceRow, (conversation.owner_user_id, card.card_id))
+        choice = sess.get(CharacterVoiceChoiceRow, (owner, card.card_id))
         profile["speaking_style"] = automatic_speaking_style(profile)
         if choice:
             profile.update(voice_id=choice.voice_id, voice_config_id=choice.config_id, voice_selection="manual")
-        if card.owner_user_id != conversation.owner_user_id:
+        if card.owner_user_id != owner:
             from ..slice1.models import ServiceConfigRow
             voice = sess.scalar(select(ServiceConfigRow).where(
-                ServiceConfigRow.owner_user_id == conversation.owner_user_id,
+                ServiceConfigRow.owner_user_id == owner,
                 ServiceConfigRow.kind == "tts", ServiceConfigRow.is_active.is_(True))
                 .order_by(ServiceConfigRow.created_at.desc()))
             profile["voice_config_id"] = voice.config_id if voice else ""
-        sess.add(CharacterBindingRow(conversation_id=conversation.conversation_id, card_id=card.card_id,
-            revision=preference.revision, effective_step_no=1, profile_json=json.dumps(profile, ensure_ascii=False)))
+        return {"card_id":card.card_id,"revision":preference.revision,"profile":profile}
+
+
+def apply_default_mentor(sess, conversation):
+    snapshot=default_mentor_snapshot(sess,conversation.owner_user_id)
+    if snapshot:
+        sess.add(CharacterBindingRow(conversation_id=conversation.conversation_id, card_id=snapshot["card_id"],
+            revision=snapshot["revision"], effective_step_no=1,
+            profile_json=json.dumps(snapshot["profile"], ensure_ascii=False)))

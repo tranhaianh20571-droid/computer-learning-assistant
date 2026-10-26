@@ -43,6 +43,13 @@ def describe(session, key, *, backup=False):
                 if json.loads(snapshot).get("audio_id") in assets:
                     refs += 1
         return "audio", conv.owner_user_id if conv else None, refs
+    if prefix == "recordings":
+        from ..teaching.learning_models import ClassroomRecordingRow
+        conv = session.get(ConversationRow, ident)
+        row = session.get(ClassroomRecordingRow, parts[2]) if len(parts) > 2 else None
+        live = bool(row and not row.deleted_at and conv and not conv.deleted_at)
+        retained = live and (not row.storage_key or row.storage_key == key)
+        return "recordings", row.owner_user_id if row else None, int(retained)
     if prefix == "characters":
         card = session.get(CharacterCardRow, ident)
         refs = int(card is None or card.deleted_at is None)

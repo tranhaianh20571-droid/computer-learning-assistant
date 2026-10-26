@@ -15,6 +15,7 @@ from backend.characters.voice_policy import (
 )
 from backend.slice1.errors import AdapterError, Slice1Error, as_detail
 from test_character_cards import env  # noqa: F401
+from test_native_teaching_authorization import isolated_scheduler  # noqa: F401
 from test_slice1_tts_config import bound, database, TEXT  # noqa: F401
 
 
@@ -229,10 +230,19 @@ def test_tts_without_compatible_male_fails_before_synthesis_and_closes_client(bo
     assert state.built[-1][1]["client"].is_closed
 
 
+@pytest.fixture
+def isolated_voice_sample_env(isolated_scheduler,tmp_path):
+    fixture=env.__wrapped__(tmp_path)
+    try:
+        yield next(fixture)
+    finally:
+        fixture.close()
+
+
 @pytest.mark.parametrize("compatible", [True, False])
-def test_voice_sample_checks_gender_before_request_and_publication(env, compatible):
+def test_voice_sample_checks_gender_before_request_and_publication(isolated_voice_sample_env, compatible):
     from backend.characters.schemas import MediaRequest
-    cards, media = env
+    cards, media = isolated_voice_sample_env
     owner = "synthetic-sample-" + uuid.uuid4().hex[:12]
     config = tts_config(cards, owner)
     card = cards.create(owner, Profile(name="Synthetic", identity="男性数学导师",

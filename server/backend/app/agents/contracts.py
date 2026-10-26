@@ -68,6 +68,7 @@ class AgentDeps:
     authorize_payload: Callable[[bytes, str, dict], None] | None = None
     omit_content_trace: bool = False
     run_request_limit: int = 8
+    output_retries: int = 2
     parent_traceparent: str | None = None
     search_executor: Callable | None = None
     # Private business progress only; never passed to instrumentation/task events.

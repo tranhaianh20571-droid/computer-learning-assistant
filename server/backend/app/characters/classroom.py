@@ -79,7 +79,7 @@ def switch_mentor(teaching, sess, conv, view, profile):
     from ..teaching.learning_outputs import LessonBlueprint, teaching_schedule
     maximum = len(teaching_schedule(LessonBlueprint.model_validate_json(blueprint.plan_json))) if blueprint else 24
     for number in sorted({effective} | {step.step_no for step in steps if effective <= step.step_no <= effective+1}):
-        if number > min(24, maximum):
+        if number > maximum:
             continue
         created = queue_segment(teaching, sess, conv, number, version, blueprint)
         step = next((step for step in steps if step.step_no == number), None)

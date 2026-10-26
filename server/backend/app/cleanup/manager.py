@@ -188,6 +188,11 @@ class LocalResourceManager:
                 if session.scalar(select(Object.resource_id).where(
                         Object.object_key.in_(keys), Object.pinned.is_(True), Object.state != "missing").limit(1)):
                     return True
+                if session.scalar(select(Object.resource_id).where(
+                        Object.volume_id == self.storage.location.volume_id,
+                        Object.object_key.like(f"recordings/{ident}/%"),
+                        Object.pinned.is_(True), Object.state != "missing").limit(1)):
+                    return True
             return bool(session.scalar(select(Object.resource_id).where(Object.pinned.is_(True),
                 Object.state != "missing",
                 Object.volume_id == self.storage.location.volume_id,
@@ -199,7 +204,7 @@ class LocalResourceManager:
             policy = self.policy(session)
             rows = list(session.scalars(select(Object).where(
                 Object.pinned.is_(False), Object.reference_count == 0, Object.owner_user_id.is_not(None),
-                Object.state != "missing", Object.kind.in_(("prewarm", "downloads", "temporary", "audio", "characters", "materials")),
+                Object.state != "missing", Object.kind.in_(("prewarm", "downloads", "temporary", "audio", "characters", "materials", "recordings")),
                 Object.owner_user_id == owner if owner else True,
                 or_(Object.next_retry_at.is_(None), Object.next_retry_at <= now)
             ).order_by(Object.last_used_at).limit(10000)))
@@ -298,7 +303,7 @@ class LocalResourceManager:
             if not row or row.pinned or row.state == "missing" or not admin and row.owner_user_id != owner:
                 return 0
             if row.volume_id != storage.location.volume_id or row.kind not in (
-                    "prewarm", "downloads", "temporary", "audio", "characters", "materials"):
+                    "prewarm", "downloads", "temporary", "audio", "characters", "materials", "recordings"):
                 return 0
             kind, actual_owner, refs = describe(session, row.object_key)
             if refs or not actual_owner or actual_owner != row.owner_user_id or kind != row.kind:
@@ -326,7 +331,14 @@ class LocalResourceManager:
                         PreparedFirstSegmentRow.audio_object_key == row.object_key).with_for_update()):
                     if prepared.consumed_conversation_id:
                         return 0
-                    session.delete(prepared)
+                    if prepared.persistent:
+                        prepared.audio_object_key=""
+                        prepared.audio_bytes=0
+                        prepared.audio_json="{}"
+                        prepared.error_code=None
+                        prepared.status="text_ready"
+                    else:
+                        session.delete(prepared)
             self._audit(session, owner, ident, "delete_started")
             storage.delete(row.object_key)
             row.state, row.size_bytes, row.observed_at = "missing", 0, utcnow()

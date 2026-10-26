@@ -73,6 +73,11 @@ class TeachingModelAdapter(SyntheticModelAdapter):
     """按 prompt 特征返回教学/追问候选。"""
 
     def generate(self, messages, **options):
+        from common_fixtures import synthetic_output_schema
+        properties = synthetic_output_schema(options).get("properties", {})
+        if {"requirements", "points", "additions", "sufficient"} & properties.keys():
+            from test_teaching_assessments import LearningAdapter
+            return LearningAdapter().generate(messages, **options)
         self.generate_calls.append(options)
         last = ""
         for m in messages:
@@ -83,7 +88,15 @@ class TeachingModelAdapter(SyntheticModelAdapter):
             return {"content": json.dumps(synthetic_lesson_blueprint(), ensure_ascii=False)}
         if "follow-up question" in last:
             return {"content": json.dumps(FOLLOWUP_PAYLOAD, ensure_ascii=False)}
-        return {"content": json.dumps(STEP_PAYLOAD, ensure_ascii=False)}
+        from copy import deepcopy
+        payload = deepcopy(STEP_PAYLOAD)
+        context = json.loads(last)
+        if "current_stage" in context:
+            stage = context["current_stage"]
+            payload["steps"][0].update(phase=stage["phase"], covered_goal_ids=stage["goal_ids"],
+                covered_scope_capability_ids=stage.get("scope_capability_ids", []),
+                lesson_finished=context["is_final"])
+        return {"content": json.dumps(payload, ensure_ascii=False)}
 
 
 class NoSubtitleTTSAdapter:
@@ -124,6 +137,7 @@ def env(database: Database):
         tts_adapter_factory=lambda o, t: container["tts"],
         ocr_adapter_factory=lambda o, t: container["ocr"],
     )
+    state.assessments.scopes.kick = lambda task: state.assessments.scopes._run(task)
     app = create_slice3_app(state=state)
     app.state.slice0 = Slice0State(database, PgAuditLog(database))
     client = TestClient(app)

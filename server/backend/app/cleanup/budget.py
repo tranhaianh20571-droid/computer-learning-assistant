@@ -67,9 +67,15 @@ class ResourceBudget:
             return dict(self.latest)
 
     def permits_heavy(self):
+        return self.wait_reason() is None
+
+    def wait_reason(self):
         snapshot = self.snapshot()
-        return (not snapshot.get("memory_paused", True) and
-                snapshot.get("disk", {}).get("state", "protected") not in ("restricted", "protected"))
+        if snapshot.get("disk", {}).get("state", "protected") in ("restricted", "protected"):
+            return "storage"
+        if snapshot.get("memory_paused", True):
+            return "memory"
+        return None
 
     def check_write(self, size):
         from ..materials.storage import StorageError

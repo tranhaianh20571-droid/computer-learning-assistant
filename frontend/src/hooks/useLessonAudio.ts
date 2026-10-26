@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState} from "react";
 import {api} from "../api";
 import {audioCharacters,exactAudioAlignment} from "../lib/audioTiming.ts";
+import {classroomAudio,releaseClassroomAudio} from "../lib/classroomMedia";
 
 export function lessonAudioRequired(workspace:any,step:any,current:number){
   if(workspace?.tts_authorized===false || workspace?.audio_mode==="text")return false;
@@ -11,8 +12,9 @@ export function lessonAudioRequired(workspace:any,step:any,current:number){
 export const LESSON_AUDIO_WAIT_MS = 12_000;
 type AudioState = "idle"|"playing"|"paused"|"blocked"|"ended"|"failed"|"waiting";
 
-export function useLessonAudio(conversation:string,current:number,step:any,playing:boolean,bufferRef:any,posRef:any,resume:any,audioRequired=false){
+export function useLessonAudio(conversation:string,current:number,step:any,playing:boolean,bufferRef:any,posRef:any,resume:any,audioRequired=false,seekRequest?:{id:number;step_no:number;position_ms:number}|null){
   const media=useRef<HTMLAudioElement|null>(null),source=useRef(""),sourceEpoch=useRef(0);
+  const waitingForOffset=useRef(false),appliedSeek=useRef<number|null>(null);
   const [state,setState]=useState<AudioState>("idle"),[retryCount,setRetryCount]=useState(0);
   const latest=useRef({step,current,playing,audioRequired});latest.current={step,current,playing,audioRequired};
   const subtitleKey=JSON.stringify(step?.audio_subtitles||[]);
@@ -26,7 +28,7 @@ export function useLessonAudio(conversation:string,current:number,step:any,playi
   };
   const play=()=>{
     const audio=media.current;
-    if(!audio||!source.current||!latest.current.audioRequired||!latest.current.playing)return;
+    if(!audio||!source.current||waitingForOffset.current||!latest.current.audioRequired||!latest.current.playing)return;
     const epoch=sourceEpoch.current;
     audio.play().then(()=>{
       if(epoch!==sourceEpoch.current)return;
@@ -38,7 +40,7 @@ export function useLessonAudio(conversation:string,current:number,step:any,playi
     });
   };
   useEffect(()=>{
-    const audio=new Audio();audio.preload="auto";media.current=audio;
+    const audio=classroomAudio();audio.preload="auto";media.current=audio;
     let frame=0;
     const tick=()=>{
       if(source.current&&latest.current.playing&&!audio.paused&&!audio.seeking&&audio.readyState>=2)sync();
@@ -69,7 +71,7 @@ export function useLessonAudio(conversation:string,current:number,step:any,playi
       sourceEpoch.current++;cancelAnimationFrame(frame);
       audio.onplaying=null;audio.onwaiting=null;audio.onstalled=null;audio.onseeking=null;audio.onseeked=null;
       audio.oncanplay=null;audio.onended=null;audio.onerror=null;
-      audio.pause();audio.removeAttribute("src");audio.load();media.current=null;source.current="";
+      audio.pause();audio.removeAttribute("src");audio.load();releaseClassroomAudio(audio);media.current=null;source.current="";
     };
   },[conversation]);
   useEffect(()=>{
@@ -86,21 +88,25 @@ export function useLessonAudio(conversation:string,current:number,step:any,playi
         setState("failed");return;
       }
       source.current=step.audio_id;audio.src=api.audioUrl(step.audio_id);
-      const offset=resume?.step_no===current&&resume?.presentation?.audio_id===step.audio_id?resume.position_ms:0;
+      const explicitSeek=seekRequest?.step_no===current&&seekRequest.id!==appliedSeek.current;
+      if(explicitSeek)appliedSeek.current=seekRequest!.id;
+      const offset=explicitSeek?seekRequest!.position_ms:
+        resume?.step_no===current&&resume?.presentation?.audio_id===step.audio_id?resume.position_ms:0;
       posRef.current=offset;
       let seeked=offset<=0;
+      waitingForOffset.current=!seeked;
       const restorePosition=()=>{
         if(seeked)return;
         try{
           audio.currentTime=Number.isFinite(audio.duration)?Math.min(offset/1000,Math.max(0,audio.duration-.05)):offset/1000;
-          seeked=true;
+          seeked=true;waitingForOffset.current=false;
         }catch{/* The canplay event retries after the source becomes seekable. */}
       };
-      audio.onloadedmetadata=restorePosition;audio.oncanplay=()=>{restorePosition();play();};
+      audio.onloadedmetadata=()=>{restorePosition();play();};audio.oncanplay=()=>{restorePosition();play();};
       if(latest.current.playing)play();else setState("paused");
     }
     return()=>{sourceEpoch.current++;audio.pause();audio.onloadedmetadata=null;audio.oncanplay=null;};
-  },[conversation,current,step?.audio_id,step?.audio_ready,audioRequired,subtitleKey]);
+  },[conversation,current,step?.audio_id,step?.audio_ready,audioRequired,subtitleKey,seekRequest?.id]);
   useEffect(()=>{
     if(!audioRequired){gate(false);bufferRef.current.audioClock(`step:${current}`,null);return;}
     if(!playing){media.current?.pause();gate(true);if(state!=="ended")setState("paused");}

@@ -26,6 +26,9 @@ import "./revision.css";
 import SettingsShell from "./ui/SettingsShell";
 import BrandLogo from "./ui/BrandLogo";
 import { openExternalPage, reserveExternalWindow } from "./lib/externalWindow";
+import BoardExportView from "./views/BoardExportView";
+import ClassroomRecordingHost from "./ui/ClassroomRecording";
+import LessonRecordingView from "./views/LessonRecordingView";
 
 /**
  * 应用骨架（对齐设计规范 ds-1「工程制图 / 技术手册」，v2 布局收敛）：
@@ -76,7 +79,11 @@ class PageErrorBoundary extends Component<{ children: ReactNode }, { error: stri
   }
 }
 
-export default function App() {
+export default function App(){
+  return <><Application/><ClassroomRecordingHost/></>;
+}
+
+function Application() {
   const { me, setMe, booted } = useSession();
   const { route, navigate } = useHashRoute();
   const [routePath, routeQuery = ""] = route.split("?");
@@ -234,6 +241,11 @@ export default function App() {
   }
 
   // 讲次教学工作区：全屏播放模式（无侧栏/顶栏骨架）
+  if(routePath==="/board-export")return <BoardExportView/>;
+  if(routePath.startsWith("/lesson-review/")){
+    const [, ,course,lesson]=routePath.split("/");
+    return <PageErrorBoundary key={route}><LessonRecordingView course={course} lesson={lesson} go={go}/></PageErrorBoundary>;
+  }
   if (route.startsWith("/lecture/")) {
     return (
       <PageErrorBoundary key={route}>

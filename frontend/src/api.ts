@@ -35,6 +35,18 @@ export const resourceApi = {
   retry:(id:string)=>req(`/api/local-resources/jobs/${encodeURIComponent(id)}/retry`,{method:"POST"}),
 };
 
+export const recordingApi={
+  lesson:(course:string,lesson:string)=>req(`/api/courses/${encodeURIComponent(course)}/lessons/${encodeURIComponent(lesson)}/recordings`),
+  list:(id:string)=>req(`/api/teaching/${id}/recordings`),
+  start:(id:string,mime_type:string)=>req(`/api/teaching/${id}/recordings`,{method:"POST",body:JSON.stringify({mime_type})}),
+  chunk:(id:string,recording:string,sequence:number,body:Blob)=>
+    req(`/api/teaching/${id}/recordings/${recording}/chunks/${sequence}`,{method:"PUT",body,headers:{"Content-Type":"video/webm"}},30_000),
+  finish:(id:string,recording:string,body:unknown)=>
+    req(`/api/teaching/${id}/recordings/${recording}/finish`,{method:"POST",body:JSON.stringify(body)},120_000),
+  remove:(id:string,recording:string)=>req(`/api/teaching/${id}/recordings/${recording}`,{method:"DELETE"}),
+  video:(id:string,recording:string)=>`${API}/api/teaching/${id}/recordings/${recording}/video`,
+};
+
 export const classroomApi = {
   run:(id:string,run:string,body:unknown,signal:AbortSignal)=>
     req(`/api/teaching/${encodeURIComponent(id)}/interactive/runs/${run}`,
@@ -474,6 +486,8 @@ export const api = {
   upgradeLecture: (conversationId: string) => req(`/api/teaching/${conversationId}/upgrade`, {method:"POST"}),
   saveCheckpoint: (conversationId: string, body: Record<string, unknown>) =>
     req(`/api/teaching/${conversationId}/checkpoint`, { method: "POST", body: JSON.stringify(body) }),
+  seekBackward: (conversationId:string,body:Record<string,unknown>) =>
+    req(`/api/teaching/${conversationId}/seek-backward`,{method:"POST",body:JSON.stringify(body)}),
   sendFollowup: (conversationId: string, body: Record<string, unknown>) =>
     req(`/api/teaching/${conversationId}/followup`, { method: "POST", body: JSON.stringify(body) }),
   resumeLesson: (conversationId: string) =>

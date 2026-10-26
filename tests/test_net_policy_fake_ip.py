@@ -27,7 +27,8 @@ def test_proxy_answer_is_not_a_literal_target(address):
     assert is_literal_address(address)
 
 
-@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "fc00::1", "fe80::1"])
+@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "fc00::1", "fe80::1",
+    "224.0.0.1", "ff0e::1", "240.0.0.1", "::"])
 def test_private_answers_stay_blocked_even_for_names(address):
     assert not addresses_allowed([address], from_hostname=True)
 

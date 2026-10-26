@@ -44,7 +44,9 @@ def test_native_agent_retries_unverified_screen_position_and_keeps_named_referen
                 "beats":[{"id":"main","text":value,"blocks":[{"id":"lookup","type":"text","text":"唯一标签"}],
                     "cues":[{"block_id":"lookup","target":"text","quote":"唯一标签"}]}],
                 "phase":context["current_stage"]["phase"],
-                "covered_goal_ids":["g1"],"lesson_finished":False}]}, options)
+                "covered_goal_ids":context["current_stage"]["goal_ids"],
+                "covered_scope_capability_ids":context["current_stage"].get("scope_capability_ids", []),
+                "lesson_finished":False}]}, options)
 
     adapter = Adapter()
     state.teaching.model_adapter_factory = lambda actor, task: adapter
@@ -85,7 +87,10 @@ def test_native_agent_repairs_ambiguous_graph_branches_within_existing_budget(en
             return synthetic_output_response({"steps":[{"alignment_version":1,"title":"合成分支说明",
                 "text":text,"beats":[{"id":"main","text":text,"blocks":[graph],"cues":cues}],
                 "board":{"title":"合成关系图","format_version":3},
-                "phase":context["current_stage"]["phase"],"covered_goal_ids":["g1"],"lesson_finished":False}]}, options)
+                "phase":context["current_stage"]["phase"],
+                "covered_goal_ids":context["current_stage"]["goal_ids"],
+                "covered_scope_capability_ids":context["current_stage"].get("scope_capability_ids", []),
+                "lesson_finished":False}]}, options)
 
     adapter = Adapter()
     state.teaching.model_adapter_factory = lambda actor, task: adapter

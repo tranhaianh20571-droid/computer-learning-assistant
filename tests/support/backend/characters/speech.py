@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass, replace
 
-VERSION = "character-speech-v3"
+VERSION = "character-speech-v4"
 NONVERBAL = ("laughs", "chuckle", "coughs", "clear-throat", "groans", "breath", "pant",
     "inhale", "exhale", "gasps", "sniffs", "sighs", "snorts", "burps", "lip-smacking",
     "humming", "hissing", "emm", "sneezes")
@@ -25,6 +25,18 @@ class SpeechPlan:
     pronunciation: tuple[str, ...] = ()
     capabilities: tuple[str, ...] = ()
     segments: tuple[tuple[int, int, float, float], ...] = ()
+
+
+def speech_phrases(text):
+    start = 0
+    for match in re.finditer(r"[。！？；\n]+|[.!?;](?:[\"’”]*)\s+", text):
+        prefix = text[:match.start()]
+        if match.group().startswith(".") and re.search(r"(?:\b(?:e\.g|i\.e|Fig|Eq|Dr|Mr|Mrs|Prof|vs|et al)|\b[A-Z])$", prefix, re.I):
+            continue
+        yield start, match.end(), text[start:match.end()]
+        start = match.end()
+    if start < len(text):
+        yield start, len(text), text[start:]
 
 
 def compile_speech(text, profile, model, voice_id, *, split=True, expression=None, event="explaining"):
@@ -49,15 +61,14 @@ def compile_speech(text, profile, model, voice_id, *, split=True, expression=Non
         emotion = "calm"
         pause = max(pause, .35)
     parts, spans, display_start, speech_start = [], [], 0, 0
-    for match in re.finditer(r"[^。！？；\n]+[。！？；\n]*|[。！？；\n]+", text):
-        value = match.group()
-        if match.start() > display_start:
-            gap = text[display_start:match.start()]
+    for phrase_start, phrase_end, value in speech_phrases(text):
+        if phrase_start > display_start:
+            gap = text[display_start:phrase_start]
             parts.append(gap); speech_start += len(gap)
         parts.append(value)
-        spans.append((speech_start, speech_start + len(value), match.start(), match.end()))
-        speech_start += len(value); display_start = match.end()
-        if match.end() < len(text) and value.strip():
+        spans.append((speech_start, speech_start + len(value), phrase_start, phrase_end))
+        speech_start += len(value); display_start = phrase_end
+        if phrase_end < len(text) and value.strip():
             token = f"<#{pause:.2f}#>"
             if model in ("speech-2.8-hd", "speech-2.8-turbo") and not any(TOKEN_RE.search(part) for part in parts):
                 cue = ("chuckle" if event == "correct" and expression.liveliness > .6 else

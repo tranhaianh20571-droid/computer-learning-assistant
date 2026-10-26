@@ -27,7 +27,7 @@ export default function CoursesPage({ me, onErr, go }: {
   const [q, setQ] = useState(() => preference("library.search", ""));
   const load = useCallback(async () => {
     setFailed(false);
-    try { setItems((await api.listLibrary()).data || []);api.prewarmLibrary().catch(()=>{}); }
+    try { setItems((await api.listLibrary()).data || []); }
     catch (e: any) { onErr(e?.message || "课程列表加载失败"); setFailed(true); }
   }, [onErr]);
   useEffect(() => { if (me) load(); else setItems([]); }, [me, load]);

@@ -335,9 +335,9 @@ def test_source_blacklist_cannot_enter_evidence_pool():
     assert DistillationService._allowed_source("https://writings.example.test/a")
 
 
-def test_role_memory_is_structured_bounded_and_excludes_research():
+def test_role_memory_is_structured_bounded_and_excludes_research(env):
     from backend.memory.service import MemoryService
-    memory=MemoryService.__new__(MemoryService)
+    memory=MemoryService(env[0].db,env[0].audit)
     seen=[]
     async def read(owner,scope,tag):
         seen.append((scope,tag))

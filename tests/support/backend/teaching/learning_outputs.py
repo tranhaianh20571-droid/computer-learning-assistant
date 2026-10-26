@@ -61,9 +61,23 @@ def teaching_schedule(blueprint):
     return result
 
 
+class ReadingStage(TeachingStage):
+    segments: list[PlannedSegment] = Field(default_factory=list, max_length=240)
+
+
 class LessonBlueprint(BaseModel):
+    kind: Literal["standard", "source_reading"] = "standard"
     goals: list[KnowledgeGoal] = Field(min_length=1, max_length=4)
-    stages: list[TeachingStage] = Field(min_length=4, max_length=12)
+    stages: list[ReadingStage | TeachingStage] = Field(min_length=1, max_length=240)
+
+    @model_validator(mode="after")
+    def mode_bounds(self):
+        if self.kind == "standard" and (not 4 <= len(self.stages) <= 12
+                or any(len(stage.segments) > 4 for stage in self.stages)):
+            raise ValueError("standard lesson requires 4-12 stages and at most four segments per stage")
+        if self.kind == "source_reading" and len(teaching_schedule(self)) > 240:
+            raise ValueError("source reading plan exceeds 240 playback segments")
+        return self
 
 
 def validate_blueprint(ctx, output):
@@ -101,6 +115,14 @@ def validate_blueprint(ctx, output):
 
 def validate_new_blueprint(ctx, output):
     """New generation is strict; saved legacy plans remain readable."""
+    if output.kind == "source_reading":
+        if not isinstance(ctx, dict) or ctx.get("teaching_mode") != "source_reading":
+            raise ModelRetry("论文计划只用于绑定原文的精读讲次。")
+        requirements = {r["capability_id"] for r in ctx.get("scope_capabilities", [])}
+        assigned = {ident for part in teaching_schedule(output) for ident in part.scope_capability_ids}
+        if requirements != assigned or output.stages[-1].phase != "summary":
+            raise ModelRetry("精读计划必须承接全部考纲能力并以论文回顾结束。")
+        return output
     validate_blueprint(ctx, output)
     for stage in output.stages:
         minimum = 2 if stage.phase in ("intuition", "concept", "example") else 1

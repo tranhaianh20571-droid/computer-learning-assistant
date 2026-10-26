@@ -51,6 +51,7 @@ class PreparedFirstSegmentRow(Base):
     error_code: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),nullable=False,default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),nullable=False)
+    persistent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
 
 class TeachingPreviewRow(Base):
@@ -172,3 +173,21 @@ class ChannelPresentationRow(Base):
     visible_chars: Mapped[int] = mapped_column(Integer, default=0)
     position_ms: Mapped[int] = mapped_column(Integer, default=0)
     paused: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ClassroomRecordingRow(Base):
+    __tablename__ = "classroom_recordings"
+    recording_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(64), index=True)
+    conversation_id: Mapped[str] = mapped_column(String(64), ForeignKey("conversations.conversation_id", ondelete="CASCADE"), index=True)
+    content_version_id: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="recording")
+    mime_type: Mapped[str] = mapped_column(String(80), default="video/webm")
+    chunks_json: Mapped[str] = mapped_column(Text, default="[]")
+    events_json: Mapped[str] = mapped_column(Text, default="[]")
+    storage_key: Mapped[str] = mapped_column(String(512), default="")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    duration_ms: Mapped[int] = mapped_column(BigInteger, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

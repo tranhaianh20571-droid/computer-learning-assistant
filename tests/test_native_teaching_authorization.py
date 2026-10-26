@@ -142,6 +142,20 @@ def test_start_without_consent_creates_no_task_or_conversation(env):
     assert env.calls == []
 
 
+@pytest.mark.parametrize("target,code,status", [
+    ("foreign_owner", "course_not_found", 404),
+    ("missing_lesson", "LESSON_UNLOCK_REQUIRED", 409),
+    ("missing_conversation", "conversation_not_found", 404),
+])
+def test_authorization_snapshot_returns_controlled_resource_errors(env, target, code, status):
+    with env.db.session() as sess, pytest.raises(Slice1Error) as caught:
+        env.service.authorization.snapshot(sess, env.course,
+            "synthetic-missing-lesson" if target == "missing_lesson" else env.lesson,
+            "synthetic-other-owner" if target == "foreign_owner" else env.owner,
+            conversation_id="synthetic-missing-conversation" if target == "missing_conversation" else None)
+    assert (caught.value.code, caught.value.status) == (code, status)
+
+
 @pytest.mark.parametrize("change", ["config", "context", "template"])
 def test_preflight_change_requires_review_again(env, monkeypatch, change):
     view = env.service.preflight_lesson(env.course, env.lesson, actor_id=env.owner)

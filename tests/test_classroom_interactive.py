@@ -291,11 +291,19 @@ def test_source_reading_generation_binds_real_targets_to_scene(env, tmp_path):
     from backend.teaching.pedagogy import lesson_context
     class ReadingAdapter(LearningAdapter):
         def generate(self, messages, **options):
-            response = super().generate(messages, **options)
             context = next((json.loads(message["content"]) for message in messages
                             if message["role"] == "user" and message["content"].startswith("{")), {})
             if "current_stage" not in context:
-                return response
+                return super().generate(messages, **options)
+            if "current_reading_unit" in context:
+                unit=context["current_reading_unit"]
+                phase=context["current_stage"]
+                return synthetic_output_response({"draft":{
+                    "translation":"这段原文说明了当前资料中的基本关系。",
+                    "explanation":"本段把原文中的基本关系连接起来，接下来据此理解方法。",
+                    "covered_scope_capability_ids":phase["scope_capability_ids"],
+                    "recap":"已讲清资料中的基本关系。"}},options)
+            response = super().generate(messages, **options)
             payload = json.loads(response.get("tool_arguments") or response["content"])
             targets = context["context"]["pdf_targets"]
             target = next(item for item in targets if item["precision"] == "text")

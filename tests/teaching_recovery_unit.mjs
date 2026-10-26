@@ -17,4 +17,13 @@ assert.equal(teachingFailures(workspace,2).followup.length,0);
 workspace.session_state="awaiting_resume";
 workspace.steps.push({step_no:0,text:"previous answer",status:"ready"});
 assert.equal(teachingFailures(workspace,2).followup.length,1);
+const recovering={server_managed:true,steps:[],session_state:"active",queued_tasks:[
+  {kind:"lesson_step_generate",step_no:2,status:"failed",error_code:"OUTPUT_INVALID",attempt:1,generation:1},
+]};
+assert.equal(teachingFailures(recovering,1).next.length,0);
+recovering.queued_tasks[0].generation=3;
+assert.equal(teachingFailures(recovering,1).next.length,1);
+recovering.queued_tasks[0].generation=1;
+recovering.queued_tasks[0].cancel_requested=true;
+assert.equal(teachingFailures(recovering,1).next.length,1);
 console.log("PASS current/next failure isolation, historical success, refinement/audio separation, followup scope");

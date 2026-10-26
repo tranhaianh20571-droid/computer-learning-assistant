@@ -8,6 +8,7 @@ export const ERROR_TEXT: Record<string, string> = {
   MODEL_TIMEOUT: "模型响应超时，可重试。",
   MODEL_CONNECTION_ERROR: "模型服务连接失败，可重试。",
   MODEL_RATE_LIMITED: "模型服务暂时限流，请稍后重试。",
+  MODEL_QUOTA_EXCEEDED: "学习服务额度不足，请补充额度后继续。",
   MODEL_CREDENTIAL_INVALID: "模型凭据无效，请在能力设置中更新。",
   MODEL_PROVIDER_ERROR: "模型服务请求失败，可重试。",
   MODEL_RESPONSE_TOO_LARGE: "模型输出超出限制，请重试。",

@@ -41,6 +41,11 @@ npm run components
 npm run dist
 ```
 
+如果只改应用代码、未改运行依赖，可以把 `npm run components` 换成
+`node scripts/fetch-components.mjs`，复用清单里已发布且通过 SHA-256 校验的运行组件。
+应用版本与运行组件版本独立，不重复上传同一套运行组件。CI 默认走此路径；
+手动构建可勾选 `rebuild_components` 重建运行组件。更改依赖或沙箱时必须重新构建并更新清单。
+
 运行组件和安装包输出到受忽略的 `.backup/`。组件版本、大小、SHA-256 和下载地址位于 `desktop/manifests/runtime.json`；不得发布与清单不符的组件。
 
 ## 验证与反馈

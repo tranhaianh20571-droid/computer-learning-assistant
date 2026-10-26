@@ -1,0 +1,11 @@
+.board-export-document { width:1100px; margin:0; background:#fff; color:#252927; }
+.export-sheet { position:relative; break-after:page; overflow:hidden; margin:0; }
+.export-svg { position:absolute; inset:0; }
+.export-svg>svg { width:100%; height:100%; }
+.export-overlay { position:absolute; box-sizing:border-box; overflow:visible; font:20px/1.5 "Segoe UI","Microsoft YaHei",sans-serif; }
+.export-overlay pre { font:14px/22px Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
+.board-export-document .figure-tools,.board-export-document .circuit-fit { display:none; }
+.board-export-document figure { break-inside:avoid; margin:20px; }
+.board-export-document figure img { display:block; max-width:1060px; max-height:1300px; object-fit:contain; }
+@page { size:A4; margin:8mm; }
+@media print { body { margin:0!important; } .board-export-document { zoom:.66; } }

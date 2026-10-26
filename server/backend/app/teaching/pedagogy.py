@@ -165,7 +165,8 @@ def lightweight_plan(context):
             ("summary", "回顾本讲目标、关键关系与类比边界"))]})
 
 
-def plan_key(service, conv, context):
+def plan_key(service, conv, context, *, include_memory=True):
+    context = text_context(context)
     template = service.prompts.load_local_template("lesson_blueprint_v1")
     with service.db.session() as sess:
         version = sess.scalars(select(LessonContentVersionRow).where(
@@ -180,9 +181,20 @@ def plan_key(service, conv, context):
             "template": template["sha256"], "content_version": content_version,
             "model": [model["config_id"], model["config_version"]] if model else None,
             "code_version": "presentation-6-source-examples"}
-    if getattr(service, "memory", None):
+    if include_memory and getattr(service, "memory", None):
         data["memory_revision"] = service.memory.version(conv.owner_user_id)
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def text_context(context):
+    """Voice-only changes must not invalidate accepted teaching text."""
+    context = {key:value for key,value in context.items() if not key.startswith("_") and key != "source_reading_plan"}
+    if context.get("prepared_character"):
+        character=context["prepared_character"]
+        profile={key:value for key,value in character["profile"].items()
+                 if key not in ("voice_id","voice_config_id","voice_selection")}
+        context={**context,"prepared_character":{**character,"profile":profile}}
+    return context
 
 
 def prepared_plan(service, conv, context):

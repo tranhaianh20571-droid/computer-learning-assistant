@@ -262,6 +262,36 @@ def test_output_validator_retry_uses_sdk_history_and_exact_request_debits():
     assert "synthetic field constraint retry" in str(calls[1])
 
 
+def test_opt_in_output_retries_preserve_history_and_remain_inside_shared_budget():
+    calls = []
+
+    def function(messages, info):
+        calls.append(messages)
+        return ModelResponse(parts=[TextPart('{"value": 1}')])
+
+    def validator(ctx, output):
+        if len(calls) < 4:
+            raise ModelRetry("synthetic correction")
+        return output
+
+    budget = RunBudget(request_limit=8, wire_limit=8)
+    result = execute(FunctionModel(function, profile=PROFILE),
+        AgentDeps(budget=budget, output_retries=7), output_validator=validator)
+    assert result.payload.value == 1
+    assert budget.logical_requests == budget.usage.requests == 4
+    assert "synthetic correction" in str(calls[3])
+
+
+def test_teaching_schema_diagnostic_omits_dynamic_output_values():
+    from types import SimpleNamespace
+    from backend.agents.validation import schema_constraint_reason
+
+    failure = SimpleNamespace(errors=lambda **options: [
+        {"ctx": {"error": ValueError("board cue expression differs: private-model-content")}}
+    ])
+    assert schema_constraint_reason(failure) == "teaching_cue_expression"
+
+
 def test_per_run_request_cap_keeps_task_budget_available_for_next_run():
     calls = []
     def function(messages, info):
@@ -555,6 +585,17 @@ def test_wire_request_byte_limit_precedes_authorization():
         send(wire(lambda request: httpx.Response(200), max_bytes=2,
             deps=AgentDeps(authorize_payload=lambda *args: authorized.append(1))), body=b"123")
     assert exc.value.code == "QUOTA_EXCEEDED" and authorized == []
+
+
+@pytest.mark.parametrize("status,code",[(402,"MODEL_QUOTA_EXCEEDED"),(429,"MODEL_RATE_LIMITED")])
+def test_wire_provider_quota_and_retry_after_are_controlled(status,code):
+    with pytest.raises(PlanningError) as exc:
+        send(wire(lambda request:httpx.Response(status,headers={"Retry-After":"120"},
+            content=b"synthetic private provider response")))
+    assert exc.value.code==code
+    assert "private provider response" not in str(exc.value)
+    if status==429:
+        assert exc.value.retry_after=="120"
 
 
 class Chunks(httpx.AsyncByteStream):

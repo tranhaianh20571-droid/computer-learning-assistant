@@ -169,10 +169,12 @@ class SafeModelTransport(httpx.AsyncBaseTransport):
                 raise error("MODEL_CREDENTIAL_INVALID")
             if response.status_code == 402:
                 await response.aclose()
-                raise error("QUOTA_EXCEEDED")
+                raise error("MODEL_QUOTA_EXCEEDED")
             if response.status_code == 429:
+                failure=error("MODEL_RATE_LIMITED")
+                failure.retry_after=response.headers.get("Retry-After","")[:100]
                 await response.aclose()
-                raise error("MODEL_RATE_LIMITED")
+                raise failure
             if self.inspect_parameter_errors and response.status_code in (400, 404, 422):
                 # Only bounded, fixed-sample discovery inspects parameter schemas.
                 return httpx.Response(response.status_code, headers=response.headers,

@@ -1,6 +1,6 @@
 {
   "name": "study-companion-desktop",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "private": true,
   "description": "学习助手伙伴 Windows 桌面版",
   "author": "Study Companion contributors",
@@ -25,17 +25,55 @@
     "appId": "io.studycompanion.desktop",
     "productName": "学习助手伙伴",
     "artifactName": "StudyCompanion-${version}-${arch}-Setup.${ext}",
-    "directories": {"output": "../.backup/desktop-dist"},
-    "files": ["src/**/*", "assets/**/*", "package.json"],
-    "extraResources": [
-      {"from": "../frontend/dist", "to": "frontend"},
-      {"from": "../server/backend/app", "to": "backend/app", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]},
-      {"from": "../server/source-worker", "to": "source-worker", "filter": ["*.py"]},
-      {"from": "../deploy/memory_service.py", "to": "memory_service.py"},
-      {"from": "src/detect-browsers.ps1", "to": "browser-tools/detect-browsers.ps1"},
-      {"from": "manifests/runtime.json", "to": "runtime.json"}
+    "directories": {
+      "output": "../.backup/desktop-dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
     ],
-    "win": {"target": ["nsis"], "requestedExecutionLevel": "asInvoker", "icon": "assets/icon.ico"},
+    "extraResources": [
+      {
+        "from": "../frontend/dist",
+        "to": "frontend"
+      },
+      {
+        "from": "../server/backend/app",
+        "to": "backend/app",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": "../server/source-worker",
+        "to": "source-worker",
+        "filter": [
+          "*.py"
+        ]
+      },
+      {
+        "from": "../deploy/memory_service.py",
+        "to": "memory_service.py"
+      },
+      {
+        "from": "src/detect-browsers.ps1",
+        "to": "browser-tools/detect-browsers.ps1"
+      },
+      {
+        "from": "manifests/runtime.json",
+        "to": "runtime.json"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "requestedExecutionLevel": "asInvoker",
+      "icon": "assets/icon.ico"
+    },
     "nsis": {
       "oneClick": false,
       "allowElevation": false,
@@ -47,6 +85,10 @@
       "installerHeaderIcon": "assets/icon.ico",
       "include": "installer.nsh"
     },
-    "publish": {"provider": "github", "owner": "tranhaianh20571-droid", "repo": "computer-learning-assistant"}
+    "publish": {
+      "provider": "github",
+      "owner": "tranhaianh20571-droid",
+      "repo": "computer-learning-assistant"
+    }
   }
 }

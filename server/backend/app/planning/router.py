@@ -406,7 +406,10 @@ def create_planning_router(
         )
         if teaching and teaching.server_managed:
             item = drafts.get_draft(draft_id, actor_id=user.user_id)
-            if item["draft_kind"] == "course_outline":
+            if teaching.course_preparation.enabled:
+                if teaching.background:
+                    teaching.background._last_reconcile=0
+            elif item["draft_kind"] == "course_outline":
                 try:
                     teaching.preparation.prepare_course(item["target_id"],user.user_id)
                 except Exception:
@@ -672,7 +675,7 @@ def create_planning_router(
         user = _user(request)
         result = overview.course_overview(course_id, actor_id=user.user_id,
                                         route_id=route_id, route_version_id=route_version_id)
-        if teaching and teaching.server_managed:
+        if teaching and teaching.server_managed and not teaching.course_preparation.enabled:
             try:
                 teaching.preparation.prepare_course(course_id,user.user_id)
             except Exception:

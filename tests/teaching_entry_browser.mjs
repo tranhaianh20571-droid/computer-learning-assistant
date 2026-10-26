@@ -13,6 +13,7 @@ let workspace={conversation_id:"synthetic-conversation",course_id:"synthetic-cou
 let preparation={status:"failed",lesson_id:"synthetic-lesson",error_code:"MODEL_TIMEOUT"};
 let preparationReads=0;
 let coverEligible=false;
+let startFailure=null;
 page.on("pageerror",error=>errors.push(error.message));
 await context.addInitScript(()=>{
   window.__audioPlays=0;
@@ -34,7 +35,10 @@ await page.route("**/*",async route=>{
   else if(url.pathname.endsWith("/recover")){workspace={...workspace,steps:[lesson],artifact_recovery:null,required_action:null,queued_tasks:[]};body={conversation_id:"synthetic-conversation",task_id:"synthetic-repair",recovered:true};}
   else if(url.pathname.endsWith("/prewarm")){preparation={status:"queued",lesson_id:"synthetic-lesson"};preparationReads=0;body=preparation;}
   else if(url.pathname.endsWith("/first-preparation")){preparationReads++;if(preparation.status==="queued"&&preparationReads>1)preparation={status:"ready",lesson_id:"synthetic-lesson"};body=preparation;}
-  else if(url.pathname.endsWith("/start"))body={conversation_id:"synthetic-conversation",task_id:"synthetic-task",cache_hit:true};
+  else if(url.pathname.endsWith("/start")){
+    if(startFailure)return route.fulfill({status:400,contentType:"application/json",body:JSON.stringify({error_code:startFailure,message:startFailure})});
+    body={conversation_id:"synthetic-conversation",task_id:"synthetic-task",cache_hit:true};
+  }
   else if(url.pathname.endsWith("/overview"))body={cover_eligible:coverEligible,title:"合成课程",outline_confirmed:true,teaching_unlocked:true,units:[{unit_id:"synthetic-unit",title:"合成单元",lesson_count:1,lessons:[{lesson_id:"synthetic-lesson",title:"合成首讲",order_index:0,startable:true,status_preparation:"not_generated",learning_state:"not_started"}]}]};
   else if(url.pathname.endsWith("/cover"))body={status:"unavailable"};
   else if(url.pathname.endsWith("/assessment"))body={status:"not_generated"};
@@ -84,7 +88,8 @@ try{
  checks.push("exhausted_repairs_show_limit_and_stop_retry");
   workspace={...workspace,steps:[lesson],tts_authorized:true,queued_tasks:[],artifact_recovery:null};
   await mount("lecture");await host.getByText("正在准备语音…",{exact:true}).waitFor();
-  await host.getByRole("button",{name:"重试语音",exact:true}).waitFor();
+  await page.waitForTimeout(1200);
+  assert.equal(await host.getByRole("button",{name:"重试语音",exact:true}).count(),0);
   assert.equal(await host.locator(".lecture-segment p").count(),0);
   assert.equal(await host.getByRole("button",{name:"继续文字讲解",exact:true}).count(),0);
   const played=await page.evaluate(()=>window.__audioPlays);
@@ -109,6 +114,14 @@ try{
   checks.push("background_prewarm_hidden_and_grouped_course_has_no_cover");
   coverEligible=true;await mount("overview");await host.locator(".ink-cover-block").waitFor();
   checks.push("independent_course_keeps_cover");
+ startFailure="MODEL_CREDENTIAL_INVALID";
+ await host.getByRole("button",{name:"开始学习",exact:true}).click();
+ await host.getByRole("status").filter({hasText:"学习服务连接需要更新，课程已保留。"}).waitFor();
+ assert.equal(await host.getByRole("link",{name:"前往设置",exact:true}).count(),1);
+ assert.equal(await host.locator(".st-prep").count(),0);
+ assert.equal(await page.evaluate(()=>window.__testError),undefined);
+ checks.push("entry_configuration_error_is_one_local_action_without_internal_task_states");
+ startFailure=null;
  await host.getByRole("button",{name:"开始学习",exact:true}).click();
  await page.waitForFunction(()=>window.__testRoute==="/lecture/synthetic-conversation");
  assert.equal(await page.getByRole("dialog").count(),0);

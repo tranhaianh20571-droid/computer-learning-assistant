@@ -21,6 +21,10 @@ import {useClassroomPresentation} from "./hooks/useClassroomPresentation";
 import {useKnowledgeCoverage} from "./hooks/useKnowledgeCoverage";
 import TeachingPointer from "./ui/TeachingPointer";
 import {characterScene} from "./lib/characterScene";
+import LectureProgress from "./ui/LectureProgress";
+import {comparePosition,type LecturePosition} from "./lib/lectureTimeline";
+import {classroomAudio,releaseClassroomAudio,beforeClassroomExit} from "./lib/classroomMedia";
+import {boardExportScenes} from "./lib/boardExport";
 
 /**
  * 连续教学工作区：共享文字／板书呈现时钟、暂停／继续与自动续讲；
@@ -43,6 +47,7 @@ type Workspace = {
   authorization_required?: boolean; authorization_error?: string; required_action?: string;
   needs_upgrade?: boolean;
   scope_preparation?: {status: string; error_code?: string | null} | null;
+  preparation?: {state:"preparing"|"retrying"|"paused"|"action_required"|"ready";action:"settings"|"retry"|null;reason?:"storage"|"memory"|"capacity"|"quota"|null}|null;
   tts_authorized?:boolean;
   audio_mode?:"text"|"tts";
   artifact_recovery?:{status?:"missing"|"repairing"|"exhausted";available?:boolean;required?:boolean;error_code?:string;missing_steps?:number[];step_no?:number;attempts?:number;max_attempts?:number}|boolean;
@@ -58,6 +63,7 @@ type Workspace = {
   followup_board?: any;
   code_feedback?:{generation:number;action:string;step_no:number;block_id:string;instruction:string}|null;
   answer_audio?: {audio_id:string;subtitles:any[]}|null;
+  played_steps?:Record<string,{visible_chars:number;fraction:number;board_complete:boolean}>;
 };
 
 export default function LectureView({ conversationId, onErr, onOk, go,reviewStep }: {
@@ -76,6 +82,11 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
   const handlePointingTarget=useCallback((target:{x:number;y:number;visible:boolean}|null)=>{setPointingTarget(old=>old?.x===target?.x&&old?.y===target?.y&&old?.visible===target?.visible?old:target);},[]);
   const [current, setCurrent] = useState(1);
   const [advanceTo,setAdvanceTo] = useState<number|null>(null);
+  const [seeking,setSeeking]=useState(false);
+  const [exportError,setExportError]=useState("");
+  const seekLock=useRef(false);
+  const seekResume=useRef<boolean|null>(null);
+  const [seekRequest,setSeekRequest]=useState<{id:number;step_no:number;position_ms:number}|null>(null);
   const [playing, setPlaying] = useState(true);
   const playingRef = useRef(true);
   const [pane, setPane] = useState<"board" | "text">("board");
@@ -99,24 +110,25 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
     const reply=ws.followups.find(item=>item.role==="assistant"&&item.generation===ws.generation);
     if(!reply)return;
     if(ws.followup_board?.alignment_version===1&&!exactAudioAlignment(reply.content,track.subtitles||[])){
-      answerMedia.current?.pause();answerMedia.current=null;answerTrack.current=null;
+      answerMedia.current?.pause();releaseClassroomAudio(answerMedia.current);answerMedia.current=null;answerTrack.current=null;
       setAnswerReady(false);setAnswerPlaying(false);setAnswerAudible(false);
       onErr("语音字幕无法与讲稿精确对应，请重新准备语音。");return;
     }
-    answerMedia.current?.pause();
-    const media=new Audio(api.audioUrl(track.audio_id));answerMedia.current=media;
+    answerMedia.current?.pause();releaseClassroomAudio(answerMedia.current);
+    const media=classroomAudio(api.audioUrl(track.audio_id));answerMedia.current=media;
     answerTrack.current={audioId:track.audio_id,generation:ws.generation,subtitles:track.subtitles,text:reply.content};
     setAnswerReady(true);setAnswerPlaying(false);
     if(ws.channel_checkpoint?.audio_id===track.audio_id)media.onloadedmetadata=()=>{media.currentTime=(ws.channel_checkpoint?.position_ms||0)/1000;};
     media.onended=()=>{if(!answerPlayingRef.current)return;bufferRef.current.audioClock(`followup:${ws.generation}`,Array.from(reply.content).length);bufferRef.current.flush();setAnswerPlaying(false);setAnswerReady(false);};
     media.onerror=()=>{bufferRef.current.audioGate(`followup:${ws.generation}`,true);setAnswerPlaying(false);};
   },[ws?.answer_audio?.audio_id,ws?.generation,ws?.session_state]);
-  useEffect(()=>()=>{playbackEpoch.current++;answerMedia.current?.pause();answerMedia.current=null;},[conversationId]);
+  useEffect(()=>()=>{playbackEpoch.current++;answerMedia.current?.pause();releaseClassroomAudio(answerMedia.current);answerMedia.current=null;},[conversationId]);
   const [previews, setPreviews] = useState<Record<string, any>>({});
   const subscriptions = useRef(new Map<string, AbortController>());
   const streamRetryAt = useRef(new Map<string, number>());
   const [savedAt, setSavedAt] = useState("");
   const seqRef = useRef(0);
+  const checkpointQueue=useRef<Promise<unknown>>(Promise.resolve());
   const posRef = useRef(0);
   const restoredPosition = useRef(false);
   const restoredPlayback=useRef<number|null>(null);
@@ -134,6 +146,8 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
   const codeEnabled=hasRunnable||runnableConversation.current===conversationId;
   const codeClass=useInteractiveClassroom(conversationId,ws?.playback_version||0,codeEnabled);
   const [boardMode,setBoardMode]=useState<"board"|"pdf">("board");
+  const manualBoardMode=useRef(false);
+  useEffect(()=>{manualBoardMode.current=false;},[conversationId]);
   const interactionContinue=useRef<()=>Promise<boolean>>(async()=>false);
   const interactionContinuing=useRef(false);
   const audioRequired=lessonAudioRequired(ws,audioStep,current);
@@ -144,7 +158,7 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
   const pdfFocus=(ws?.session_state==="awaiting_resume"?
     buffer.view(`followup:${ws.generation}`)?.board?.pdf_focus||ws.followup_board?.pdf_focus:null)||
     buffer.view(`step:${current}`)?.board?.pdf_focus||audioStep?.board?.pdf_focus;
-  useEffect(()=>{setBoardMode(pdfFocus?"pdf":"board");},[conversationId,current,pdfFocus?.target_id]);
+  useEffect(()=>{if(!manualBoardMode.current||!pdfFocus)setBoardMode(pdfFocus?"pdf":"board");},[conversationId,current,pdfFocus?.target_id]);
   useEffect(()=>{if(answerTextPlaying&&ws&&buffer.view(`followup:${ws.generation}`)?.remaining===0)setAnswerTextPlaying(false);},[answerTextPlaying,ws,buffer]);
   useEffect(()=>{
     if(!answerPlaying||!answerMedia.current||!answerTrack.current)return;
@@ -163,7 +177,7 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
     };
     frame=requestAnimationFrame(tick);return()=>{cancelAnimationFrame(frame);setAnswerAudible(false);};
   },[answerPlaying]);
-  const audio=useLessonAudio(conversationId,current,audioStep,playing,bufferRef,posRef,ws?.last_checkpoint,audioRequired);
+  const audio=useLessonAudio(conversationId,current,audioStep,playing,bufferRef,posRef,ws?.last_checkpoint,audioRequired,seekRequest);
   const audioRef=useRef(audio);audioRef.current=audio;
   const [paintedStep,setPaintedStep]=useState("");
   const boardPainted=paintedStep===`${conversationId}:${current}`;
@@ -215,6 +229,12 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
 
   const quiz=ws?.feynman?.active;
   const quizAudio=useFeynmanAudio(conversationId,quiz,quizAutoPlay,refresh);
+  useEffect(()=>{
+    if(!ws)return;
+    window.dispatchEvent(new CustomEvent("classroom-playback",{detail:{conversation:conversationId,step:current,
+      enabled:!reviewStep&&ws.session_state!=="completed"&&!ws.needs_upgrade&&!ws.authorization_required,
+      presenting:(playing&&(!audioRequired||audio.state==="playing"))||answerAudible||answerTextPlaying||quizAudio.state==="playing"}}));
+  },[conversationId,current,Boolean(ws),reviewStep,ws?.session_state,ws?.needs_upgrade,ws?.authorization_required,playing,audioRequired,audio.state,answerAudible,answerTextPlaying,quizAudio.state]);
   const saveAnswerPosition=useCallback(async()=>{
     if(ws?.session_state!=="awaiting_resume")return;
     const cursor=bufferRef.current.cursor(`followup:${ws.generation}`);
@@ -378,12 +398,13 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
 
   const saveCheckpoint = useCallback(async (stepNo: number, positionMs: number, reset = false) => {
     if(reviewStep)return true;
-    seqRef.current += 1;
+    const request={step_no:stepNo,position_ms:positionMs,
+      board_state:{presentation:{...(reset?{visible_chars:0,text_complete:false}:bufferRef.current.cursor(`step:${stepNo}`)),
+        paused:!playingRef.current,audio_id:reset?null:audioRef.current.sourceId,playback_version:ws?.playback_version||0}}};
     try {
-      await api.saveCheckpoint(conversationId, {
-        client_seq: seqRef.current, step_no: stepNo, position_ms: positionMs,
-        board_state:{presentation:{...(reset?{visible_chars:0,text_complete:false}:bufferRef.current.cursor(`step:${stepNo}`)),paused:!playingRef.current,audio_id:reset?null:audioRef.current.sourceId,playback_version:ws?.playback_version||0}},
-      });
+      const saving=checkpointQueue.current.catch(()=>{}).then(()=>api.saveCheckpoint(conversationId,{
+        ...request,client_seq:++seqRef.current}));
+      checkpointQueue.current=saving;await saving;
       setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
       return true;
     } catch (e: any) {
@@ -397,6 +418,45 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
       return false;
     }
   }, [conversationId, onErr,reviewStep,ws?.playback_version]);
+
+  const seekBackward=useCallback(async(target:LecturePosition)=>{
+    if(!ws||seekLock.current||quiz||busy||ws.session_state!=="active"||reviewStep)return;
+    const previous={step_no:current,position_ms:posRef.current,...bufferRef.current.cursor(`step:${current}`)};
+    if(comparePosition(target,previous)>0)return;
+    const segment=ws.steps.find(item=>item.step_no===target.step_no&&item.status==="ready");
+    if(!segment||audioRequired&&!segment.audio_ready)return;
+    seekLock.current=true;setSeeking(true);
+    const resume=seekResume.current??playingRef.current;seekResume.current=null;stopAll();setAdvanceTo(null);
+    try{
+      if(codeClass.running)return;
+      if(codeEnabled&&codeClass.ready&&!await codeClass.save())throw Error("交互记录保存失败。");
+      await coverage.flush();
+      if(!await saveCheckpoint(current,posRef.current))return;
+      const expected=seqRef.current;
+      await api.seekBackward(conversationId,{client_seq:++seqRef.current,expected_seq:expected,
+        step_no:target.step_no,position_ms:target.position_ms,board_state:{presentation:{
+          visible_chars:target.visible_chars,text_complete:target.visible_chars===Array.from(segment.text).length,
+          paused:!resume,audio_id:audioRequired?segment.audio_id:"",playback_version:ws.playback_version||0}}});
+      coverage.reset();
+      bufferRef.current.restoreCursor(`step:${target.step_no}`,target.visible_chars);
+      if(!audioRequired)bufferRef.current.audioClock(`step:${target.step_no}`,null);
+      setCurrent(target.step_no);posRef.current=target.position_ms;
+      setSeekRequest({id:Date.now(),step_no:target.step_no,position_ms:target.position_ms});
+      setPaintedStep("");textFollow.resume();await refresh();
+      playingRef.current=resume;setPlaying(resume);bufferRef.current.pause(!resume);
+    }catch(error){
+      onErr(errText(error));stopAll();await refresh();
+      try{
+        const latest=await api.getWorkspace(conversationId),saved=latest.last_checkpoint;
+        if(saved){
+          setCurrent(saved.step_no);posRef.current=saved.position_ms;
+          bufferRef.current.restoreCursor(`step:${saved.step_no}`,saved.presentation?.visible_chars||0);
+          setSeekRequest({id:Date.now(),step_no:saved.step_no,position_ms:saved.position_ms});
+        }
+      }catch{/* Stay paused until the connection returns. */}
+    }
+    finally{seekLock.current=false;setSeeking(false);}
+  },[ws,current,quiz,busy,reviewStep,audioRequired,stopAll,coverage,saveCheckpoint,refresh,codeEnabled,codeClass,textFollow,onErr]);
 
   useEffect(()=>{
     if(!playing || advanceTo===null || ws?.conversation_id!==conversationId || ws.session_state!=="active"
@@ -471,20 +531,8 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
   }, [playing, current, saveCheckpoint, audioRequired, ws?.conversation_id, ws?.session_state, conversationId]);
 
   const gotoStep = useCallback(async (n: number) => {
-    if (!ws) return;
-    const target = ws.steps.find((s) => s.step_no === n);
-    if (!target) return;
-    setAdvanceTo(null);
-    if (playing) {
-      // 切换步骤先暂停（本地立即）并保存位置
-      audioRef.current.pause();playingRef.current=false;bufferRef.current.pause(true);setPlaying(false);
-      await saveCheckpoint(current, posRef.current);
-    }
-    setCurrent(n);
-    posRef.current = 0;
-    await saveCheckpoint(n, 0);
-    await refresh();
-  }, [current, playing, saveCheckpoint, ws, refresh]);
+    await seekBackward({step_no:n,visible_chars:0,position_ms:0});
+  }, [seekBackward]);
 
   const togglePlay = useCallback(async () => {
     if (!ws) return;
@@ -533,7 +581,8 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
           const result=await api.getWorkspace(conversationId);
           const track=result.answer_audio;
           if(track?.audio_id){
-            const media=new Audio(api.audioUrl(track.audio_id));answerMedia.current=media;setAnswerReady(true);
+            releaseClassroomAudio(answerMedia.current);
+            const media=classroomAudio(api.audioUrl(track.audio_id));answerMedia.current=media;setAnswerReady(true);
             answerTrack.current={audioId:track.audio_id,generation:result.generation,subtitles:track.subtitles,text:result.followups.find((item:any)=>item.generation===result.generation&&item.role==="assistant")?.content||""};
             media.onended=()=>{if(epoch===playbackEpoch.current&&answerPlayingRef.current){bufferRef.current.audioClock(`followup:${result.generation}`,Array.from(answerTrack.current.text).length);bufferRef.current.flush();setAnswerPlaying(false);setAnswerReady(false);}};
             media.onerror=()=>{if(epoch===playbackEpoch.current){setAnswerPlaying(false);setAnswerReady(false);}};
@@ -651,6 +700,10 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
     ? `单元考纲准备未完成。${ws.scope_preparation?.error_code ? errText({code: ws.scope_preparation.error_code}) : "可以重试准备。"}`
     : "正在准备本单元考纲，完成后继续讲解…"
     : artifactExhausted ? "讲解补生成已达到重试上限，请检查模型设置。" : artifactRepairing ? "正在重新准备首段讲解…" : artifactMissing ? "首段讲解内容缺失，点击恢复讲解可重新准备。" : blocked ? "讲解配置暂不可用，请检查模型设置或恢复讲解。" : failedTasks.length ? failureMessage : ws.scope_preparation?.status === "succeeded" ? "单元考纲已就绪，正在准备首段讲解…" : "正在准备首段讲解…";
+  const preparingFirst=ws.steps.length===0&&!!ws.preparation&&ws.preparation.state!=="ready";
+  const preparationMessage=ws.preparation?.reason==="storage"?"本机空间不足，内容准备已暂停。释放空间后会自动继续。":ws.preparation?.reason==="memory"?"本机暂时繁忙，稍后会自动继续准备。":ws.preparation?.reason==="capacity"?"正在准备本讲内容…":ws.preparation?.reason==="quota"?"学习服务额度不足，请补充后继续，课程已保留。":ws.preparation?.state==="action_required"
+    ?"学习服务连接需要更新，课程已保留。":ws.preparation?.state==="paused"
+      ?"暂时无法准备本讲内容，课程已保留。":"正在准备本讲内容…";
 
   return (
     <div className="ink-classroom" data-nav-collapsed={navCollapsed}><aside id="classroom-navigation" className="classroom-nav" aria-label="课堂导航">
@@ -684,13 +737,22 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
             <div className="board-inner">
               <div className="canvas-readonly-wrap">
                 {pdfFocus&&<div className="classroom-mode" role="tablist" aria-label="教学视图">
-                  <button role="tab" aria-selected={boardMode==="pdf"} onClick={()=>setBoardMode("pdf")}>原文</button>
-                  <button role="tab" aria-selected={boardMode==="board"} onClick={()=>setBoardMode("board")}>板书</button>
+                  <button role="tab" aria-selected={boardMode==="pdf"} onClick={()=>{manualBoardMode.current=true;setBoardMode("pdf");}}>原文</button>
+                  <button role="tab" aria-selected={boardMode==="board"} onClick={()=>{manualBoardMode.current=true;setBoardMode("board");}}>板书</button>
                 </div>}
                 {pdfFocus&&<div className="classroom-board-surface" hidden={boardMode!=="pdf"}><PdfLesson conversation={conversationId} focus={pdfFocus}
                   active={boardMode==="pdf"} onTarget={handlePointingTarget} onPainted={handleBoardPainted}/></div>}
                 <div className="classroom-board-surface" hidden={boardMode==="pdf"}>
                   <TeachingBoard theme="ink" onTarget={boardMode==="board"?handlePointingTarget:undefined} onPainted={boardMode==="board"?handleBoardPainted:undefined}
+                    onExport={async all=>{
+                      setExportError("");
+                      if(!window.desktopClassroom){setExportError("板书文件导出请使用桌面版。");return;}
+                      try{
+                        const scenes=boardExportScenes(ws,buffer,current,boardScene,all,Object.values(codeClass.cells));
+                        if(!scenes.some(scene=>scene.presentation?.blocks?.length)){setExportError("尚无可导出的板书。");return;}
+                        await window.desktopClassroom.exportBoard({title:ws.lesson_title,scenes},all?"pdf":"png");
+                      }catch{setExportError("板书导出失败，课堂内容已保留。");}
+                    }}
                     presenting={boardPresenting&&boardMode==="board"} scene={boardScene}
                     codeContext={hasRunnable?codeClass:undefined} onCodeEdit={()=>{handlePointingTarget(null);if(playing){stopAll();void saveCheckpoint(current,posRef.current);}}}
                     sceneKey={`${conversationId}:${boardKey.startsWith("followup:")&&!interactiveBlocks.length?boardKey:scope}`} />
@@ -718,6 +780,12 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
               )}
             </div>
           </div>
+          <LectureProgress position={{step_no:current,visible_chars:buffer.cursor(`step:${current}`).visible_chars,position_ms:posRef.current}}
+            steps={ws.steps} total={ws.planned_steps||0} played={ws.played_steps}
+            disabled={seeking||Boolean(quiz)||busy||ws.session_state!=="active"||Boolean(reviewStep)||Boolean(pendingCode)||Boolean(codeClass.running)}
+            onBegin={()=>{seekResume.current=playingRef.current;stopAll();setAdvanceTo(null);}}
+            onCancel={()=>{const resume=seekResume.current;seekResume.current=null;if(resume){playingRef.current=true;setPlaying(true);bufferRef.current.pause(false);}}}
+            onSeek={seekBackward}/>
           <TeachingPointer target={pointingTarget} active={Boolean(boardScene)}/>
           <CharacterStage character={step?.character} conversationId={conversationId} stepNo={current} playing={livePresenting}
             scene={characterScene({playing:livePresenting,
@@ -764,14 +832,16 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
                 {paragraphs(visible?.text||"",draft.beats).map((text,i)=><p key={i}>{text}</p>)}
               </section>;
             })}
-            {ws.steps.length === 0 && !visibleDrafts.some(([, draft]) => draft.text) && <p className="muted" role="status">{emptyMessage}</p>}
+            {ws.steps.length === 0 && !visibleDrafts.some(([, draft]) => draft.text) && <p className="muted" role="status">{preparingFirst?preparationMessage:emptyMessage}</p>}
             </div>
           </div>
           <div className="lecture-actions">
             {connectionWaiting&&<p className="help" role="status">连接暂不可用，已保留当前讲解，恢复连接后继续准备。</p>}
             {recordError&&<p role="alert">{recordError}<button className="btn btn-sm" onClick={()=>void recordPoint()}>重试保存</button></p>}
-            {scopeFailed && <button className="btn btn-sm" disabled={busy} onClick={recover}>重试准备考纲</button>}
-            {!scopeWaiting && (blocked || recoveryNeeded || artifactExhausted) && <div role="status"><p>{emptyMessage}</p>
+            {preparingFirst&&ws.preparation?.action==="settings"&&<a className="btn btn-sm" href={ws.preparation.reason==="storage"?"#/capabilities?section=storage":"#/capabilities"}>前往设置</a>}
+            {preparingFirst&&ws.preparation?.action==="retry"&&<button className="btn btn-sm" disabled={busy} onClick={recover}>稍后再试</button>}
+            {!preparingFirst&&scopeFailed && <button className="btn btn-sm" disabled={busy} onClick={recover}>重试准备考纲</button>}
+            {!preparingFirst&&!scopeWaiting && (blocked || recoveryNeeded || artifactExhausted) && <div role="status"><p>{emptyMessage}</p>
               {(blocked || recoveryNeeded) && <button className="btn btn-sm" disabled={busy} onClick={recover}>{artifactMissing || blocked ? "恢复讲解" : "重试生成"}</button>}
               <a className="btn btn-sm" href="#/capabilities">模型设置</a>
             </div>}
@@ -785,14 +855,14 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
               }catch(error){onErr(errText(error));}
             }}>开始本讲费曼对话</button>}
             {finalSegment && ((displayComplete && audioComplete)||lessonQuizFinished) && !quiz && !quizBoundary && <button className="btn btn-pri btn-sm" disabled={busy||awaiting} onClick={async()=>{
-              try {if(!await recordPoint())return;await api.completeLesson(conversationId);go(`/knowledge/${conversationId}`);}
+              try {if(!await recordPoint())return;await beforeClassroomExit();await api.completeLesson(conversationId);go(`/knowledge/${conversationId}`);}
               catch(e:any){onErr(e.message||"完成确认失败");}
             }}>确认本讲已学完</button>}
           </div>
           {audioRequired&&!audio.textOnly&&<div className="lecture-audio-hint" role="status">
             {audio.state==="blocked"?<button className="btn btn-sm" onClick={audio.enable}>点击开启声音</button>:
               audio.state==="failed"||audioFailure||["failed","invalid"].includes(audioStep?.audio_status||"")?<>
-                <span>{audio.alignmentFailed?"语音字幕无法与讲稿精确对应，请重新准备语音。":audioStep?.audio_error==="subtitle_missing"?"语音字幕缺失，暂时无法同步播放。":audioFailure||"语音暂时不可用。"}</span>
+                <span>{audio.alignmentFailed?"语音字幕无法与讲稿精确对应，请重新准备语音。":audioStep?.audio_error==="subtitle_missing"?"语音字幕缺失，暂时无法同步播放。":audioStep?.audio_error==="MODEL_QUOTA_EXCEEDED"?"语音服务余额不足，充值后可重试，讲解进度已保留。":audioFailure||"语音暂时不可用。"}</span>
                 <button className="btn btn-sm" disabled={audioRetrying} onClick={async()=>{
                   const epoch=audioRetryEpoch.current;
                   setAudioRetrying(true);setAudioFailure("");audio.retry();
@@ -811,7 +881,7 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
                     if(epoch===audioRetryEpoch.current)setAudioRetrying(false);
                   }
                 }}>重试语音</button>
-              </>:!audioStep?.audio_ready?<span>正在准备语音…</span>:null}
+              </>:ws.steps.length>0&&!audioStep?.audio_ready?<span>正在准备语音…</span>:null}
           </div>}
           <div className="composer2" style={{ padding: "12px 20px 18px", boxShadow: "0 -8px 20px rgba(20,30,45,.06)" }}>
             {pendingCode&&!playing&&ws.session_state==="active"&&displayComplete&&<div className="code-interaction-prompt" role="status">
@@ -860,6 +930,9 @@ export default function LectureView({ conversationId, onErr, onOk, go,reviewStep
           </div>
         </div>
       </LectureSplit>
+      <div id="classroom-recording-slot"/>
+      {exportError&&<div role="alert" className="classroom-media-error">{exportError}
+        <button aria-label="关闭导出提示" onClick={()=>setExportError("")}>×</button></div>}
     </div></div>
   );
 }

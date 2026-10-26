@@ -289,6 +289,27 @@ def test_disk_and_memory_pressure_blocks_claim_and_queue_is_bounded(env):
         assert session.get(LearningTaskRow,ids[0]).status=="queued"
 
 
+def test_shared_resource_gate_preserves_disk_recovery_margin_and_memory_reason(tmp_path, monkeypatch):
+    from backend.cleanup import budget as module
+
+    free = [int(6.6 * GIB)]
+    monkeypatch.setattr(module.shutil, "disk_usage", lambda path:
+                        SimpleNamespace(total=160 * GIB, free=free[0]))
+    memory = {"memory_paused": False, "heavy_limit": 1}
+    budget = module.ResourceBudget(SimpleNamespace(base_dir=tmp_path), sampler=lambda: dict(memory))
+    budget.snapshot(force=True)
+    assert budget.wait_reason() == "storage" and not budget.permits_heavy()
+    free[0] = int(8.3 * GIB)
+    budget.snapshot(force=True)
+    assert budget.wait_reason() == "storage" and not budget.permits_heavy()
+    free[0] = int(9.3 * GIB)
+    budget.snapshot(force=True)
+    assert budget.wait_reason() is None and budget.permits_heavy()
+    memory["memory_paused"] = True
+    budget.snapshot(force=True)
+    assert budget.wait_reason() == "memory" and not budget.permits_heavy()
+
+
 def test_restore_lock_stops_scheduling(env):
     manager,owner=env
     manager.cleanup.set_state("restore_locked","1")

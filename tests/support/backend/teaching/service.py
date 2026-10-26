@@ -90,6 +90,8 @@ class TeachingService:
         self.retrieval = PlanningRetrievalService(db)
         from .preparation import LessonPreparation
         self.preparation = LessonPreparation(self)
+        from .course_preparation import CoursePreparation
+        self.course_preparation = CoursePreparation(self)
         self.server_managed=False
         self.configs=None
         self.background=None
@@ -104,6 +106,7 @@ class TeachingService:
     # ------------------------------------------------------------------
     def start_lesson(self, course_id: str, lesson_id: str, *, actor_id: str,
                      _upgrade_from: str | None = None, _confirmation: dict | None = None) -> dict:
+        from .source_reading import current_reading_context
         scope_pending = False
         frozen_scope_hash = ""
         scope_input_hash = ""
@@ -112,8 +115,11 @@ class TeachingService:
                 course = sess.get(CourseRow, course_id)
                 lesson = sess.get(LessonRow, lesson_id)
                 unit = sess.get(CourseUnitRow, lesson.unit_id) if lesson else None
-                if (not course or course.owner_user_id != actor_id or course.deleted_at
-                        or not unit or unit.outline_version_id != course.current_outline_version_id):
+                if not course or course.owner_user_id != actor_id or course.deleted_at:
+                    raise terr("lesson_not_found", status=404)
+                if not course.current_outline_version_id:
+                    raise terr("LESSON_UNLOCK_REQUIRED", status=409)
+                if not unit or unit.outline_version_id != course.current_outline_version_id:
                     raise terr("lesson_not_found", status=404)
                 if _confirmation:
                     self.authorization.prepare_confirmation(sess, course_id, lesson_id, actor_id,
@@ -124,11 +130,23 @@ class TeachingService:
                         course_id=course_id, lesson_id=lesson_id,
                         outline_version_id=course.current_outline_version_id, conversation_id=None))
                 scope = self.assessments.scopes.get(course_id, unit.unit_id, actor_id)
+                self.course_preparation.request_resume(sess,course,lesson)
+                self.course_preparation.promote(sess, course, lesson)
                 frozen_scope_hash = scope.get("scope_hash", "") if scope.get("status") == "succeeded" else ""
                 scope_input_hash = scope.get("input_hash", "")
             if scope.get("status") != "succeeded":
                 scope_pending = True
-                if scope.get("status") not in ("queued", "leased", "running"):
+                if self.course_preparation.enabled:
+                    from .course_preparation import digest
+                    self.course_preparation._advance(digest([course.current_outline_version_id, "scope", unit.unit_id]))
+                    scope = self.assessments.scopes.get(course_id, unit.unit_id, actor_id)
+                    if not scope.get("input_hash"):
+                        from ..materials.study_sources import digest as scope_digest
+                        with self.db.session() as sess:
+                            scope["input_hash"] = scope_digest(self.assessments.scopes.context(
+                                sess, course, unit, actor_id))
+                    scope_input_hash = scope["input_hash"]
+                elif scope.get("status") not in ("queued", "leased", "running"):
                     if scope.get("task_id"):
                         self.assessments.scopes.retry(course_id, unit.unit_id, actor_id)
                     else:
@@ -163,7 +181,8 @@ class TeachingService:
                 if original:
                     try:
                         original_context = load_json_field(original.context_json, {})
-                        if original_context.get("unit_scope_hash", "") == frozen_scope_hash:
+                        if (original_context.get("unit_scope_hash", "") == frozen_scope_hash
+                                and current_reading_context(original_context)):
                             validate_new_blueprint(original_context, LessonBlueprint.model_validate_json(original.plan_json))
                             return {"conversation_id": _upgrade_from, "task_id": None, "lesson_id": lesson_id}
                     except (ValueError, ModelRetry):
@@ -204,7 +223,8 @@ class TeachingService:
                     if (existing_context.get("_scope_pending")
                             and existing_context.get("_scope_pending_input_hash") == scope_input_hash):
                         return self._reuse_lesson(sess, existing, lesson, confirmation)
-                    if not scope_pending and existing_scope_hash == frozen_scope_hash:
+                    if (not scope_pending and existing_scope_hash == frozen_scope_hash
+                            and current_reading_context(existing_context)):
                         return self._reuse_lesson(sess, existing, lesson, confirmation)
                     existing.session_state = "archived"
             version = sess.execute(select(LessonContentVersionRow).where(LessonContentVersionRow.lesson_id == lesson_id)
@@ -246,13 +266,24 @@ class TeachingService:
                 idempotency_key=f"step:{conv_id}:1:1",
                 stage="generate",
                 lane="interactive",
-                deadline_seconds=780 if scope_pending or warm and warm.status in ('queued','generating') else 180,
+                deadline_seconds=3000 if scope_pending and self.course_preparation.enabled else
+                    780 if scope_pending or warm and warm.status in ('queued','generating') else 180,
                 session=sess,
             )
+            if not warm:
+                self.course_preparation.link_started(sess,course,lesson,created["task_id"])
             if confirmation:
                 self.authorization.record(sess, confirmation, actor_id, created["task_id"], conv_id)
             else:
                 self.authorization.bind_task(sess, conv, created["task_id"])
+            if warm:
+                from ..characters.service import segment_character
+                segment_character(sess,conv_id,1,freeze=True)
+                if self.disclosures:
+                    consent=self.authorization.check_task(sess,sess.get(LearningTaskRow,created["task_id"]))
+                    if consent:
+                        self._character_disclosure(sess,sess.get(LearningTaskRow,created["task_id"]),
+                            consent.content_config_id,consent.content_config_version,prepare=True)
             context = lesson_context(self, conv)
             conv.material_snapshot_json = json.dumps(context.get("material_ids", []))
             scope_pending = scope_pending and not context.get("unit_scope_hash")
@@ -262,7 +293,7 @@ class TeachingService:
             plan = (LessonBlueprint.model_validate_json(warm.plan_json) if warm else
                     None if scope_pending else prepared_plan(self, conv, context))
             if warm:
-                context=json.loads(warm.context_json)
+                context={**json.loads(warm.context_json),**context}
                 context["_first_cache_id"]=warm.cache_id
                 warm.consumed_conversation_id=conv_id
             context["_presentation_contract"] = 2
@@ -289,7 +320,6 @@ class TeachingService:
                 except PromptUnavailable:
                     pass
                 with self.db.session() as sess:
-                    from ..tasks.service import LearningTaskRow
                     preparation_task=sess.get(LearningTaskRow,warm.task_id)
                     if preparation_task and preparation_task.status=="queued":preparation_task.lane="interactive"
                 if warm.status in ("ready","text_ready"):
@@ -538,14 +568,19 @@ class TeachingService:
 
     def _character_disclosure(self, session, task, config_id, config_version, *,
                               prepare=False, refresh_expired=False):
-        if not self.disclosures or task.kind not in ("lesson_step_generate", "feynman"):
+        if not self.disclosures or task.kind not in ("lesson_step_generate", "feynman", "lesson_first_prepare"):
             return None
         from ..characters.models import CharacterSegmentRow
         from ..characters.service import segment_character
         from ..slice1.errors import Slice1Error
 
         parts = task.subject_id.split(":")
-        if task.kind=="feynman":
+        if task.kind=="lesson_first_prepare":
+            from .learning_models import PreparedFirstSegmentRow
+            cached=session.scalar(select(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.task_id==task.task_id))
+            character=load_json_field(cached.context_json,{}).get("_prepared_character") if cached else None
+            frozen=character
+        elif task.kind=="feynman":
             from .learning_models import FeynmanSessionRow
             quiz=session.get(FeynmanSessionRow,parts[2]) if len(parts)==5 else None
             if not quiz:return None
@@ -553,10 +588,11 @@ class TeachingService:
         else:
             if len(parts) != 3 or not parts[1].isdigit():return None
             segment_no=int(parts[1])
-        frozen = session.get(CharacterSegmentRow, (parts[0], segment_no))
+        if task.kind!="lesson_first_prepare":
+            frozen = session.get(CharacterSegmentRow, (parts[0], segment_no))
+            character = segment_character(session, parts[0], segment_no)
         if frozen is None and not prepare:
             return None
-        character = segment_character(session, parts[0], segment_no)
         if not character:
             if frozen is not None:
                 raise terr("DISCLOSURE_REVOKED")
@@ -577,8 +613,10 @@ class TeachingService:
             except Slice1Error as exc:
                 if not (prepare and refresh_expired and exc.code == "disclosure_expired"):
                     raise
-        elif not prepare:
+        elif not prepare and task.kind!="lesson_first_prepare":
             raise terr("DISCLOSURE_REQUIRED")
+        elif not prepare:
+            return None
         return self.disclosures.create(actor_id=task.owner_user_id, task_id=task.task_id,
             config_id=config_id, config_version=config_version, content_category="character_media",
             scope_snapshot=scope, session=session)
@@ -588,7 +626,7 @@ class TeachingService:
             from ..tasks.service import LearningTaskRow
             task = session.get(LearningTaskRow, task_id, populate_existing=True)
             consent = self.authorization.check_task(session, task, audio=audio)
-            if task and task.kind in ("lesson_step_generate", "tts", "tts_answer", "feynman"):
+            if task and task.kind in ("lesson_step_generate", "tts", "tts_answer", "feynman", "lesson_first_prepare"):
                 from ..characters.models import CharacterSegmentRow, CharacterCardRow
                 parts = task.subject_id.split(":")
                 if len(parts) == 3 and parts[1].isdigit():
@@ -609,9 +647,107 @@ class TeachingService:
         return self.start_lesson(conv.course_id, conv.lesson_id, actor_id=actor_id,
                                  _upgrade_from=conversation_id)
 
+    def _generate_reading_step(self, conv, task_id, adapter, step_no, *, lease=None, prepared=None):
+        """Generate one source-bound bilingual step through the standard publisher."""
+        from .source_reading import (READING_POLICY, build_source_reading_plan,
+            located_reading_target, persist_reading_plan, reading_plan_from_row,
+            source_reading_blueprint)
+        from .interactive import bind_source
+        from ..agents.roles import teaching_agent
+        from pydantic_ai.exceptions import ModelRetry
+        conv_id = conv.conversation_id
+        if prepared:
+            blueprint, context = prepared
+            reading_plan = reading_plan_from_row(None, context)
+        else:
+            with self.db.session() as sess:
+                row = sess.get(LessonBlueprintRow, conv_id)
+                context = {key: value for key, value in load_json_field(row.context_json, {}).items()
+                           if not key.startswith("_")} if row else lesson_context(self, conv)
+                reading_plan = reading_plan_from_row(row) if row else None
+                blueprint = LessonBlueprint.model_validate_json(row.plan_json) if row and load_json_field(row.plan_json, {}).get("stages") else None
+        if reading_plan is None:
+            reading_plan = build_source_reading_plan(self, conv, context)
+            blueprint = source_reading_blueprint(reading_plan, context)
+            context = persist_reading_plan(context, reading_plan)
+        schedule = teaching_schedule(blueprint)
+        if step_no > len(reading_plan.units) or step_no > len(schedule):
+            raise terr("OUTPUT_INVALID", "论文精读已结束")
+        phase, unit = schedule[step_no-1], reading_plan.units[step_no-1]
+        target = located_reading_target(self, conv, context, unit)
+        prompt = self.prompts.resolve_for_task(task_id, TEACHING_PROMPT)["template_snapshot"] + "\n" + READING_POLICY
+        from .board_alignment import contract_snapshot, require_alignment
+        alignment_prompt = contract_snapshot(self.prompts, task_id)
+        if alignment_prompt:
+            prompt += "\n" + alignment_prompt
+        existing_board = self._stage_blocks(conv_id, schedule, step_no, phase.stage_no)
+        payload = {"existing_board": existing_board, "context": {key: value for key, value in context.items() if not key.startswith("_") and key != "source_reading_plan"},
+            "current_reading_unit": {**unit.model_dump(exclude={"target"}), "original_text": unit.source_text},
+            "figure_targets": [{"figure_no": t["figure_no"], "page_no": t["page_no"]}
+                for t in reading_plan.figure_targets if t["material_id"] == unit.material_id],
+            "reading_map": [{"title":u.knowledge_point_label,"role":u.section_role,"mode":u.reading_mode}
+                for i,u in enumerate(reading_plan.units) if i == 0 or u.knowledge_point_label != reading_plan.units[i-1].knowledge_point_label],
+            "current_scope_requirements": [r for r in context.get("scope_capabilities", []) if r["capability_id"] in phase.scope_capability_ids],
+            "source_step_refs": [n for n,p in enumerate(schedule,1) if n <= step_no and p.knowledge_point_id == phase.knowledge_point_id],
+            "current_stage": phase.model_dump(), "previous": previous_teaching(self, conv_id, step_no),
+            "is_final": step_no == len(schedule)}
+        from ..characters.service import segment_character
+        with self.db.session() as sess:
+            character = (getattr(conv,"prepared_character",None) if prepared is not None
+                         else segment_character(sess, conv_id, step_no, freeze=True))
+        if character:
+            if self.disclosures:
+                with self.db.session() as sess:
+                    task = sess.get(LearningTaskRow, task_id)
+                    consent = self.authorization.check_task(sess, task)
+                    if consent:
+                        self._character_disclosure(sess, task, consent.content_config_id,
+                            consent.content_config_version, prepare=True)
+            from ..characters.expression import content_expression
+            from ..characters.delivery import DELIVERY_POLICY, delivery_context, expression_payload
+            prompt += "\n人物表达约束：" + DELIVERY_POLICY
+            expression = content_expression(self.db, adapter, character["profile"],
+                binding=(conv_id, step_no) if prepared is None else None,
+                continuity=delivery_context(self.db, conv_id, step_no-1) if prepared is None else {})
+            payload["character_expression"] = expression_payload(character["profile"], expression,
+                continuity=expression.get("continuity"))
+        adapter.omit_prompt_trace = True
+
+        from .source_reading import compile_reading_draft
+        compiled = {}
+        prompt += ("\n实际输出契约为 draft：transition(简短衔接)、translation(完整中文翻译)、"
+            "explanation(连贯的中文解释)、note(解释中逐字出现的1个关键短语，可空)、"
+            "emphasis_quotes(原文关键短语)、covered_scope_capability_ids(复制当前要求)、recap(知识点末尾总结)。"
+            "英文原文、beats、板书、坐标和阶段均由程序组装，不需要你输出steps。")
+        def validate(_ctx, output):
+            try:
+                item = compile_reading_draft(output.draft, unit, phase, step_no,
+                    payload["source_step_refs"], step_no == len(schedule))
+            except ValueError as exc:
+                raise ModelRetry("翻译必须完整，原文短语必须精确，讲解不能超过120秒。") from exc
+            bind_source(item.board, [target])
+            for beat in item.beats:
+                bind_source(beat, [target])
+            compiled["item"] = item
+            return output
+
+        options = {"output_validator": validate}
+        if prepared is not None:
+            options["max_requests"] = getattr(conv, "prepared_request_limit", 2)
+        run = teaching_agent.generate_reading_step(adapter, TeachingStepInput.from_messages([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]),
+            replace(deps_for_source(adapter), omit_content_trace=True), **options)
+        from .source_reading import SourceReadingPlanCandidate
+        run.payload = SourceReadingPlanCandidate(steps=[compiled["item"]])
+        return blueprint, context, phase, run
+
     def _generate_one(self,conv,task_id,adapter,step_no,*,lease=None,prepared=None):
         owner=conv.owner_user_id;conv_id=conv.conversation_id
         blueprint, context = prepared or plan_lesson(self, conv, task_id, adapter)
+        if context.get("teaching_mode") == "source_reading":
+            return self._generate_reading_step(conv, task_id, adapter, step_no, lease=lease,
+                prepared=(blueprint, context) if prepared is not None else None)
         schedule = teaching_schedule(blueprint)
         if step_no > len(schedule): raise terr("OUTPUT_INVALID", "教学已结束")
         phase = schedule[step_no-1]
@@ -680,10 +816,11 @@ class TeachingService:
         from ..agents.roles import teaching_agent
         from ..agents.tools import lesson_step_output_validator
         from pydantic_ai.exceptions import ModelRetry
+        from ..agents.validation import OutputConstraintRetry
         example_reviews = {}
         def validate(ctx, output):
             lesson_step_output_validator(ctx, output)
-            if len(output.steps) != 1: raise ModelRetry("只输出当前一个步骤。")
+            if len(output.steps) != 1: raise OutputConstraintRetry("teaching_step_count","只输出当前一个步骤。")
             item = output.steps[0]
             if preserved_text is not None:
                 from .examples import TeachingExample
@@ -709,17 +846,20 @@ class TeachingService:
             for beat in item.beats:
                 bind_source(beat, targets)
             if context.get("teaching_mode") == "source_reading" and targets and not item.board.source_focus:
-                raise ModelRetry("本段为原文精读，必须选择 pdf_targets 中的区域填写 board.source_focus。")
+                raise OutputConstraintRetry("teaching_source_focus","本段为原文精读，必须选择 pdf_targets 中的区域填写 board.source_focus。")
             if alignment_prompt:
-                require_alignment(item, existing_board)
+                try:
+                    require_alignment(item, existing_board)
+                except ModelRetry as exc:
+                    raise OutputConstraintRetry("teaching_alignment",str(exc)) from exc
             issues = graph_issues(item.board.blocks, existing_board)
             if issues:
-                raise ModelRetry("；".join(issues))
+                raise OutputConstraintRetry("teaching_board_graph","；".join(issues))
             if preserved_text is not None and item.text != preserved_text:
-                raise ModelRetry("已有讲解文字必须原样保留，仅补齐缺失的板书。")
+                raise OutputConstraintRetry("teaching_preserved_text","已有讲解文字必须原样保留，仅补齐缺失的板书。")
             from .board_blocks import has_screen_position_reference
             if preserved_text is None and has_screen_position_reference(item.text):
-                raise ModelRetry("板书会按视口动态排版。请按块标题或语义名称引用代码、表格和图形，不使用左侧、右侧、上方、下方等屏幕位置；同步修改 beats 与完整 text。")
+                raise OutputConstraintRetry("teaching_screen_position","板书会按视口动态排版。请按块标题或语义名称引用代码、表格和图形，不使用左侧、右侧、上方、下方等屏幕位置；同步修改 beats 与完整 text。")
             for block in item.board.blocks:
                 if block.id in existing_board and block.model_dump()!=existing_board[block.id]:
                     raise ModelRetry("同阶段已有板书块ID的内容不能改写；引用旧块须原样保留，新内容使用新ID。")
@@ -729,7 +869,7 @@ class TeachingService:
             if item.covered_goal_ids and set(item.covered_goal_ids) != set(phase.goal_ids):
                 raise ModelRetry("覆盖目标与当前阶段不符。")
             if set(item.covered_scope_capability_ids) != set(phase.scope_capability_ids):
-                raise ModelRetry("当前教学段必须明确承接本段分配的全部考纲能力，不能遗漏或新增。")
+                raise OutputConstraintRetry("teaching_scope_coverage","当前教学段必须明确承接本段分配的全部考纲能力，不能遗漏或新增。")
             if item.lesson_finished and step_no != len(schedule): raise ModelRetry("尚未到最后小结，不能结束。")
             if item.persona_traits and (not character or any(
                     key not in ("identity","background","personality","appearance","speaking_style")
@@ -764,14 +904,16 @@ class TeachingService:
             "do_not_assume_screen_position":True}
         from ..characters.service import segment_character
         with self.db.session() as sess:
-            character = segment_character(sess, conv_id, step_no, freeze=True)
+            character = (getattr(conv,"prepared_character",None) if prepared is not None
+                         else segment_character(sess, conv_id, step_no, freeze=True))
         if character:
             persona = character["profile"]
             from ..characters.expression import content_expression
             from ..characters.delivery import DELIVERY_POLICY, delivery_context, expression_payload
             prompt += "\n人物表达约束：" + DELIVERY_POLICY
             expression = content_expression(self.db, adapter, persona, precise=phase.phase == "concept",
-                binding=(conv_id, step_no), continuity=delivery_context(self.db, conv_id, step_no-1))
+                binding=(conv_id, step_no) if prepared is None else None,
+                continuity=delivery_context(self.db, conv_id, step_no-1) if prepared is None else {})
             if self.disclosures:
                 from ..tasks.service import LearningTaskRow
                 with self.db.session() as sess:
@@ -812,7 +954,7 @@ class TeachingService:
             tool=reference_tool(character["profile"])
             if tool: options["tools"]=[tool]
         if prepared is not None:
-            options["max_requests"]=2
+            options["max_requests"]=getattr(conv,"prepared_request_limit",2)
             payload["preferred_text_length"]="160-240 characters"
         status = getattr(adapter,"capability_status",{}).get("streaming",{})
         state = status.get("state") if isinstance(status,dict) else status
@@ -823,6 +965,8 @@ class TeachingService:
                 stage_segment_no=phase.stage_segment_no,existing_blocks=existing_board,
                 require_alignment=bool(alignment_prompt))
         alignment_deps=deps_for_source(adapter)
+        if prepared is None and step_no == 1:
+            alignment_deps=replace(alignment_deps,output_retries=7)
         if alignment_prompt or example_policy:
             alignment_deps=replace(alignment_deps,omit_content_trace=True)
         if example_policy and phase.phase == "example" and context.get("source_snapshot"):
@@ -902,22 +1046,26 @@ class TeachingService:
             if conv.session_state != "active": raise terr("STALE_RESULT_DISCARDED")
             from ..characters.service import segment_character
             with self.db.session() as sess:
-                self.feynman.guard(sess,conv,step_no)
-                has_character = segment_character(sess, conv_id, step_no) is not None
-            cached=None if has_character else self.preparation.for_conversation(conv,step_no)
+                self.feynman.guard(sess, conv, step_no)
+            cached=self.preparation.for_conversation(conv,step_no)
             adapter = None if cached else self._model_adapter(owner, task_id)
             if adapter is None and not cached: raise terr("MODEL_CAPABILITY_UNAVAILABLE")
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
             from contextvars import copy_context
             def generate():
-                cached=None if has_character else self.preparation.for_conversation(conv,step_no)
+                cached=self.preparation.for_conversation(conv,step_no)
                 if cached:
                     from types import SimpleNamespace
                     from .outputs import StepCandidate
+                    from .source_reading import SourceReadingStepCandidate
                     blueprint=LessonBlueprint.model_validate_json(cached.plan_json)
-                    context={key:value for key,value in json.loads(cached.context_json).items() if not key.startswith("_")}
+                    cached_context=json.loads(cached.context_json)
+                    context={key:value for key,value in cached_context.items() if not key.startswith("_")}
                     phase=teaching_schedule(blueprint)[0]
-                    return blueprint,context,phase,SimpleNamespace(payload=LessonPlanCandidate(steps=[StepCandidate.model_validate_json(cached.candidate_json)]),mode="cache")
+                    candidate_type=(SourceReadingStepCandidate if cached_context.get("teaching_mode") == "source_reading"
+                                    else StepCandidate)
+                    candidate=candidate_type.model_validate_json(cached.candidate_json)
+                    return blueprint,context,phase,SimpleNamespace(payload=SimpleNamespace(steps=[candidate]),mode="cache")
                 return self._generate_one(conv,task_id,adapter,step_no,lease=lease)
             with ThreadPoolExecutor(max_workers=1) as pool:
                 future=pool.submit(copy_context().run,generate)
@@ -926,7 +1074,8 @@ class TeachingService:
                     except FutureTimeout:self.tasks.heartbeat(lease,lease_seconds=120)
             candidate=run.payload.steps[0]
             schedule=teaching_schedule(blueprint)
-            duration_ms=validate_step_duration(candidate.text)
+            duration_ms=validate_step_duration(candidate.text,
+                source_reading=context.get("teaching_mode") == "source_reading")
             step_id=f"tstep_{uuid.uuid4().hex[:12]}";scene_id=f"bscene_{uuid.uuid4().hex[:12]}"
             def publish(sess):
                 nonlocal step_id, scene_id
@@ -942,7 +1091,12 @@ class TeachingService:
                         plan_json=blueprint.model_dump_json(),context_json=json.dumps(context,ensure_ascii=False),source_task_id=task_id))
                 else:
                     planned = sess.get(LessonBlueprintRow, conv_id)
-                    if not load_json_field(planned.plan_json, {}).get("stages"):
+                    if context.get("source_reading_plan"):
+                        planned.plan_json = blueprint.model_dump_json()
+                        stored_context = load_json_field(planned.context_json, {})
+                        stored_context.update(context)
+                        planned.context_json = json.dumps(stored_context, ensure_ascii=False)
+                    elif not load_json_field(planned.plan_json, {}).get("stages"):
                         planned.plan_json = blueprint.model_dump_json()
                         stored_context = load_json_field(planned.context_json, {})
                         stored_context.update(context)
@@ -964,7 +1118,40 @@ class TeachingService:
                         if persona:
                             learn_expression(sess, persona["profile"], getattr(adapter, "model_name", ""),
                                 candidate.persona_traits)
-                    if candidate.board.source_focus or any(b.source_focus for b in candidate.beats):
+                    if (context.get("teaching_mode") == "source_reading"
+                            and hasattr(candidate, "source_target_id")):
+                        from .source_reading import (emphasis_regions, located_reading_target,
+                            reading_plan_from_row, reading_source_metadata)
+                        reading_plan = reading_plan_from_row(None, context)
+                        if not reading_plan or step_no > len(reading_plan.units):
+                            raise terr("OUTPUT_INVALID", "论文阅读计划缺失或已过期。")
+                        unit = reading_plan.units[step_no-1]
+                        target = located_reading_target(self, current, context, unit)
+                        from .interactive import bind_source
+                        bind_source(candidate.board, [target])
+                        for beat in candidate.beats:
+                            bind_source(beat, [target])
+                        regions = []
+                        for quote in candidate.emphasis_quotes:
+                            regions.extend(emphasis_regions(quote, unit))
+                        focus = dict(target)
+                        if regions:
+                            focus["regions"] = [*target.get("regions", []), *regions]
+                        scene = declaration_to_scene(candidate.board)
+                        scene["pdf_focus"] = focus
+                        scene["source_reading"] = {**reading_source_metadata(unit, target),
+                            "original_text": candidate.original_text, "translation": candidate.translation,
+                            "emphasis_regions": regions}
+                        scene["source_cues"] = []
+                        source_at = candidate.text.find(candidate.original_text) if candidate.original_text else -1
+                        for quote in candidate.emphasis_quotes:
+                            start = source_at + candidate.original_text.find(quote)
+                            scene["source_cues"].append({"start": start, "end": start + len(quote),
+                                "regions": emphasis_regions(quote, unit)})
+                        from .source_figures import figure_cues
+                        scene["source_cues"].extend(figure_cues(candidate.text,
+                            reading_plan.figure_targets, unit.material_id))
+                    elif candidate.board.source_focus or any(b.source_focus for b in candidate.beats):
                         from .interactive import source_targets, bind_source, question_targets
                         targets = source_targets(self, current, context, step_no, len(schedule))
                         targets.extend(question_targets(self, current, context,
@@ -972,12 +1159,16 @@ class TeachingService:
                         bind_source(candidate.board, targets)
                         for beat in candidate.beats:
                             bind_source(beat, targets)
-                    scene=declaration_to_scene(candidate.board)
+                    if context.get("teaching_mode") != "source_reading":
+                        scene=declaration_to_scene(candidate.board)
                     scene.update(stage_no=phase.stage_no,stage_segment_no=phase.stage_segment_no,
                         stage_finished=phase.stage_segment_no==phase.stage_segment_count,
                         board_scope=f"{conv_id}:stage:{phase.stage_no}")
                     from .board_alignment import scene_beats
                     scene["beats"]=scene_beats(candidate)
+                    if scene.get("source_reading"):
+                        for beat in scene["beats"]:
+                            beat["pdf_focus"] = scene["pdf_focus"]
                     scene["alignment_version"]=candidate.alignment_version
                     if candidate.knowledge_recap:
                         scene["knowledge_recap"] = candidate.knowledge_recap.model_dump()
@@ -1024,6 +1215,7 @@ class TeachingService:
             self.tasks.recover_worker_failure(lease,stage="generate",error_code="LEASE_LOST")
             return {"status":"stale_discarded","error_code":"STALE_RESULT_DISCARDED"}
         except Exception as exc:
+            self.course_preparation.note_failure(task_id,exc)
             code = self._controlled_failure(exc)
             self.tasks.submit_result(lease,stage="generate",status="failed",error_code=code,duration_ms=monotonic_ms()-started)
             return {"status":"failed","error_code":code}
@@ -1049,12 +1241,17 @@ class TeachingService:
 
     def _buffer_step_allowed(self, sess, conv, number: int) -> bool:
         """Keep buffering inside the frozen lesson and before unresolved dialogue."""
-        if number < 1 or number > MAX_STEPS_PER_LESSON:
+        if number < 1:
             return False
         blueprint = sess.get(LessonBlueprintRow, conv.conversation_id)
-        if blueprint and load_json_field(blueprint.plan_json, {}).get("stages"):
-            if number > len(teaching_schedule(LessonBlueprint.model_validate_json(blueprint.plan_json))):
+        if blueprint:
+            context = load_json_field(blueprint.context_json, {})
+            cap = 240 if context.get("teaching_mode") == "source_reading" else MAX_STEPS_PER_LESSON
+            if number > cap:
                 return False
+            if load_json_field(blueprint.plan_json, {}).get("stages"):
+                if number > len(teaching_schedule(LessonBlueprint.model_validate_json(blueprint.plan_json))):
+                    return False
         from .learning_models import FeynmanSessionRow
         if sess.scalar(select(FeynmanSessionRow.session_id).where(
                 FeynmanSessionRow.conversation_id == conv.conversation_id,
@@ -1354,7 +1551,7 @@ class TeachingService:
                             audio_status, reason = "ready", None
             except Exception as exc:
                 allowed = {"timeout","credential_invalid","rate_limited","config_not_found","disclosure_required",
-                    "disclosure_revoked","disclosure_expired","connection_error","capability_test_failed"}
+                    "disclosure_revoked","disclosure_expired","connection_error","capability_test_failed","MODEL_QUOTA_EXCEEDED"}
                 audio_status, reason = "failed", getattr(exc,"code", "tts_failed")
                 if reason not in allowed: reason = "tts_failed"
             result = {}
@@ -1400,7 +1597,7 @@ class TeachingService:
                     audio.duration_ms=int(max(cue["end_ms"] for cue in synth["subtitle"]))
                     saved.audio_id=audio.audio_id
                 result.update(audio_id=audio.audio_id,audio_status=audio_status)
-            receipt=self.tasks.submit_result(lease,stage="tts",status="succeeded" if audio_status=="ready" else "failed",error_code=None if audio_status=="ready" else "TTS_TIMEOUT" if reason=="timeout" else "INTERNAL_ERROR",duration_ms=0,publish=publish)
+            receipt=self.tasks.submit_result(lease,stage="tts",status="succeeded" if audio_status=="ready" else "failed",error_code=None if audio_status=="ready" else "MODEL_QUOTA_EXCEEDED" if reason=="MODEL_QUOTA_EXCEEDED" else "TTS_TIMEOUT" if reason=="timeout" else "INTERNAL_ERROR",duration_ms=0,publish=publish)
             if not receipt["accepted"]:return {"status":"stale_discarded"}
             return {"status":"succeeded" if audio_status=="ready" else "failed",**result}
         except Exception as exc:
@@ -1572,9 +1769,13 @@ class TeachingService:
             blueprint = sess.get(LessonBlueprintRow, conversation_id)
             scope_pending = bool(blueprint and load_json_field(blueprint.context_json, {}).get("_scope_pending"))
             total = len(schedule) if schedule else None
+            from .source_reading import current_reading_context
             needs_upgrade = bool(conv.session_state == "active" and not scope_pending and
-                (not schedule or any(s.stage_segment_count < 2 for s in schedule
-                                     if s.phase in ("intuition", "concept", "example"))))
+                ((blueprint and load_json_field(blueprint.context_json, {}).get("teaching_mode") == "source_reading"
+                  and not current_reading_context(load_json_field(blueprint.context_json, {})))
+                or not schedule or (not (blueprint and load_json_field(blueprint.plan_json, {}).get("kind") == "source_reading")
+                    and any(s.stage_segment_count < 2 for s in schedule
+                            if s.phase in ("intuition", "concept", "example")))))
             lesson = sess.get(LessonRow,conv.lesson_id) if conv.lesson_id else None
             from ..characters.classroom import playback_version
             current_playback_version = playback_version(sess, conversation_id)
@@ -1618,12 +1819,16 @@ class TeachingService:
         if scope_pending and lesson and getattr(self, "assessments", None):
             scope = self.assessments.scopes.get(conv.course_id, lesson.unit_id, actor_id)
             scope_preparation = {key: scope.get(key) for key in ("status", "error_code")}
+        with self.db.session() as sess:
+            preparation = self.course_preparation.view(sess, conv.course_id, conv.lesson_id, actor_id)
         return {
+            "preparation": preparation,
             "scope_preparation": scope_preparation,
             "code_feedback": feedback_view,
             "feynman": self.feynman.view(conversation_id, actor_id) if not authorization_required and conv.kind=="teaching" else None,
             "channel_checkpoint": self.knowledge.channel_state(conversation_id, actor_id) if conv.kind == "teaching" else None,
             "knowledge": self.knowledge.view(conversation_id, actor_id) if conv.kind == "teaching" else None,
+            "played_steps": self.knowledge.progress(conversation_id, actor_id) if conv.kind == "teaching" else {},
             "authorization_required":authorization_required,"authorization_error":authorization_error,
             "answer_audio":answer_audio,
             "required_action":"authorize" if authorization_required else "retry" if
@@ -1723,7 +1928,7 @@ class TeachingService:
             if (progress and progress.learning_state=="user_completed"
                     and progress.lesson_content_version_id==conv.lesson_content_version_id):
                 return {"completed":True,"course_id":conv.course_id,"lesson_id":conv.lesson_id}
-            self.feynman.guard(sess, conv, MAX_STEPS_PER_LESSON + 1)
+            self.feynman.guard(sess, conv, 241 if (sess.get(LessonBlueprintRow, conv.conversation_id) and load_json_field(sess.get(LessonBlueprintRow, conv.conversation_id).plan_json, {}).get("kind") == "source_reading") else MAX_STEPS_PER_LESSON + 1)
             self.feynman.require_lesson_result(sess, conv)
             final=sess.execute(select(TeachingStepRow).where(TeachingStepRow.conversation_id==conversation_id,
                 TeachingStepRow.generation==1,TeachingStepRow.lesson_finished.is_(True))).scalars().first()
@@ -1747,6 +1952,7 @@ class TeachingService:
         self, conversation_id: str, *, actor_id: str,
         client_seq: int, step_no: int, position_ms: int,
         board_state: Optional[dict] = None,
+        expected_seq: int | None = None, seek_back: bool = False,
     ) -> dict:
         with self.db.session() as sess:
             conv = sess.get(ConversationRow, conversation_id, with_for_update=True)
@@ -1767,6 +1973,28 @@ class TeachingService:
             ).scalar_one()
             if client_seq <= int(max_seq or 0):
                 raise terr("CHECKPOINT_STALE", "old client_seq rejected", status=409)
+            if seek_back:
+                self.knowledge.owned(sess, conversation_id, actor_id)
+                self.authorization.require(sess, conv)
+                latest = sess.scalar(select(PlaybackCheckpointRow).where(
+                    PlaybackCheckpointRow.conversation_id == conversation_id)
+                    .order_by(PlaybackCheckpointRow.client_seq.desc()))
+                if not latest or expected_seq != latest.client_seq:
+                    raise terr("CHECKPOINT_STALE", status=409)
+                step = sess.scalar(select(TeachingStepRow).where(
+                    TeachingStepRow.conversation_id == conversation_id,
+                    TeachingStepRow.generation == 1, TeachingStepRow.step_no == step_no))
+                chars = presentation.get("visible_chars")
+                previous_chars = self._presentation(load_json_field(latest.board_state_json, {})).get("visible_chars", 0)
+                if (not step or step.status != "ready" or type(chars) is not int
+                        or not 0 <= chars <= len(step.text) or step_no > latest.step_no
+                        or step_no == latest.step_no and (chars > previous_chars or position_ms > latest.position_ms)):
+                    raise terr("invalid_field", "only backward seeks are allowed", status=400)
+                if self.knowledge.audio_required(sess, conv):
+                    audio = sess.get(AudioAssetRow, step.audio_id) if step.audio_id else None
+                    if (not audio or audio.status != "ready" or presentation.get("audio_id") != audio.audio_id
+                            or audio.text_version_no != step.text_version_no or position_ms > audio.duration_ms):
+                        raise terr("CHECKPOINT_STALE", status=409)
             sess.add(
                 PlaybackCheckpointRow(
                     checkpoint_id=f"ckpt_{uuid.uuid4().hex[:12]}",
@@ -1780,7 +2008,7 @@ class TeachingService:
             )
             sess.commit()
         # 播放推进或解除暂停后，从现有缓存末尾继续准备。
-        if conv.session_state == "active":
+        if conv.session_state == "active" and not seek_back:
             with self.db.session() as sess:
                 self._ensure_prefetch(sess, conversation_id, actor_id, step_no + 1, conv.generation)
                 sess.commit()
@@ -1923,7 +2151,11 @@ class TeachingService:
             if source_context.get("teaching_mode") == "source_reading":
                 from .interactive import source_targets
                 point = load_json_field(conv.restore_point_json, {}).get("step_no", 1)
-                followup_targets = source_targets(self, conv, source_context, max(1, int(point)), len(source_schedule))
+                from .source_reading import reading_plan_from_row, located_reading_target
+                reading_plan = reading_plan_from_row(None, source_context)
+                followup_targets = ([located_reading_target(self, conv, source_context,
+                    reading_plan.units[min(len(reading_plan.units),max(1,int(point)))-1])] if reading_plan else
+                    source_targets(self, conv, source_context, max(1, int(point)), len(source_schedule)))
             adapter = self._model_adapter(owner, task_id)
             if adapter is None:
                 raise terr("MODEL_CAPABILITY_UNAVAILABLE", "no model adapter")

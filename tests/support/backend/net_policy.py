@@ -39,7 +39,7 @@ def is_literal_address(host) -> bool:
 
 def allowed_address(value, *, from_hostname: bool) -> bool:
     address = parse_address(value)
-    if address is None:
+    if address is None or address.is_multicast or address.is_reserved or address.is_unspecified:
         return False
     if address.is_global:
         return True

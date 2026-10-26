@@ -83,6 +83,9 @@ def bind_task_deps(db, source, *, actor_id, task_id, disclosures=None):
             limit = row.tool_limit if kind == "tool" else row.request_limit
             if getattr(row, name) >= limit:
                 raise error("AGENT_LOOP_LIMIT")
+            if kind == "wire":
+                from ..teaching.course_preparation import debit_wire
+                debit_wire(sess, task)
             setattr(row, name, getattr(row, name) + 1)
             if task.kind == "character_build_stage":
                 from ..characters.distillation_models import CharacterBuildStageRow, CharacterBuildRow

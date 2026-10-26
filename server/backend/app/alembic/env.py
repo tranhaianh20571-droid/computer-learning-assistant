@@ -39,6 +39,7 @@ import app.planning.feature_models  # noqa: F401 — register planning dialogue/
 import app.planning.models  # noqa: F401 — register slice3 planning/chat/manifest tables
 import app.teaching.learning_models  # noqa: F401 — pedagogy and private assessments
 import app.teaching.unit_scope  # noqa: F401 - independent frozen unit specifications
+import app.teaching.preparation_models  # noqa: F401
 import app.review.models  # noqa: F401
 import app.teaching.authorization  # noqa: F401 - explicit lesson consent
 import app.teaching.models  # noqa: F401 — register slice4 teaching/playback tables

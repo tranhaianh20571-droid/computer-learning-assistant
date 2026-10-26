@@ -125,6 +125,12 @@ class TeachingAgent(_Role):
         options.setdefault("progress_timeout_seconds", 60)
         return self._execute(source, input, deps, LessonPlanCandidate, "submit_lesson_steps", **options)
 
+    def generate_reading_step(self, source, input: TeachingStepInput, deps: AgentDeps, **options):
+        from ..teaching.source_reading import ReadingDraftOutput
+        options.setdefault("timeout_seconds", 120)
+        options.setdefault("progress_timeout_seconds", 60)
+        return self._execute(source, input, deps, ReadingDraftOutput, "submit_lesson_steps", **options)
+
     def answer_followup(self, source, input: FollowupInput, deps: AgentDeps, **options):
         from ..teaching.outputs import FollowupCandidate
         return self._execute(source, input, deps, FollowupCandidate, "submit_followup", **options)

@@ -1,5 +1,5 @@
 import {useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState} from "react";
-import {ArrowDown} from "lucide-react";
+import {ArrowDown,Download} from "lucide-react";
 import {layoutBoard} from "../lib/boardLayout";
 import type {Block,GroupAnchor} from "../lib/boardLayout";
 import {boardGroups} from "../lib/boardGroups.ts";
@@ -16,7 +16,7 @@ import ProfessionalFigure from "./ProfessionalFigure";
 import {codeLanguage} from "../hooks/useInteractiveClassroom";
 import type {ClassroomCode} from "../hooks/useInteractiveClassroom";
 
-export default function TeachingBoard({scene,sceneKey,presenting=true,theme="paper",onTarget,onPainted,codeContext,onCodeEdit}:{scene:any;sceneKey:string;presenting?:boolean;theme?:"paper"|"ink";onTarget?:(target:{x:number;y:number;visible:boolean;cellId?:string}|null)=>void;onPainted?:()=>void;codeContext?:ClassroomCode;onCodeEdit?:()=>void}) {
+export default function TeachingBoard({scene,sceneKey,presenting=true,theme="paper",onTarget,onPainted,codeContext,onCodeEdit,onExport}:{scene:any;sceneKey:string;presenting?:boolean;theme?:"paper"|"ink";onTarget?:(target:{x:number;y:number;visible:boolean;cellId?:string}|null)=>void;onPainted?:()=>void;codeContext?:ClassroomCode;onCodeEdit?:()=>void;onExport?:(all:boolean)=>Promise<void>}) {
   const viewport=useRef<HTMLDivElement>(null),canvasApi=useRef<any>(null);
   const [loaded,setLoaded]=useState<any>(null),[error,setError]=useState("");
   const [width,setWidth]=useState(1000),[viewportHeight,setViewportHeight]=useState(620),[page,setPage]=useState(0);
@@ -233,6 +233,9 @@ export default function TeachingBoard({scene,sceneKey,presenting=true,theme="pap
       <button className="btn btn-sm" aria-label="缩小板书" onClick={()=>zoom(.85)}>−</button>
       <button className="btn btn-sm" aria-label="放大板书" onClick={()=>zoom(1.15)}>＋</button>
       <button className="btn btn-sm" onClick={()=>{suspendFollow();fitKey.current="";update(canvasApi.current);}}>适应画面</button>
+      {onExport&&<details className="board-export-menu"><summary aria-label="导出板书" title="导出板书"><Download size={17}/></summary>
+        <div><button onClick={()=>void onExport(false)}>当前板书 PNG</button><button onClick={()=>void onExport(true)}>本讲已讲板书 PDF</button></div>
+      </details>}
     </div>
     {error?<div className="notice">{error}</div>:<div className="teaching-board-viewport">
       <div ref={viewport} className="teaching-board-canvas" aria-label="课程板书" tabIndex={0}

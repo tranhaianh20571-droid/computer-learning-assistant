@@ -1,6 +1,6 @@
 # Desktop Runtime Contract
 
-Version: 1, 2026-10-23. This contract applies only to an application-owned desktop
+Version: 3, 2026-10-26. This contract applies only to an application-owned desktop
 installation. Web authentication and existing owner checks remain in force.
 
 - Internal credentials arrive over the supervised process stdin, never argv.
@@ -23,6 +23,10 @@ installation. Web authentication and existing owner checks remain in force.
 - PostgreSQL has a private data directory, generated credentials and separate
   application/memory databases. Initialization is allowed only on an empty owned
   cluster. Unknown schema versions stop startup; no implicit destructive migration.
+  A packaged upgrade may transactionally advance the owned desktop baseline from
+  versions 1 or 2 to 3, adding course preparation tables when needed and private
+  classroom recording metadata. Version 1 also receives the persistent cache flag.
+  The version changes only after all additions succeed; existing records survive.
 - The selected user-data directory is restricted to its Windows owner and SYSTEM.
   An interrupted, explicitly marked first initialization is preserved in an
   isolated recovery directory before retry. Existing databases are never reset.
@@ -49,5 +53,17 @@ installation. Web authentication and existing owner checks remain in force.
 - Installer and runtime diagnostics contain controlled stage/error codes only.
   They do not copy provider responses, questions, credentials, paths or subprocess
   diagnostics into product logs.
-- Program replacement and data migration are separate operations. This initial
-  release accepts schema version 1 only; unsupported upgrades fail closed.
+- Classroom capture requires a fresh main-frame request from the local lecture
+  page and captures only the application frame. Application audio is mixed locally;
+  microphone and system loopback capture are not requested. Capture starts automatically
+  with classroom playback; route changes stop capture before another page is rendered.
+  Returning to the same lecture creates another ordered recording part after the previous
+  part has finished saving. Read-only video review never starts classroom recording.
+  Video chunks use owned HTTP APIs with
+  bounded payloads, sequences and idempotent hashes, never arbitrary file IPC.
+- Board export renders a bounded snapshot in a sandboxed, hidden local window.
+  Only that window can read its snapshot or announce readiness. Files are written
+  only to a native save-dialog destination; no renderer-supplied script is executed.
+- Program replacement and data migration are separate operations. This
+  release accepts schema version 3 and upgrades owned versions 1 and 2;
+  unsupported upgrades fail closed. This path never migrates a development database.

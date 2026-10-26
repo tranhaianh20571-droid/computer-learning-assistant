@@ -15,7 +15,7 @@ from ..logging_audit.models import Base
 from ..materials.models import MaterialRow
 from ..planning.models import (ConversationRow, CourseRow, LessonRow, OutlineVersionRow,
     LessonContentVersionRow, utcnow)
-from ..slice1.errors import error
+from ..slice1.errors import Slice1Error, error
 from ..slice1.models import DisclosureGrantRow, ServiceConfigRow
 from ..tasks.service import LearningTaskRow
 from .learning_models import LessonBlueprintRow, PreparedFirstSegmentRow
@@ -142,13 +142,13 @@ class TeachingAuthorization:
         outline = (sess.get(OutlineVersionRow, course.current_outline_version_id)
             if course and course.current_outline_version_id else None)
         if not course or course.owner_user_id != owner or course.deleted_at:
-            raise error("course_not_found", status=404)
+            raise Slice1Error("course_not_found", status=404)
         if not outline or outline.course_id != course_id or not lesson or lesson.outline_version_id != course.current_outline_version_id:
-            raise error("LESSON_UNLOCK_REQUIRED", status=409)
+            raise Slice1Error("LESSON_UNLOCK_REQUIRED", status=409)
         conv = sess.get(ConversationRow, conversation_id, populate_existing=True) if conversation_id else None
         if conversation_id and (not conv or conv.owner_user_id != owner or conv.deleted_at or
                 conv.course_id != course_id or conv.lesson_id != lesson_id or conv.outline_version_id != course.current_outline_version_id):
-            raise error("conversation_not_found", status=404)
+            raise Slice1Error("conversation_not_found", status=404)
         target = conv or SimpleNamespace(owner_user_id=owner, course_id=course_id, lesson_id=lesson_id,
             outline_version_id=course.current_outline_version_id, conversation_id="preflight")
         context = lesson_context(self.service, target)
@@ -158,7 +158,7 @@ class TeachingAuthorization:
         for material_id in sorted(set(context.get("material_ids", []))):
             material = sess.get(MaterialRow, material_id, populate_existing=True)
             if not material or material.owner_user_id != owner or material.deleted_at:
-                raise error("material_not_found", status=404)
+                raise Slice1Error("material_not_found", status=404)
             materials.append({"material_id": material_id, "source_bytes_sha256": material.source_bytes_sha256,
                 "kind": material.kind})
         version = sess.scalars(select(LessonContentVersionRow).where(LessonContentVersionRow.lesson_id == lesson_id)
@@ -170,7 +170,7 @@ class TeachingAuthorization:
         if conv:
             blueprint = sess.get(LessonBlueprintRow, conv.conversation_id)
             frozen_context = ({k:v for k,v in json.loads(blueprint.context_json).items()
-                if not k.startswith("_") and k not in ("scope_capabilities", "unit_scope_hash")}
+                if not k.startswith("_") and k not in ("scope_capabilities", "unit_scope_hash", "source_reading_plan")}
                 if blueprint else None)
             if blueprint and frozen_context != context:
                 raise error("disclosure_required", "lesson context changed; start a new session")

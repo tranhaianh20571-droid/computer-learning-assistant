@@ -614,6 +614,8 @@ class DraftService:
             version.source_snapshot_json = json.dumps(freeze_sources(sess, course.owner_user_id,
                 source["material_ids"], pairs), ensure_ascii=False)
         course.current_outline_version_id = version.outline_version_id
+        from ..teaching.course_preparation import register_course
+        register_course(sess, course)
         return version.outline_version_id
 
     def _confirm_outline(self, sess, draft: PlanningDraftRow, actor_id: str, idem: str, content: dict) -> dict:
@@ -689,6 +691,8 @@ class DraftService:
         version.source_snapshot_json = self._freeze_sources(sess, draft, zip(
             lesson_ids_by_index.values(), (l.model_dump() for u in candidate.units for l in u.lessons)))
         course.current_outline_version_id = version.outline_version_id
+        from ..teaching.course_preparation import register_course
+        register_course(sess, course)
         self._audit(
             "config.changed", actor_id=actor_id, object_id=version.outline_version_id,
             result="outline_confirmed",

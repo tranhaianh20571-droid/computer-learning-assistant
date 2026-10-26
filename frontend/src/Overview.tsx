@@ -13,24 +13,6 @@ import Dialog from "./ui/Dialog";
  * - 未确认大纲或讲次未就绪：开始学习禁用并给出 .why 原因（教学启动归切片 4）。
  */
 
-const PREP_LABEL: Record<string, { text: string; cls: string }> = {
-  not_generated: { text: "未生成", cls: "" },
-  generating: { text: "生成中", cls: "is-making" },
-  ready: { text: "已就绪", cls: "is-ready" },
-  failed: { text: "失败", cls: "is-fail" },
-};
-
-function PrepState({ status, extra }: { status: string; extra?: string }) {
-  const meta = PREP_LABEL[status] || PREP_LABEL.not_generated;
-  return (
-    <span className={`st st-prep ${meta.cls}`}>
-      <i className="g" aria-hidden="true" />
-      <span className="k">讲解</span>
-      {extra || meta.text}
-    </span>
-  );
-}
-
 export function RouteOverview({ routeId, versionId, search = "", onErr, go }: {
   routeId: string; versionId?: string; search?: string; onErr: (s: string) => void; go: (p: string) => void;
 }) {
@@ -102,6 +84,7 @@ export function CourseOverview({ courseId, ownerUserId, context = "", onErr, onO
 }) {
   const [overview, setOverview] = useState<any>(null);
   const [starting,setStarting]=useState(false);
+  const [entryIssue,setEntryIssue]=useState<"settings"|"retry"|null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -119,6 +102,7 @@ export function CourseOverview({ courseId, ownerUserId, context = "", onErr, onO
   const start = async (lessonId: string, startable: boolean, reason: string) => {
     if (!startable) { onErr(reason); return; }
     if(starting)return;
+    setEntryIssue(null);
     setStarting(true);
     try {
       const r = await api.startLessonV2(courseId, lessonId);
@@ -132,7 +116,8 @@ export function CourseOverview({ courseId, ownerUserId, context = "", onErr, onO
         onOk("已请求开始学习。");
       }
     } catch (e: any) {
-      onErr(e?.code === "LESSON_UNLOCK_REQUIRED" ? "未确认大纲，暂不能开始学习。" : e?.message || "操作失败");
+      if(e?.code==="LESSON_UNLOCK_REQUIRED")onErr("未确认大纲，暂不能开始学习。");
+      else setEntryIssue(/CONFIG|CREDENTIAL|DISCLOSURE|CAPABILITY|QUOTA/i.test(e?.code||"")?"settings":"retry");
     }finally{setStarting(false);}
   };
 
@@ -181,7 +166,7 @@ export function CourseOverview({ courseId, ownerUserId, context = "", onErr, onO
           <div className="note note-draft" role="note" style={{ marginBottom: 24 }}>
             <span className="tag">草稿</span>
             <div className="tt">这份大纲还没确认</div>
-            <div>确认之后才能开始学习；确认不会启动整课的讲解生成或语音合成。</div>
+            <div>确认之后即可开始学习，其余内容会在后台准备。</div>
           </div>
         )}
 
@@ -225,6 +210,9 @@ export function CourseOverview({ courseId, ownerUserId, context = "", onErr, onO
           </div>
         )}
 
+        {entryIssue&&<p role="status" className="help">{entryIssue==="settings"
+          ?"学习服务连接需要更新，课程已保留。":"暂时无法进入课堂，课程已保留，请稍后再试。"}
+          {entryIssue==="settings"&&<a href="#/capabilities">前往设置</a>}</p>}
         {(overview.units || []).map((u: any, ui: number) => (
           <div key={u.unit_id} id={`unit-${u.unit_id}`} style={{ marginBottom: 28 }}>
             <div className="unit-h">
@@ -234,11 +222,12 @@ export function CourseOverview({ courseId, ownerUserId, context = "", onErr, onO
             <ol className="lecs">
               {u.lessons?.map((l: any) => {
                 const startable = overview.teaching_unlocked && l.startable;
+                const completed=l.learning_state==="user_completed";
                 const why = !overview.teaching_unlocked
                   ? "未确认大纲，不能学习"
                   : !l.startable
                     ? (l.status_preparation === "failed" ? "上次生成失败，可以重试" : "点击后开始生成讲解")
-                    : "进入课堂继续学习";
+                    : completed?"回看课堂录像":"进入课堂继续学习";
                 return (
                   <li className={`lec${overview.teaching_unlocked ? "" : " locked"}`} key={l.lesson_id}>
                     <span className="no">{String(l.order_index + 1).padStart(2, "0")}</span>
@@ -246,7 +235,6 @@ export function CourseOverview({ courseId, ownerUserId, context = "", onErr, onO
                       <h3>{l.title || l.goal || l.lesson_id}</h3>
                       {l.prereq_arranged && <p className="desc">有先修讲次；安排过先修 ≠ 已掌握。</p>}
                       <div className="states">
-                        <PrepState status={l.status_preparation} />
                         <span className={`st st-learn ${l.learning_state === "user_completed" ? "is-done" : l.learning_state === "in_progress" ? "is-doing" : ""}`}>
                           <i className="g" aria-hidden="true" />
                           <span className="k">学习</span>
@@ -258,10 +246,10 @@ export function CourseOverview({ courseId, ownerUserId, context = "", onErr, onO
                       <button
                         className={`btn${startable ? " btn-pri" : ""}`}
                         disabled={!startable}
-                        onClick={() => start(l.lesson_id, startable,
-                          overview.teaching_unlocked ? "该讲次尚未就绪。" : "未确认大纲，禁止启动教学。")}
+                        onClick={() => completed?go(`/lesson-review/${courseId}/${l.lesson_id}`):
+                          start(l.lesson_id, startable,overview.teaching_unlocked ? "该讲次尚未就绪。" : "未确认大纲，禁止启动教学。")}
                       >
-                        {overview.teaching_unlocked ? (l.startable ? "开始学习" : "未就绪") : "未确认，不能学习"}
+                        {overview.teaching_unlocked ? (l.startable ? completed?"复习":"开始学习" : "未就绪") : "未确认，不能学习"}
                       </button>
                       <span className="why">{why}</span>
                     </div>

@@ -33,8 +33,9 @@ def failed(env, code="MODEL_CONNECTION_ERROR"):
     return started, TeachingBackground(state.teaching)
 
 
-def test_failed_task_recovers_after_restart_without_resetting_budget(env):
-    started, background = failed(env)
+@pytest.mark.parametrize("code", ["MODEL_CONNECTION_ERROR", "OUTPUT_INVALID"])
+def test_failed_task_recovers_after_restart_without_resetting_budget(env, code):
+    started, background = failed(env, code=code)
     state = env[1]
     try:
         restarted = TeachingBackground(state.teaching)
@@ -57,6 +58,19 @@ def test_failed_task_recovers_after_restart_without_resetting_budget(env):
     finally:
         background.close()
 
+
+def test_invalid_output_stops_automatic_recovery_after_three_generations(env):
+    started, background = failed(env, code="OUTPUT_INVALID")
+    try:
+        with env[1].db.session() as session:
+            session.get(LearningTaskRow, started["task_id"]).generation = 3
+        recover_observed(background)
+        assert env[1].tasks.get_task(started["task_id"])["status"] == "failed"
+        with env[1].db.session() as session:
+            budget = session.get(AgentBudgetRow, started["task_id"])
+            assert budget.logical_requests == budget.wire_requests == 2
+    finally:
+        background.close()
 
 @pytest.mark.parametrize("guard", ["unobserved", "paused", "cancelled", "limit", "backoff", "credential"])
 def test_recovery_respects_activity_authority_and_durable_limits(env, guard):

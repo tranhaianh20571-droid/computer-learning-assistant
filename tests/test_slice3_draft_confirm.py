@@ -221,6 +221,10 @@ class TestConfirmTransaction:
         user_id, token, route_id, course_ids = _confirmed_route(env)
         client = env["client"]
         course_id = course_ids[0]
+        from backend.planning.models import CourseRow
+        # Routes now confirm embedded outlines; explicitly model a legacy course shell.
+        with env["database"].session() as sess:
+            sess.get(CourseRow, course_id).current_outline_version_id = None
         # 未确认大纲 → 教学门槛生效
         r = client.post(
             f"/api/courses/{course_id}/lessons/les_x/start", headers=auth_headers(token)

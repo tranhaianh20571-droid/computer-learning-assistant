@@ -225,6 +225,12 @@ def pdf_page_targets(path, material_id, sha256, page_no, source_blocks=()):
 
 
 def source_targets(service, conv, context, step_no=1, total=1):
+    if context.get("source_reading_plan"):
+        from .source_reading import reading_plan_from_row, located_reading_target
+        plan = reading_plan_from_row(None, context)
+        if not 1 <= step_no <= len(plan.units):
+            raise terr("step_not_found", status=404)
+        return [located_reading_target(service, conv, context, plan.units[step_no-1])]
     sections = context.get("source_sections", [])
     documents = context.get("source_snapshot", {}).get("documents", [])
     targets = []

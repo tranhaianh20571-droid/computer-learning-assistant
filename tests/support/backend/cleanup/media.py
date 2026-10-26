@@ -10,7 +10,7 @@ from ..characters.models import (
 from ..materials.storage import StorageError
 from ..planning.models import ConversationRow, CourseRow
 from ..teaching.learning_models import PreparedFirstSegmentRow
-from ..teaching.models import AudioAssetRow
+from ..teaching.models import AudioAssetRow, utcnow
 
 
 class ReferencedMedia(Exception):
@@ -36,6 +36,16 @@ def cleanup_audio(session, storage, *, owner, conversation_id=None, course_id=No
     ids = [row.conversation_id for row in conversations]
     if conversation_id and conversation_id not in ids:
         ids.append(conversation_id)
+    from ..teaching.learning_models import ClassroomRecordingRow
+    recordings = list(session.scalars(select(ClassroomRecordingRow).where(
+        ClassroomRecordingRow.conversation_id.in_(ids)).with_for_update()))
+    for recording in recordings:
+        if recording.owner_user_id != owner:
+            raise ReferencedMedia()
+        recording.deleted_at = recording.deleted_at or utcnow()
+        recording.status = "deleted"
+        for key, _ in storage.iter_files(f"recordings/{recording.conversation_id}/{recording.recording_id}/", reject_links=True):
+            storage.delete(key)
     assets = list(session.scalars(select(AudioAssetRow).where(AudioAssetRow.conversation_id.in_(ids))))
     prepared = list(session.scalars(select(PreparedFirstSegmentRow).where(
         PreparedFirstSegmentRow.course_id == course_id if course_id else

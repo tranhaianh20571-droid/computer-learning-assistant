@@ -13,7 +13,7 @@ from ..tasks.service import LearningTaskRow
 from ..slice1.errors import error as config_error
 from .learning_models import PreparedFirstSegmentRow,PreparedLessonPlanRow,LessonBlueprintRow
 from .learning_outputs import LessonBlueprint,teaching_schedule
-from .pedagogy import lesson_context,plan_key,prepared_plan
+from .pedagogy import lesson_context,plan_key,prepared_plan,text_context
 from .outputs import StepCandidate,declaration_to_scene,validate_step_duration
 from .models import AudioAssetRow,TeachingStepRow
 
@@ -64,16 +64,23 @@ class LessonPreparation:
             version=sess.scalars(select(LessonContentVersionRow).where(LessonContentVersionRow.lesson_id==conv.lesson_id)
                 .order_by(LessonContentVersionRow.content_version_no.desc())).first()
             content_version=version.content_version_no if version else 1
+            from ..characters.service import segment_character,default_mentor_snapshot
+            character=segment_character(sess,conv.conversation_id,1)
+            if not sess.get(ConversationRow,conv.conversation_id):
+                character=default_mentor_snapshot(sess,conv.owner_user_id)
+        if character:context={**context,"_prepared_character":character}
         model=self._model(conv.owner_user_id)
         if not model:return None,None,context
+        context={k:v for k,v in context.items() if k != 'source_reading_plan'}
         teacher=self.teaching.prompts.load_local_template('teaching_step_v1')
         alignment=self.teaching.prompts.load_local_template('board_alignment_v1')
-        key=digest({'owner':conv.owner_user_id,'context':context,'content_version':content_version,
-            'plan_key':plan_key(self.teaching,conv,context),'teacher':teacher['sha256'],
-            'model':[model['config_id'],model['config_version']],'contract':4,
+        key=digest({'owner':conv.owner_user_id,'context':text_context(context),'content_version':content_version,
+            'character':text_context({"prepared_character":character}) if character else None,
+            'plan_key':plan_key(self.teaching,conv,context,include_memory=False),'teacher':teacher['sha256'],
+            'model':[model['config_id'],model['config_version']],'contract':7 if context.get('teaching_mode') == 'source_reading' else 5,
             'alignment':self.teaching.prompts._sha256(alignment['template'])})
         voice=self._audio(conv.owner_user_id)
-        audio_key=digest([key,voice['config_id'],voice['config_version']]) if voice else ''
+        audio_key=digest([key,voice['config_id'],voice['config_version'],character]) if voice else ''
         return key,audio_key,context
 
     def _lessons(self,sess,course):
@@ -114,6 +121,8 @@ class LessonPreparation:
 
     def reconcile(self,limit=4):
         """Bounded server-owned discovery; never starts a learning conversation."""
+        if self.teaching.course_preparation.enabled:
+            return self.teaching.course_preparation.reconcile(limit)
         if not self.enabled or not self.teaching.authorization.automatic_enabled:return []
         with self.teaching.db.session() as sess:
             query=select(CourseRow.course_id,CourseRow.owner_user_id,CourseRow.created_at).where(CourseRow.deleted_at.is_(None),
@@ -142,7 +151,8 @@ class LessonPreparation:
             outcomes.append(dict(course_id=course_id,**self.prepare_course(course_id,owner)))
         return outcomes
 
-    def prepare_course(self,course_id,owner,*,_confirmation=None,after_lesson_id=None):
+    def prepare_course(self,course_id,owner,*,_confirmation=None,after_lesson_id=None,
+                       lesson_id=None,persistent=False):
         service=self.teaching
         if not self.enabled:return {'status':'disabled'}
         garbage=[]
@@ -150,8 +160,16 @@ class LessonPreparation:
             course=sess.get(CourseRow,course_id,with_for_update=True)
             if not course or course.owner_user_id!=owner or course.deleted_at or not course.current_outline_version_id:
                 return {'status':'unavailable'}
-            target=self._target(sess,course,owner,after_lesson_id)
+            target=sess.get(LessonRow,lesson_id) if lesson_id else self._target(sess,course,owner,after_lesson_id)
+            if target and target.outline_version_id != course.current_outline_version_id:
+                return {'status':'unavailable'}
             if not target:return {'status':'completed'}
+            if self.teaching.course_preparation.enabled and not persistent:
+                self.teaching.course_preparation.promote(sess,course,target)
+                return {'status':'deferred','lesson_id':target.lesson_id}
+            if persistent and getattr(service,"assessments",None):
+                scope=service.assessments.scopes.get(course_id,target.unit_id,owner)
+                if scope["status"]!="succeeded":return {'status':'deferred','lesson_id':target.lesson_id}
             conv=SimpleNamespace(course_id=course_id,owner_user_id=owner,lesson_id=target.lesson_id,
                 outline_version_id=course.current_outline_version_id,conversation_id='prewarm')
             automatic = not _confirmation and service.authorization.automatic_enabled
@@ -199,11 +217,11 @@ class LessonPreparation:
                     row.status='failed';row.error_code=row.error_code or 'WORKER_RECOVERY_FAILED'
                 elif pending.status=='succeeded' and row.candidate_json=='{}':
                     row.status='failed';row.error_code='WORKER_RECOVERY_FAILED'
-            if row and row.lesson_id==target.lesson_id and row.text_key==key and fresh(row.expires_at)>utcnow():
+            if row and row.lesson_id==target.lesson_id and row.text_key==key and (row.persistent or fresh(row.expires_at)>utcnow()):
                 if row.status=='failed' and row.audio_key==audio_key:
                     if not confirmation:
                         return {'status':'failed','lesson_id':target.lesson_id,'error_code':row.error_code}
-                    if automatic:
+                    if automatic and not persistent:
                         attempts=sess.scalar(select(func.count()).select_from(LearningTaskRow).where(
                             LearningTaskRow.kind=='lesson_first_prepare',LearningTaskRow.owner_user_id==owner,
                             LearningTaskRow.subject_id=='first:'+key[:32]))
@@ -224,30 +242,38 @@ class LessonPreparation:
                 LearningTaskRow.owner_user_id==owner,LearningTaskRow.created_at>=midnight))
             queued=sess.scalar(select(func.count()).select_from(LearningTaskRow).where(LearningTaskRow.kind=='lesson_first_prepare',
                 LearningTaskRow.status.in_(['queued','leased','running']),LearningTaskRow.deadline_at>now))
-            if daily>=self.daily_limit or queued>=self.queue_limit:
+            if (not persistent and daily>=self.daily_limit) or queued>=self.queue_limit:
                 return {'status':'deferred','lesson_id':target.lesson_id}
             kept=list(sess.scalars(select(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.owner_user_id==owner,
+                PreparedFirstSegmentRow.persistent.is_(False),
                 PreparedFirstSegmentRow.consumed_conversation_id.is_(None)).order_by(PreparedFirstSegmentRow.created_at)))
             def size(item):return item.audio_bytes+len(item.candidate_json.encode())+len(item.plan_json.encode())+len(item.context_json.encode())
-            while kept and (len(kept)>=self.max_entries or
+            while not persistent and kept and (len(kept)>=self.max_entries or
                     (row is None and course_id not in {item.course_id for item in kept} and len({item.course_id for item in kept})>=self.max_courses) or
                     sum(size(item) for item in kept)>=self.max_bytes):
                 old=kept.pop(0)
                 if row and old.cache_id==row.cache_id:continue
                 if old.audio_object_key:garbage.append(old.audio_object_key)
                 sess.delete(old)
-            if not self.max_courses or not self.max_entries or not self.max_bytes:return {'status':'deferred','lesson_id':target.lesson_id}
-            text_source=row if row and row.candidate_json!='{}' and fresh(row.expires_at)>now else sess.scalars(
+            if not persistent and (not self.max_courses or not self.max_entries or not self.max_bytes):return {'status':'deferred','lesson_id':target.lesson_id}
+            resource_reason=self.resource_wait_reason() if persistent else None
+            if resource_reason:return {'status':'deferred','lesson_id':target.lesson_id,
+                'error_code':'PREPARATION_'+resource_reason.upper()+'_WAIT'}
+            text_source=row if row and row.candidate_json!='{}' and (row.persistent or fresh(row.expires_at)>now) else sess.scalars(
                 select(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.owner_user_id==owner,
                     PreparedFirstSegmentRow.course_id==course_id,PreparedFirstSegmentRow.lesson_id==target.lesson_id,
                     PreparedFirstSegmentRow.text_key==key,PreparedFirstSegmentRow.candidate_json!='{}',
-                    PreparedFirstSegmentRow.status.in_(['ready','text_ready','consumed']),PreparedFirstSegmentRow.expires_at>now)
+                    PreparedFirstSegmentRow.status.in_(['ready','text_ready','consumed']),
+                    (PreparedFirstSegmentRow.persistent.is_(True)) | (PreparedFirstSegmentRow.expires_at>now))
                 .order_by(PreparedFirstSegmentRow.created_at.desc())).first()
             preserve=bool(text_source)
             if row and row.audio_object_key:garbage.append(row.audio_object_key)
             task=service.tasks.create_task(owner_user_id=owner,kind='lesson_first_prepare',subject_id='first:'+key[:32],
                 idempotency_key='first:'+key+':'+uuid.uuid4().hex[:12],stage='tts' if preserve else 'generate',
-                lane='maintenance',deadline_seconds=setting('FIRST_PREWARM_QUEUE_TIMEOUT',600),session=sess)
+                lane='maintenance',deadline_seconds=86400 if persistent else setting('FIRST_PREWARM_QUEUE_TIMEOUT',600),session=sess)
+            if persistent:
+                from ..agents.task_binding import AgentBudgetRow
+                sess.get(AgentBudgetRow,task['task_id']).request_limit=8
             if confirmation:
                 service.authorization.record(sess,confirmation,owner,task['task_id'])
             else:
@@ -258,12 +284,16 @@ class LessonPreparation:
                     plan_json=prepared_plan(service,conv,context).model_dump_json(),expires_at=now+timedelta(days=self.ttl_days))
                 sess.add(row)
             if preserve:
-                row.context_json=text_source.context_json;row.plan_json=text_source.plan_json
+                preserved_context=json.loads(text_source.context_json)
+                if context.get("_prepared_character"):
+                    preserved_context["_prepared_character"]=context["_prepared_character"]
+                row.context_json=json.dumps(preserved_context,ensure_ascii=False);row.plan_json=text_source.plan_json
                 row.candidate_json=text_source.candidate_json
             else:
                 row.context_json=json.dumps(context,ensure_ascii=False)
                 row.plan_json=prepared_plan(service,conv,context).model_dump_json();row.candidate_json='{}'
             row.lesson_id=target.lesson_id;row.text_key=key;row.audio_key=audio_key;row.status='queued';row.task_id=task['task_id']
+            row.persistent=persistent
             row.audio_object_key='';row.audio_json='{}';row.audio_bytes=0;row.error_code=None;row.consumed_conversation_id=None
             row.created_at=now;row.expires_at=now+timedelta(days=self.ttl_days)
             if service.authorization.enforced and not confirmation:
@@ -314,26 +344,20 @@ class LessonPreparation:
                 PreparedFirstSegmentRow.text_key==key).order_by((PreparedFirstSegmentRow.audio_key==audio_key).desc(),
                 PreparedFirstSegmentRow.created_at.desc())).first()
             if not target:return {'status':'completed','lesson_id':None}
-            if not row or row.lesson_id!=target.lesson_id or fresh(row.expires_at)<=utcnow():return {'status':'pending','lesson_id':target.lesson_id}
+            if not row or row.lesson_id!=target.lesson_id or (not row.persistent and fresh(row.expires_at)<=utcnow()):return {'status':'pending','lesson_id':target.lesson_id}
             task=sess.get(LearningTaskRow,row.task_id)
             if row.status in ('queued','generating') and task and fresh(task.deadline_at)<=utcnow():
                 return {'status':'failed','lesson_id':target.lesson_id,'error_code':'MODEL_TIMEOUT'}
             return {'status':row.status,'lesson_id':row.lesson_id,'audio_ready':bool(row.audio_object_key),'error_code':row.error_code}
 
     def claim_for_start(self,sess,course,lesson):
-        # Generic prewarm has no frozen persona. A selected mentor must get a
-        # newly generated first segment, never cached text with a swapped face.
-        from ..characters.models import CharacterPreferenceRow, CharacterCardRow
-        preference = sess.get(CharacterPreferenceRow, course.owner_user_id)
-        card = sess.get(CharacterCardRow, preference.card_id) if preference and preference.card_id else None
-        if card and not card.deleted_at:
-            return None
         conv=SimpleNamespace(owner_user_id=course.owner_user_id,course_id=course.course_id,lesson_id=lesson.lesson_id,
             outline_version_id=course.current_outline_version_id,conversation_id='prewarm')
         key,audio_key,_=self.keys(conv)
         row=sess.scalars(select(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.course_id==course.course_id,
             PreparedFirstSegmentRow.owner_user_id==course.owner_user_id,PreparedFirstSegmentRow.lesson_id==lesson.lesson_id,
-            PreparedFirstSegmentRow.text_key==key,PreparedFirstSegmentRow.expires_at>utcnow(),
+            PreparedFirstSegmentRow.text_key==key,
+            (PreparedFirstSegmentRow.persistent.is_(True)) | (PreparedFirstSegmentRow.expires_at>utcnow()),
             PreparedFirstSegmentRow.status.in_(['queued','generating','ready','text_ready','consumed']))
             .order_by((PreparedFirstSegmentRow.audio_key==audio_key).desc(),PreparedFirstSegmentRow.created_at.desc())
             .with_for_update()).first()
@@ -352,7 +376,7 @@ class LessonPreparation:
         with self.teaching.db.session() as sess:
             row=self._row_for_conv(sess,conv)
             if row and row.candidate_json!='{}' and row.status in ('ready','text_ready','consumed'):
-                if fresh(row.expires_at)<=utcnow() or self.keys(conv)[0]!=row.text_key:return None
+                if (not row.persistent and fresh(row.expires_at)<=utcnow()) or self.keys(conv)[0]!=row.text_key:return None
                 sess.expunge(row);return row
         return None
 
@@ -382,47 +406,60 @@ class LessonPreparation:
             with service.db.session() as sess:
                 row=sess.scalars(select(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.task_id==task_id)).first()
                 if not row:raise config_error('config_not_found')
+                if row.persistent:
+                    task=sess.get(LearningTaskRow,task_id)
+                    task.deadline_at=min(fresh(task.deadline_at),utcnow()+timedelta(seconds=600))
                 row.status='generating';sess.flush();sess.expunge(row)
             service._check_authorization(task_id)
-            context={key:value for key,value in json.loads(row.context_json).items() if not key.startswith('_')}
+            stored_context=json.loads(row.context_json)
+            context={key:value for key,value in stored_context.items() if not key.startswith('_')}
             plan=LessonBlueprint.model_validate_json(row.plan_json)
             conv=SimpleNamespace(owner_user_id=row.owner_user_id,course_id=row.course_id,lesson_id=row.lesson_id,
-                outline_version_id=context['outline_version_id'],conversation_id=row.cache_id)
+                outline_version_id=context['outline_version_id'],conversation_id=row.cache_id,
+                prepared_character=stored_context.get("_prepared_character"),
+                prepared_request_limit=8 if row.persistent else 2)
             if self.keys(conv)[0]!=row.text_key:raise config_error('config_not_found')
-            candidate=StepCandidate.model_validate_json(row.candidate_json) if row.candidate_json!='{}' else None
+            from .source_reading import SourceReadingStepCandidate
+            candidate_type = SourceReadingStepCandidate if context.get('teaching_mode') == 'source_reading' else StepCandidate
+            candidate=candidate_type.model_validate_json(row.candidate_json) if row.candidate_json!='{}' else None
             if not candidate:
                 from ..agents.task_binding import AgentBudgetRow
                 with service.db.session() as sess:
                     service.tasks.validate_lease(lease,session=sess)
                     budget=sess.get(AgentBudgetRow,task_id,with_for_update=True)
-                    budget.request_limit=min(budget.request_limit,2)
+                    budget.request_limit=min(budget.request_limit,8 if row.persistent else 2)
                 adapter=service._model_adapter(row.owner_user_id,task_id)
                 if not adapter:raise config_error('capability_unavailable')
                 from dataclasses import replace
                 from ..agents.runner import deps_for_source
-                bound=deps_for_source(adapter,max_requests=2)
+                bound=deps_for_source(adapter,max_requests=conv.prepared_request_limit)
                 original_check=bound.check_state
                 began=monotonic()
                 def check_prewarm():
                     if original_check:original_check()
+                    service._check_authorization(task_id)
                     if monotonic()-began>=self.timeout:raise config_error('timeout')
                     with service.db.session() as sess:
                         current=sess.get(PreparedFirstSegmentRow,row.cache_id)
                         if not current or current.task_id!=task_id or self.keys(conv)[0]!=row.text_key:
                             raise config_error('config_not_found')
-                adapter.agent_deps=replace(bound,check_state=check_prewarm)
-                adapter.agent_deps.budget.request_limit=min(bound.budget.request_limit,2)
-                adapter.agent_deps.budget.wire_limit=min(bound.budget.wire_limit,2)
+                adapter.agent_deps=replace(bound,check_state=check_prewarm,
+                    output_retries=7 if row.persistent else bound.output_retries)
+                adapter.agent_deps.budget.request_limit=min(bound.budget.request_limit,8 if row.persistent else 2)
+                adapter.agent_deps.budget.wire_limit=min(bound.budget.wire_limit,8 if row.persistent else 2)
                 with ThreadPoolExecutor(max_workers=1) as pool:
                     future=pool.submit(service._generate_one,conv,task_id,adapter,1,prepared=(plan,context))
                     while True:
-                        try:_,_,_,result=future.result(timeout=30);break
+                        try:plan,context,_,result=future.result(timeout=30);break
                         except FutureTimeout:service.tasks.heartbeat(lease,lease_seconds=120)
-                candidate=result.payload.steps[0];validate_step_duration(candidate.text)
+                candidate=result.payload.steps[0];validate_step_duration(candidate.text,
+                    source_reading=context.get("teaching_mode") == "source_reading")
                 with service.db.session() as sess:
                     current=sess.get(PreparedFirstSegmentRow,row.cache_id,with_for_update=True)
                     if not current or current.task_id!=task_id:raise config_error('config_not_found')
                     current.candidate_json=candidate.model_dump_json()
+                    current.plan_json=plan.model_dump_json()
+                    current.context_json=json.dumps({**stored_context,**context},ensure_ascii=False)
             # The complete validated text/board becomes independently consumable before speech.
             with service.db.session() as sess:
                 service.tasks.validate_lease(lease,session=sess)
@@ -441,12 +478,17 @@ class LessonPreparation:
                     service._check_authorization(task_id,audio=True)
                     with service.db.session() as sess:sess.get(LearningTaskRow,task_id).model_config_version=f"{voice['config_id']}:{voice['config_version']}"
                     speech=factory(row.owner_user_id,task_id)
-                    for attempt in range(2):
+                    for attempt in range(1 if row.persistent else 2):
                         try:
                             service._check_authorization(task_id,audio=True)
+                            if row.persistent and not getattr(factory,"uses_saved_config",False):
+                                from .course_preparation import debit_wire
+                                with service.db.session() as sess:
+                                    service.tasks.validate_lease(lease,session=sess)
+                                    debit_wire(sess,sess.get(LearningTaskRow,task_id),config=voice)
                             audio_meta=speech.synthesize(candidate.text);break
                         except Exception as exc:
-                            if attempt or getattr(exc,'code','') not in ('timeout','connection_error'):raise
+                            if row.persistent or attempt or getattr(exc,'code','') not in ('timeout','connection_error'):raise
                     cues=audio_meta.get('subtitle')
                     import math
                     if not cues or not audio_meta.get('audio_hex') or not all(isinstance(cue,dict) and isinstance(cue.get('begin_ms'),(int,float))
@@ -459,7 +501,14 @@ class LessonPreparation:
                     audio_bytes=bytes.fromhex(audio_meta['audio_hex'])
                     object_key=f"prepared/{row.cache_id}/{task_id}.mp3";service.storage.put(object_key,audio_bytes)
                     audio_meta={'subtitle':cues,'audio_format':audio_meta.get('audio_format','mp3'),'duration_ms':int(max(cue['end_ms'] for cue in cues))}
-                except Exception as exc:audio_error=getattr(exc,'code','tts_failed');audio_meta={};audio_bytes=None
+                except Exception as exc:
+                    if row.persistent:service.course_preparation.note_failure(task_id,exc,config=voice)
+                    raw=getattr(exc,'code','tts_failed')
+                    audio_error=({'timeout':'TTS_TIMEOUT','connection_error':'MODEL_CONNECTION_ERROR',
+                        'tts_failed':'MODEL_PROVIDER_ERROR','rate_limited':'MODEL_RATE_LIMITED',
+                        'quota_exceeded':'MODEL_QUOTA_EXCEEDED'}.get(raw,service._controlled_failure(exc))
+                        if row.persistent else raw)
+                    audio_meta={};audio_bytes=None
             def publish(sess):
                 nonlocal audio_bytes,audio_meta,audio_error
                 service._check_authorization(task_id,session=sess)
@@ -476,13 +525,18 @@ class LessonPreparation:
                             content_category='audio_text',actor_id=row.owner_user_id,session=sess,
                             scope_snapshot={'course_id':row.course_id,'lesson_id':row.lesson_id,'outline_version_id':json.loads(row.context_json)['outline_version_id']})
                     except Slice1Error as exc:
+                        if row.persistent:raise
                         audio_error=service._controlled_failure(exc);audio_bytes=None;audio_meta={}
                 current.candidate_json=candidate.model_dump_json();current.audio_json=json.dumps(audio_meta,ensure_ascii=False)
                 current.audio_object_key=object_key if audio_bytes else '';current.audio_bytes=len(audio_bytes) if audio_bytes else 0
                 current.status='consumed' if current.consumed_conversation_id else 'ready' if audio_bytes or not voice else 'text_ready'
-                current.error_code=audio_error if audio_error in ('timeout','connection_error','credential_invalid','capability_unavailable',
+                current.error_code=audio_error if row.persistent or audio_error in ('timeout','connection_error','credential_invalid','capability_unavailable',
                     'CONFIG_NOT_FOUND','DISCLOSURE_REQUIRED','DISCLOSURE_REVOKED','DISCLOSURE_EXPIRED') else None
-            receipt=service.tasks.submit_result(lease,stage='generate',status='succeeded',duration_ms=0,publish=publish)
+            failed_audio=bool(row.persistent and audio_error)
+            receipt=service.tasks.submit_result(lease,stage='tts' if failed_audio else 'generate',
+                status='failed' if failed_audio else 'succeeded',
+                error_code=service._controlled_failure(config_error(audio_error)) if failed_audio else None,
+                duration_ms=0,publish=publish)
             if not receipt['accepted']:raise config_error('config_not_found')
             if object_key and not audio_bytes:self._delete_unreferenced(object_key)
             with service.db.session() as sess:
@@ -490,10 +544,15 @@ class LessonPreparation:
                 consumed=current.consumed_conversation_id if current else None
             if consumed:self.attach_audio(consumed,row.owner_user_id)
             self.enforce_limits(row.owner_user_id)
-            return {'status':'succeeded'}
+            return {'status':'failed' if failed_audio else 'succeeded',
+                **({'error_code':service._controlled_failure(config_error(audio_error))} if failed_audio else {})}
         except Exception as exc:
+            if lease:service.course_preparation.note_failure(task_id,exc)
             from ..tasks.service import LeaseError
-            if lease is None and isinstance(exc,LeaseError):return {'status':'queued'}
+            if lease is None and isinstance(exc,LeaseError):
+                if exc.code=='LANE_CAPACITY_FULL':
+                    service.course_preparation.note_resource_wait(task_id,exc.resource_reason or 'capacity')
+                return {'status':'queued'}
             code=service._controlled_failure(exc)
             if lease:
                 service.tasks.submit_result(lease,stage='generate',status='failed',error_code=code,duration_ms=0)
@@ -665,8 +724,8 @@ class LessonPreparation:
         with self.teaching.db.session() as sess:
             conv=sess.get(ConversationRow,conv_id)
             if not conv or conv.deleted_at or conv.owner_user_id!=owner:return
-            from ..characters.models import CharacterBindingRow, ClassroomPlaybackRow
-            if sess.get(CharacterBindingRow,conv_id) or sess.get(ClassroomPlaybackRow,conv_id):
+            from ..characters.models import ClassroomPlaybackRow
+            if sess.get(ClassroomPlaybackRow,conv_id):
                 return
             row=self._row_for_conv(sess,conv)
             if not row or row.candidate_json=='{}':return
@@ -703,7 +762,8 @@ class LessonPreparation:
         keys=[]
         with self.teaching.db.session() as sess:
             rows=list(sess.scalars(select(PreparedFirstSegmentRow).join(CourseRow,CourseRow.course_id==PreparedFirstSegmentRow.course_id)
-                .where((PreparedFirstSegmentRow.expires_at<=utcnow())|CourseRow.deleted_at.is_not(None)).limit(500)))
+                .where(((PreparedFirstSegmentRow.persistent.is_(False)) & (PreparedFirstSegmentRow.expires_at<=utcnow()))
+                       |CourseRow.deleted_at.is_not(None)).limit(500)))
             for row in rows:
                 if row.audio_object_key and self._pinned(sess,row.audio_object_key):continue
                 course=sess.get(CourseRow,row.course_id)
@@ -734,6 +794,7 @@ class LessonPreparation:
         garbage=[]
         with self.teaching.db.session() as sess:
             rows=list(sess.scalars(select(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.owner_user_id==owner,
+                PreparedFirstSegmentRow.persistent.is_(False),
                 PreparedFirstSegmentRow.consumed_conversation_id.is_(None)).order_by(PreparedFirstSegmentRow.created_at)))
             rows=[row for row in rows if not row.audio_object_key or not self._pinned(sess,row.audio_object_key)]
             def size(item):return item.audio_bytes+len(item.candidate_json.encode())+len(item.context_json.encode())+len(item.plan_json.encode())
@@ -744,6 +805,15 @@ class LessonPreparation:
         for key in garbage:self._delete_unreferenced(key)
 
     def close(self):pass
+
+    def resource_wait_reason(self):
+        from ..cleanup.budget import ResourceBudget, current_budget
+        budget=getattr(self.teaching.tasks,'resource_budget',None) or current_budget()
+        if budget is None:
+            budget=getattr(self,'_resource_budget',None)
+            if budget is None:
+                budget=self._resource_budget=ResourceBudget(self.teaching.storage)
+        return budget.wait_reason()
 
     def _pinned(self,sess,key):
         from sqlalchemy import inspect

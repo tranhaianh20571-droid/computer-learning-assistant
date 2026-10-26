@@ -237,6 +237,28 @@ class KnowledgeService:
                 "plan_hash": plan_hash, "total": len(rows), "data": data[:limit],
                 "next_after": data[limit - 1]["after_step_no"] if len(data) > limit else None}
 
+    def progress(self, conversation_id, owner):
+        with self.db.session() as sess:
+            self.owned(sess, conversation_id, owner)
+            steps = {row.step_no: row for row in sess.scalars(select(TeachingStepRow).where(
+                TeachingStepRow.conversation_id == conversation_id, TeachingStepRow.generation == 1))}
+            result = {}
+            for row in sess.scalars(select(SegmentCoverageRow).where(
+                    SegmentCoverageRow.conversation_id == conversation_id)):
+                step = steps.get(row.step_no)
+                if (not step or row.text_version != step.text_version_no
+                        or row.audio_id and row.audio_id != step.audio_id):
+                    continue
+                audio = sess.get(AudioAssetRow, row.audio_id) if row.audio_id else None
+                limit = audio.duration_ms if audio else len(step.text)
+                spans = merge_intervals(load_json_field(row.intervals_json, []))
+                fraction = min(1., sum(end-start for start, end in spans)/max(1, limit))
+                previous = result.get(str(row.step_no), {})
+                if fraction >= previous.get("fraction", 0):
+                    result[str(row.step_no)] = {"visible_chars": row.visible_chars, "fraction": fraction,
+                        "board_complete": row.board_complete}
+            return result
+
     def rename(self, conversation_id, owner, value: LessonTitleIn):
         with self.db.session() as sess:
             conv, _ = self.owned(sess, conversation_id, owner, lock=True)

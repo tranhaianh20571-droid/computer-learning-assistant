@@ -573,5 +573,5 @@ def test_payment_required_is_quota_and_never_selects_another_output_mode():
     with pytest.raises(PlanningError) as caught:
         asyncio.run(transport.handle_async_request(httpx2.Request(
             "POST", "https://synthetic.example/v1/chat/completions", content=b"{}")))
-    assert caught.value.code == "QUOTA_EXCEEDED"
+    assert caught.value.code == "MODEL_QUOTA_EXCEEDED"
     assert not allows_content_fallback(caught.value)

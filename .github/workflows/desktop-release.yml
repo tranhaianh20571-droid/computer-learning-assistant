@@ -1,6 +1,11 @@
 name: Desktop Build
 on:
   workflow_dispatch:
+    inputs:
+      rebuild_components:
+        description: Rebuild runtimes instead of reusing the pinned manifest
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 permissions:
@@ -28,10 +33,15 @@ jobs:
       - run: node desktop/scripts/verify-publication.mjs
       - run: npm run build
         working-directory: frontend
+      - run: node desktop/scripts/fetch-components.mjs
+        if: ${{ !inputs.rebuild_components }}
       - run: npm run components
+        if: ${{ inputs.rebuild_components }}
         working-directory: desktop
       - run: node tests/desktop_archive_contents.mjs
+        if: ${{ inputs.rebuild_components }}
       - run: node --test tests/desktop_pipe_unit.mjs
+        if: ${{ inputs.rebuild_components }}
       - run: node tests/desktop_clean_install.mjs
         timeout-minutes: 20
       - run: npm run dist
@@ -44,6 +54,13 @@ jobs:
           name: desktop-windows-x64
           path: |
             .backup/desktop-dist/*Setup.exe
-            .backup/desktop-components/*.zip
+            .backup/desktop-dist/*.blockmap
+            .backup/desktop-dist/latest.yml
             .backup/desktop-components/runtime.json
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.rebuild_components }}
+        with:
+          name: desktop-runtime-components
+          path: .backup/desktop-components/*.zip
           retention-days: 7

@@ -134,10 +134,11 @@ class Lease:
 
 
 class LeaseError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, resource_reason=None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.resource_reason = resource_reason
 
 
 class TaskService:
@@ -545,7 +546,9 @@ class TaskService:
             from sqlalchemy import text
             session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 61021004})
         if not budget.permits_heavy():
-            raise LeaseError("LANE_CAPACITY_FULL", "local resource pressure")
+            reason = budget.wait_reason() if hasattr(budget, "wait_reason") else None
+            raise LeaseError("LANE_CAPACITY_FULL", "local resource pressure",
+                             resource_reason=reason)
         if row.kind in HEAVY_KINDS:
             active = session.scalar(select(func.count()).select_from(LearningTaskRow).where(
                 LearningTaskRow.kind.in_(HEAVY_KINDS), LearningTaskRow.task_id != row.task_id,

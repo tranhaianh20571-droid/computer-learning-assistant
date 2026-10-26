@@ -14,7 +14,7 @@ import uuid
 from datetime import timedelta
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
@@ -73,14 +73,26 @@ def initialize(db):
 
     from .assembler import create_app
     from .logging_audit.models import _AUDIT_IMMUTABLE_SQL, Base
-    tables = inspect(db.engine).get_table_names()
-    if tables and "desktop_schema" not in tables:
-        raise RuntimeError("SCHEMA_NOT_OWNED")
-    if "desktop_schema" in tables:
-        with db.engine.connect() as connection:
-            if connection.scalar(text("SELECT version FROM desktop_schema")) != SCHEMA_VERSION:
+    with db.engine.begin() as connection:
+        connection.execute(text("SELECT pg_advisory_xact_lock(1937012089)"))
+        tables = inspect(connection).get_table_names()
+        if tables and "desktop_schema" not in tables:
+            raise RuntimeError("SCHEMA_NOT_OWNED")
+        if "desktop_schema" in tables:
+            versions = connection.scalars(text("SELECT version FROM desktop_schema FOR UPDATE")).all()
+            if versions in ([1], [2]):
+                from importlib import import_module
+                from alembic.migration import MigrationContext
+                from alembic.operations import Operations
+
+                with Operations.context(MigrationContext.configure(connection)):
+                    if versions == [1]:
+                        import_module(".alembic.versions.m3c4d5e6f7g8_course_preparation", __package__).upgrade()
+                    import_module(".alembic.versions.n4d5e6f7g8h9_classroom_recordings", __package__).upgrade()
+                connection.execute(text("UPDATE desktop_schema SET version=:version"), {"version": SCHEMA_VERSION})
+            elif versions != [SCHEMA_VERSION]:
                 raise RuntimeError("SCHEMA_UPGRADE_REQUIRED")
-        return
+            return
     create_app()
     # Import all product models before taking the baseline snapshot.
     from .auth import models as auth_models  # noqa: F401
@@ -105,7 +117,7 @@ def initialize(db):
             "ON corpus_vectors(owner_user_id,space,dimensions,material_id)"))
         connection.execute(text("CREATE TABLE desktop_schema(version integer NOT NULL)"))
         connection.execute(text("INSERT INTO desktop_schema VALUES (:version)"), {"version": SCHEMA_VERSION})
-    # All further launches open this exact schema without running schema changes.
+    # Later launches only run an explicitly supported, owned version transition.
 
 
 def local_session(db, owner_file):

@@ -22,6 +22,26 @@ function syntheticPdf(){
     `trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
   return Buffer.from(value);
 }
+async function assertPointerTargets(page,selector){
+  await page.locator(".teaching-pointer").waitFor({state:"visible"});
+  await page.waitForFunction(selector=>{
+    const pointer=document.querySelector(".teaching-pointer"),region=document.querySelector(selector);
+    const view=document.querySelector(".pdf-viewport")?.getBoundingClientRect();
+    if(!pointer||!region||!view)return false;
+    const host=pointer.parentElement.getBoundingClientRect(),rect=region.getBoundingClientRect();
+    const x=host.left+pointer.offsetLeft,y=host.top+pointer.offsetTop;
+    const targetX=Math.min(rect.right,view.right-12);
+    const targetY=(Math.max(rect.top,view.top)+Math.min(rect.bottom,view.bottom))/2;
+    return Math.hypot(x-targetX,y-targetY)<3;
+  },selector);
+}
+
+const multiRegions=[
+  {page_no:1,bbox:[.08,.28,.52,.34]},
+  {page_no:2,bbox:[.1,.12,.7,.18],kind:"emphasis"},
+  {page_no:1,bbox:[.12,.42,.8,.5],kind:"emphasis"},
+  {page_no:1,bbox:[.16,.56,.66,.62],kind:"paragraph"}
+];
 try{
  for(const width of [1440,390]){
   const context=await browser.newContext({viewport:{width,height:1000}});
@@ -46,7 +66,7 @@ try{
       last_checkpoint:{client_seq:1,step_no:1,position_ms:0,presentation:{visible_chars:8,paused:true}}});
     return json(route,{data:[],saved:true});
   });
-  await page.goto(served.origin+"/#/lecture/synthetic-pdf");
+  await page.goto(served.origin+"/#/lecture/synthetic-pdf",{waitUntil:"domcontentloaded",timeout:90000});
   await page.getByLabel("当前讲解原文区域",{exact:true}).waitFor();
   await page.locator(".teaching-pointer").waitFor({state:"visible"});
   assert.equal(await page.getByRole("tab",{name:"原文",exact:true}).getAttribute("aria-selected"),"true");
@@ -63,6 +83,7 @@ try{
   const zoomed=await page.locator(".pdf-focus-box").boundingBox();
   assert(Math.abs(zoomed.width/initial.width-1.25)<.04);
   checks.push(`region-scales-with-page-${width}`);
+  assert.equal(await page.getByRole("button",{name:"回到原文讲解位置",exact:true}).count(),0);
   await page.getByRole("button",{name:"下一页原文",exact:true}).click();
   await page.waitForFunction(()=>document.querySelector(".pdf-lesson")?.dataset.pdfFollowing==="false");
   await page.getByLabel("当前讲解原文区域",{exact:true}).waitFor({state:"hidden"});
@@ -70,6 +91,7 @@ try{
   await page.getByLabel("当前讲解原文区域",{exact:true}).waitFor();
   assert.equal(await page.locator(".pdf-lesson").getAttribute("data-pdf-target"),"p1_r0");
   checks.push(`manual-review-and-return-${width}`);
+  await page.getByRole("button",{name:"回到原文讲解位置",exact:true}).waitFor({state:"hidden"});
   await page.getByRole("tab",{name:"板书",exact:true}).click();
   await page.locator(".excalidraw canvas").first().waitFor();
   await page.getByRole("tab",{name:"原文",exact:true}).click();
@@ -77,7 +99,38 @@ try{
   const link=await page.getByRole("link",{name:"下载原 PDF",exact:true}).getAttribute("href");
   assert(link.endsWith(`/sources/synthetic-pdf/${"a".repeat(64)}/original/download`));
   checks.push(`board-return-and-versioned-download-${width}`);
-  await page.screenshot({path:`${out}/pdf-${width}.png`});
+  focus={...focus,target_id:"p1_regions",bbox:null,regions:multiRegions};
+  await page.waitForFunction(()=>document.querySelector(".pdf-lesson")?.dataset.pdfTarget==="p1_regions");
+  await page.locator(".pdf-focus-region").first().waitFor();
+  assert.equal(await page.locator(".pdf-focus-region").count(),3);
+  assert.equal(await page.locator(".pdf-focus-box").count(),0);
+  assert.equal(await page.locator('.pdf-focus-region[data-pdf-page="2"]').count(),0);
+  assert.equal(await page.getByLabel("当前讲解强调区域",{exact:true}).count(),1);
+  assert.equal(await page.getByLabel("当前讲解段落区域",{exact:true}).count(),2);
+  const paragraphStyle=await page.locator(".pdf-focus-region--paragraph").first().evaluate(node=>({
+    border:getComputedStyle(node).borderTopWidth,background:getComputedStyle(node).backgroundColor,kind:node.dataset.regionKind}));
+  const emphasisStyle=await page.locator(".pdf-focus-region--emphasis").evaluate(node=>({
+    border:getComputedStyle(node).borderTopWidth,background:getComputedStyle(node).backgroundColor,kind:node.dataset.regionKind}));
+  assert.equal(paragraphStyle.kind,"paragraph");assert.equal(emphasisStyle.kind,"emphasis");
+  assert(parseFloat(emphasisStyle.border)>parseFloat(paragraphStyle.border));
+  assert.notEqual(paragraphStyle.background,emphasisStyle.background);
+  await assertPointerTargets(page,".pdf-focus-region--emphasis");
+  const firstRegionScroll=await page.locator(".pdf-viewport").evaluate(node=>
+    Math.abs(node.scrollTop-Math.max(0,document.querySelector(".pdf-focus-region").offsetTop-node.clientHeight*.3)));
+  assert(firstRegionScroll<2,"automatic scroll must use the first current-page region");
+  checks.push(`multi-region-emphasis-and-first-region-scroll-${width}`);
+  await page.screenshot({path:`${out}/pdf-regions-${width}.png`});
+  focus={...focus,regions:multiRegions.map(region=>({...region,kind:region.page_no===1?"paragraph":region.kind}))};
+  await assertPointerTargets(page,'.pdf-focus-region[data-pdf-page="1"]');
+  checks.push(`paragraph-pointer-without-emphasis-${width}`);
+  focus={...focus,target_id:"p2_regions",page_no:2,regions:multiRegions};
+  await page.waitForFunction(()=>document.querySelector(".pdf-lesson")?.dataset.pdfTarget==="p2_regions"&&
+    document.querySelectorAll(".pdf-focus-region").length===1);
+  assert.equal(await page.locator('.pdf-focus-region[data-pdf-page="1"]').count(),0);
+  assert.equal(await page.locator(".pdf-focus-region--emphasis").getAttribute("data-pdf-page"),"2");
+  assert((await page.locator(".pdf-tools").innerText()).includes("2 / 2"));
+  await assertPointerTargets(page,'.pdf-focus-region[data-pdf-page="2"]');
+  checks.push(`page-follows-and-filters-regions-${width}`);
   focus={...focus,target_id:"p2",page_no:2,bbox:null,precision:"page"};
   await page.waitForFunction(()=>document.querySelector(".pdf-precision")?.textContent?.includes("当前仅能定位到原页"),{},{timeout:15000});
   assert.equal(await page.locator(".pdf-focus-box").count(),0);

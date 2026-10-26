@@ -31,6 +31,7 @@ try {
       if (pathname === "/api/courses/course-a/lessons/lesson-a/start") {
         starts++;
         workspace = { ...workspace, scope_preparation: { status: "queued", error_code: null } };
+        if(workspace.preparation)workspace.preparation={state:"retrying",action:null};
         return json(route, { conversation_id: workspace.conversation_id, task_id: "existing-first-task" });
       }
       if (pathname.endsWith("/checkpoint")) {
@@ -69,6 +70,38 @@ try {
     assert.equal(await page.getByRole("button", { name: "重试准备考纲", exact: true }).count(), 0);
     await page.getByText("模型返回的内容不符合要求，可重试生成。", { exact: true }).first().waitFor();
     checks.push(`ready-scope-does-not-hide-first-segment-failure-${width}`);
+    workspace={...workspace,scope_preparation:{status:"failed",error_code:"MODEL_PROVIDER_ERROR"},
+      preparation:{state:"retrying",action:null}};
+    await page.getByText("正在准备本讲内容…",{exact:true}).waitFor();
+    assert.equal(await page.getByRole("button",{name:/重试准备考纲|重试生成|稍后再试/}).count(),0);
+    assert(!/MODEL_PROVIDER_ERROR|模型返回的内容不符合/.test(await page.locator("body").innerText()));
+    checks.push(`background-recovery-hides-internal-failures-${width}`);
+    workspace={...workspace,preparation:{state:"paused",action:"retry"}};
+    await page.getByText("暂时无法准备本讲内容，课程已保留。",{exact:true}).waitFor();
+    await page.getByRole("button",{name:"稍后再试",exact:true}).click();
+    await page.getByText("正在准备本讲内容…",{exact:true}).waitFor();
+    assert.equal(starts,2);
+    checks.push(`paused-has-one-bounded-recovery-action-${width}`);
+    workspace={...workspace,preparation:{state:"action_required",action:"settings"}};
+    await page.getByText("学习服务连接需要更新，课程已保留。",{exact:true}).waitFor();
+    assert.equal(await page.getByRole("link",{name:"前往设置",exact:true}).count(),1);
+    assert.equal(await page.getByRole("button",{name:/重试|恢复|稍后再试/}).count(),0);
+    checks.push(`configuration-failure-has-one-settings-action-${width}`);
+    workspace={...workspace,preparation:{state:"paused",action:null,reason:"storage"}};
+    await page.getByText("本机空间不足，内容准备已暂停。释放空间后会自动继续。",{exact:true}).waitFor();
+    assert.equal(await page.getByRole("link",{name:"前往设置",exact:true}).count(),0);
+    assert.equal(await page.getByRole("button",{name:/重试|恢复|稍后再试/}).count(),0);
+    assert.equal(await page.getByText("正在准备语音…",{exact:true}).count(),0);
+    checks.push(`storage-pressure-waits-without-retry-or-premature-audio-${width}`);
+    workspace={...workspace,preparation:{state:"paused",action:null,reason:"memory"}};
+    await page.getByText("本机暂时繁忙，稍后会自动继续准备。",{exact:true}).waitFor();
+    workspace={...workspace,preparation:{state:"preparing",action:null}};
+    await page.getByText("正在准备本讲内容…",{exact:true}).waitFor();
+    checks.push(`resource-recovery-resumes-without-user-action-${width}`);
+    workspace={...workspace,preparation:{state:"action_required",action:"settings",reason:"quota"}};
+    await page.getByText("学习服务额度不足，请补充后继续，课程已保留。",{exact:true}).waitFor();
+    assert.equal(await page.getByRole("link",{name:"前往设置",exact:true}).count(),1);
+    checks.push(`quota-failure-shows-one-plain-language-action-${width}`);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.screenshot({ path: `${output}/scope-ready-${width}.png` });
     assert.deepEqual(errors, []);

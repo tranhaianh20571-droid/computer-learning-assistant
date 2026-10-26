@@ -66,7 +66,10 @@ def configured_tts_factory(configs, disclosures, fallback=None):
                 row=sess.scalar(select(PreparedFirstSegmentRow).where(PreparedFirstSegmentRow.task_id==task_id))
                 if not row:raise error("config_not_found")
                 from .outputs import StepCandidate
-                expected_text=StepCandidate.model_validate_json(row.candidate_json).text
+                from .source_reading import SourceReadingStepCandidate
+                import json
+                candidate_type = SourceReadingStepCandidate if json.loads(row.context_json).get("teaching_mode") == "source_reading" else StepCandidate
+                expected_text=candidate_type.model_validate_json(row.candidate_json).text
                 import json
                 scope={"course_id":row.course_id,"lesson_id":row.lesson_id,
                     "outline_version_id":json.loads(row.context_json)["outline_version_id"]}
@@ -124,8 +127,20 @@ def configured_tts_factory(configs, disclosures, fallback=None):
             client.close();raise
         adapter._owns_client=True
         synthesize=adapter.synthesize
+        if task.kind=="lesson_first_prepare":
+            raw_synthesize=synthesize
+            def metered_synthesize(text,**kwargs):
+                from .course_preparation import debit_wire
+                with configs.db.session() as sess:
+                    live_task=tasks.validate_lease(lease,actor_id=owner,session=sess)
+                    debit_wire(sess,live_task,config=view)
+                return raw_synthesize(text,**kwargs)
+            synthesize=metered_synthesize
         character = None
-        if task.kind in ("tts", "tts_answer", "feynman_audio"):
+        if task.kind=="lesson_first_prepare":
+            import json
+            character=json.loads(row.context_json).get("_prepared_character")
+        elif task.kind in ("tts", "tts_answer", "feynman_audio"):
             from ..characters.service import segment_character
             with configs.db.session() as sess:
                 if task.kind == "feynman_audio":
@@ -152,7 +167,7 @@ def configured_tts_factory(configs, disclosures, fallback=None):
                 raise
         from ..characters.speech import compile_speech, synthesize_plan, map_subtitles
         expression = None
-        if character:
+        if character and task.kind!="lesson_first_prepare":
             import json
             from ..characters.models import CharacterSegmentRow
             from ..characters.expression import CharacterExpressionPlan

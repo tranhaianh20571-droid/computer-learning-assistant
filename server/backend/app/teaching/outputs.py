@@ -168,11 +168,15 @@ class FollowupCandidate(BaseModel):
         return self
 
 
-def validate_step_duration(text: str) -> int:
-    """估算步骤时长（毫秒）；超过 120 秒硬上限必须拆分。"""
-    seconds = len(text) / 4.0
+def validate_step_duration(text: str, *, source_reading: bool = False) -> int:
+    """Estimate playback while retaining the shared 120-second ceiling."""
+    if source_reading:
+        from .source_reading import narration_seconds
+        seconds = narration_seconds(text)
+    else:
+        seconds = len(text) / 4.0
     if seconds > 120:
-        raise error("BOARD_SCHEMA_INVALID", "step exceeds 120s hard cap; split required")
+        raise error("BOARD_SCHEMA_INVALID", "step exceeds playback cap; split required")
     return int(seconds * 1000)
 
 

@@ -62,7 +62,9 @@ def test_review_migration_round_trip(engine):
 
 def test_revision_chain_has_single_native_head():
     scripts = ScriptDirectory(str(ROOT / "server/backend/app/alembic"))
-    assert scripts.get_heads() == ["l2b3c4d5e6f7"]
+    assert scripts.get_heads() == ["n4d5e6f7g8h9"]
+    assert scripts.get_revision("n4d5e6f7g8h9").down_revision == "m3c4d5e6f7g8"
+    assert scripts.get_revision("m3c4d5e6f7g8").down_revision == "l2b3c4d5e6f7"
     assert scripts.get_revision("l2b3c4d5e6f7").down_revision == "k1a2b3c4d5e6"
     assert scripts.get_revision("k1a2b3c4d5e6").down_revision == "j0a1b2c3d4e5"
     assert scripts.get_revision("j0a1b2c3d4e5").down_revision == "i9p0q1r2s3t4"
@@ -257,3 +259,42 @@ def test_lesson_cache_migration_preserves_rows_and_refuses_lossy_downgrade(engin
     with engine.begin() as connection:
         assert connection.execute(text("SELECT count(*) FROM prepared_first_segments")).scalar_one() == 3
         assert connection.execute(text("SELECT text_key FROM prepared_first_segments WHERE cache_id='legacy-cache'")).scalar_one() == "text-v1"
+
+
+def test_course_preparation_migration_preserves_legacy_and_refuses_lossy_downgrade(engine):
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE courses(course_id varchar(64) PRIMARY KEY)"))
+        connection.execute(text("CREATE TABLE outline_versions(outline_version_id varchar(64) PRIMARY KEY)"))
+        connection.execute(text("CREATE TABLE prepared_first_segments(cache_id varchar(64) PRIMARY KEY)"))
+        connection.execute(text("INSERT INTO prepared_first_segments VALUES ('legacy')"))
+        module=migration("m3c4d5e6f7g8_course_preparation.py",connection)
+        module.upgrade()
+        assert connection.execute(text("SELECT persistent FROM prepared_first_segments")).scalar_one() is False
+        connection.execute(text("UPDATE prepared_first_segments SET persistent=true"))
+    with pytest.raises(RuntimeError,match="persistent first segments"):
+        with engine.begin() as connection:
+            migration("m3c4d5e6f7g8_course_preparation.py",connection).downgrade()
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE prepared_first_segments SET persistent=false"))
+        migration("m3c4d5e6f7g8_course_preparation.py",connection).downgrade()
+        assert connection.execute(text("SELECT cache_id FROM prepared_first_segments")).scalar_one()=="legacy"
+        assert "course_preparation_items" not in inspect(connection).get_table_names()
+
+
+def test_classroom_recording_migration_preserves_metadata_and_refuses_loss(engine):
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE conversations(conversation_id varchar(64) PRIMARY KEY)"))
+        connection.execute(text("INSERT INTO conversations VALUES ('synthetic-recording-conversation')"))
+        module = migration("n4d5e6f7g8h9_classroom_recordings.py", connection)
+        module.upgrade()
+        connection.execute(text("""INSERT INTO classroom_recordings
+            (recording_id,owner_user_id,conversation_id,content_version_id,status,mime_type,chunks_json,
+             events_json,storage_key,size_bytes,duration_ms,created_at,updated_at)
+            VALUES ('synthetic-rec','owner','synthetic-recording-conversation','v1','recording',
+                    'video/webm','[]','[]','',0,0,now(),now())"""))
+        with pytest.raises(RuntimeError, match="Export classroom recordings"):
+            module.downgrade()
+        assert connection.scalar(text("SELECT count(*) FROM classroom_recordings")) == 1
+        connection.execute(text("DELETE FROM classroom_recordings"))
+        module.downgrade()
+        assert not inspect(connection).has_table("classroom_recordings")

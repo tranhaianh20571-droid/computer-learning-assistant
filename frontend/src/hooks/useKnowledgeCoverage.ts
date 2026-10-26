@@ -45,5 +45,7 @@ export function useKnowledgeCoverage(conversation:string,step:any,playing:boolea
     },80);
     return()=>clearInterval(timer);
   },[conversation,flush,posRef]);
-  return {flush};
+  return {flush,reset:()=>{
+    for(const sample of samples.current.values()){sample.previous=null;sample.time=performance.now();}
+  }};
 }

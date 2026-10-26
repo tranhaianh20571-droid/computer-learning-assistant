@@ -174,7 +174,7 @@ def test_provider_failed_job_can_be_explicitly_resubmitted(env):
     retry = env.service.retry(item["material_id"], env.owner, config["config_id"], 1)
     env.adapter.check_document = lambda _: paddle_document_result([layout()])
     env.service.run(retry["task_id"])
-    assert len(env.adapter.calls) == 3  # Failed primary, explicit retry, then one missing-chart crop pass.
+    assert len(env.adapter.calls) == 2  # Failed primary and explicit retry; default OCR adds no crop request.
     assert env.service.view(item["material_id"], env.owner)["status"] == "parsed"
 
 

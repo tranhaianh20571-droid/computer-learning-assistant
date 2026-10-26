@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState} from "react";
 import {api} from "../api";
 import {audioCharacters} from "../lib/audioTiming";
+import {classroomAudio,releaseClassroomAudio} from "../lib/classroomMedia";
 
 export function useFeynmanAudio(conversation:string,quiz:any,autoplay:boolean,onRefresh:()=>Promise<void>){
   const latest=useRef({quiz,onRefresh});latest.current={quiz,onRefresh};
@@ -26,7 +27,7 @@ export function useFeynmanAudio(conversation:string,quiz:any,autoplay:boolean,on
     };
     if(!required){void save(true);return()=>{disposed=true;};}
     if(!current.audio_id)return()=>{disposed=true;};
-    const audio=new Audio(api.audioUrl(current.audio_id));audio.preload="auto";media.current=audio;
+    const audio=classroomAudio(api.audioUrl(current.audio_id));audio.preload="auto";media.current=audio;
     const update=()=>{
       if(!stalled&&!audio.paused&&!audio.seeking&&audio.readyState>=2){
         visible=audioCharacters(current.text,current.subtitles||[],Math.floor(audio.currentTime*1000));
@@ -49,7 +50,7 @@ export function useFeynmanAudio(conversation:string,quiz:any,autoplay:boolean,on
       disposed=true;clearTimeout(timer);cancelAnimationFrame(frame);
       void save();audio.onplaying=null;audio.onwaiting=null;audio.onseeking=null;audio.onseeked=null;
       audio.onerror=null;audio.onended=null;audio.onloadedmetadata=null;
-      audio.pause();audio.removeAttribute("src");audio.load();media.current=null;
+      audio.pause();audio.removeAttribute("src");audio.load();releaseClassroomAudio(audio);media.current=null;
     };
   },[conversation,turn?.id,turn?.audio_id]);
   useEffect(()=>{

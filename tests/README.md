@@ -46,6 +46,16 @@ MiniMax 余额不足的受控映射由 `test_minimax_subtitle_sync.py` 覆盖，
 Java/C/C++/CPU torch、绘图和文件/网络隔离，不使用个人资料或真实模型。
 干净环境安装验证和真实供应商结果分别归档，不能由单元检查代替。
 
+英文 Windows 的中文路径回归由 `desktop_postgres_probe.mjs`、
+`desktop_native_probe.mjs` 和 `desktop_native_probe.py` 执行：
+比较英文/中文数据目录、程序目录及收紧权限的目录，课堂覆盖 C、C++、Java、PyTorch。
+修复采用进程级UTF-8清单，使用Windows SDK在构建时写入，不调整系统区域设置。
+`desktop_runtime_repair_unit.mjs` 比对修复组件与固定原包，确认仅指定启动工具和说明文件变更。
+云端手动诊断工作流分别为 `Desktop PostgreSQL Probe`、`Desktop Native Probe`；
+完整发布检查继续执行真实 `desktop_clean_install.mjs`，不通过跳过检查来解决兼容问题。
+`desktop_package_parity.mjs` 同时核对应用代码、前端与运行组件清单；
+已安装环境备份按当前清单选择对应版本的pg_dump，不对多个保留的运行目录盲选。
+
 ## 课堂录像与复习
 
 `test_paper_classroom.py` 检查开篇、图示提示、向后回放、录像分片幂等、

@@ -1,0 +1,23 @@
+name: Desktop PostgreSQL Probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm ci
+        working-directory: desktop
+      - run: node tests/desktop_postgres_probe.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: postgres-probe
+          path: .backup/postgres-probe-result.json
+          retention-days: 3

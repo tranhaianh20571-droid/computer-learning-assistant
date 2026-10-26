@@ -52,6 +52,9 @@ PostgreSQL 工具在构建时通过 `scripts/patch-postgres.py` 嵌入进程级 
 避免英文 Windows 将中文程序/数据路径转换为问号。Windows SDK `mt.exe` 只用于构建，
 不改变用户的系统区域设置。`scripts/package-postgres.mjs` 可从已固定的原组件单独打包修复，
 保留其许可证，不重建其余运行组件；新组件使用独立版本与发布地址，旧资产保持不变。
+Java 17 的 `java.exe` 和 `javac.exe` 使用同一 UTF-8 清单处理，
+通过 `node scripts/package-repaired-runtime.mjs classroom` 单独发布课堂组件修订。
+打包只替换这两个启动工具，保留其余压缩条目，复用共享的清单修改与打包工具。
 
 ## 验证与反馈
 

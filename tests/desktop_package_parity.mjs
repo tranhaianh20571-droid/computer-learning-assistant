@@ -31,4 +31,7 @@ for(const file of await files(path.join(root,"desktop/src"))){
  assert.equal(digest(await readFile(file)),digest(asar.extractFile(path.join(install,"resources/app.asar"),relative)),relative);
  checked.push(relative);
 }
+assert.equal(digest(await readFile(path.join(root,"desktop/manifests/runtime.json"))),
+ digest(await readFile(path.join(install,"resources/runtime.json"))),"runtime manifest");
+checked.push("runtime manifest");
 console.log(JSON.stringify({passed:true,matchingFiles:checked.length}));

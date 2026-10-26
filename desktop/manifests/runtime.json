@@ -45,11 +45,11 @@
     },
     {
       "id": "classroom",
-      "version": "0.1.0",
-      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/v0.1.0/classroom-0.1.0-win32-x64.zip",
-      "bytes": 614114618,
-      "unpackedBytes": 1776461385,
-      "sha256": "2aadfaf78e81d4918d0697074dd3ffa02d2e1ab3c74c5f6f5ef0bfae023ce9fd"
+      "version": "0.1.0-java-utf8.1",
+      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/runtime-classroom-0.1.0-java-utf8.1/classroom-0.1.0-java-utf8.1-win32-x64.zip",
+      "bytes": 614099236,
+      "unpackedBytes": 1776441392,
+      "sha256": "6dfdde2b76ab302f26f48322c8e997f5f617d2cf68aaea4ecc22601cc34b2290"
     }
   ]
 }

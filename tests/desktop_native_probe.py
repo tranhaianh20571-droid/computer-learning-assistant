@@ -29,7 +29,7 @@ for language, code in examples.items():
             "output": diagnostic[:1200]}), flush=True)
         if result["status"] != "success" or "ready" not in result["output"]:
             failures.append(language)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - report every independent synthetic probe
         print(json.dumps({"language": language, "exception": type(error).__name__}), flush=True)
         failures.append(language)
 if os.environ.get("STUDY_PATCH_JAVA") == "1":

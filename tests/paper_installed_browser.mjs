@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import {createRequire} from "node:module";
 import {mkdir,writeFile} from "node:fs/promises";
+import {spawnSync} from "node:child_process";
 const {_electron}=createRequire(import.meta.url)(process.env.PW_ROOT+"/playwright");
 assert(process.env.TEST_INSTALLED_EXE,"Select an installed executable explicitly");
 const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;
@@ -115,6 +116,13 @@ try{
  assert.deepEqual(errors,[]);
  await writeFile(output+"/installed-result.json",JSON.stringify({version,checks,errors},null,2));
  console.log(JSON.stringify({version,passed:checks.length,checks}));
+ if(process.env.TEST_BACKUP_OUTPUT){
+  assert(process.env.TEST_PYTHON,"Select the regression Python for an explicit database backup");
+  const backup=spawnSync(process.env.TEST_PYTHON,[path.resolve("tests/paper_desktop_backup.py"),
+   "--install",path.dirname(path.resolve(process.env.TEST_INSTALLED_EXE)),"--out",process.env.TEST_BACKUP_OUTPUT],
+   {windowsHide:true,encoding:"utf8",timeout:180000});
+  assert.equal(backup.status,0,backup.stderr);console.log(backup.stdout.trim());
+ }
  const closed=application.waitForEvent("close");
  await application.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].close());
  await closed;

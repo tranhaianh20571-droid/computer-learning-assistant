@@ -1,8 +1,9 @@
 """Diagnose only fixed synthetic examples; never inspect user classroom code."""
 import argparse
 import json
-from pathlib import Path
+import os
 import sys
+from pathlib import Path
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server/backend"))
@@ -19,11 +20,17 @@ examples = {
     "java": 'public class Main {public static void main(String[] a){System.out.println("ready");}}',
     "pytorch": 'import torch\nassert torch.tensor([1,2]).sum().item()==3\nprint("ready")',
 }
+failures = []
 for language, code in examples.items():
     try:
         result = runner.execute(str(uuid4()), "synthetic", "synthetic", language, code)
         diagnostic = result["output"].replace(str(args.root), "<runtime>").replace(str(args.work), "<work>")
         print(json.dumps({"language": language, "status": result["status"],
             "output": diagnostic[:1200]}), flush=True)
+        if result["status"] != "success" or "ready" not in result["output"]:
+            failures.append(language)
     except Exception as error:
         print(json.dumps({"language": language, "exception": type(error).__name__}), flush=True)
+        failures.append(language)
+if os.environ.get("STUDY_PATCH_JAVA") == "1":
+    assert not failures, failures

@@ -151,6 +151,7 @@ const jdkZip = await acquire(
   "dcf0064efec7e515a5e3b56e7532f1a1c125510303c6c9e60af8878e3f7347fe", path.join(build, "jdk.zip"));
 await run(seven, ["x", "-y", jdkZip, "-o" + path.join(build, "jdk-unpack")], { stdio: "ignore" });
 await fs.cp(path.join(build, "jdk-unpack/jdk-17.0.17+10"), path.join(classroom, "jdk"), { recursive: true });
+await run(path.join(core,"python.exe"),["desktop/scripts/patch-java.py",classroom]);
 const mingwArchive = await acquire(
   "https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-x86_64.zip",
   "fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd", path.join(build, "llvm-mingw.zip"));

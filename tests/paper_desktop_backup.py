@@ -31,11 +31,15 @@ def main():
         raise RuntimeError("Not a local owned database")
     output = Path(args.out).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    dumps = list((install / "userdata/runtimes").glob("postgres-*/bin/pg_dump.exe"))
-    if len(dumps) != 1:
+    manifest = json.loads((install / "resources/runtime.json").read_text(encoding="utf8"))
+    components = [item for item in manifest["components"] if item["id"] == "postgres"]
+    if len(components) != 1:
+        raise RuntimeError("Owned backup tool missing")
+    dump = (install / "userdata/runtimes" / ("postgres-" + components[0]["sha256"][:16]) / "bin/pg_dump.exe").resolve()
+    if not dump.is_relative_to(install) or not dump.is_file():
         raise RuntimeError("Owned backup tool missing")
     environment["PGPASSWORD"] = url.password
-    result = subprocess.run([str(dumps[0]), "--host", url.host, "--port", str(url.port),
+    result = subprocess.run([str(dump), "--host", url.host, "--port", str(url.port),
         "--username", url.username, "--format=custom", "--file", str(output / "study.dump"), url.database],
         env=environment, capture_output=True, timeout=120, creationflags=subprocess.CREATE_NO_WINDOW)
     if result.returncode:

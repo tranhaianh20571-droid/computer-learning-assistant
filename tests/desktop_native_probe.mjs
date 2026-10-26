@@ -14,9 +14,21 @@ for(const id of ["core","classroom"]){
  roots[id]=path.join(work,id);await fs.mkdir(roots[id]);
  await extract(archive,roots[id],item.unpackedBytes);
 }
-for(const label of ["ascii","中文工作区"]){
+if(process.env.STUDY_PATCH_JAVA==="1"){
+ const patched=spawnSync(process.env.TEST_PYTHON||"python",["desktop/scripts/patch-java.py",roots.classroom],
+  {cwd:root,windowsHide:true,encoding:"utf8",timeout:60000});
+ if(patched.status!==0)throw Error("Java manifest patch failed: "+patched.stderr);
+ console.log(patched.stdout.trim());
+}
+const cases=[["ascii",roots.classroom],["中文工作区",roots.classroom]];
+if(process.env.STUDY_PATCH_JAVA==="1"){
+ const unicode=path.join(work,"中文组件");await fs.cp(roots.classroom,unicode,{recursive:true});
+ cases.push(["中文程序与工作区",unicode]);
+}
+for(const [label,component] of cases){
  const result=spawnSync(path.join(roots.core,"python.exe"),[path.join(root,"tests/desktop_native_probe.py"),
-  "--root",roots.classroom,"--work",path.join(work,label)],
+  "--root",component,"--work",path.join(work,label)],
   {cwd:root,windowsHide:true,encoding:"utf8",timeout:600000,maxBuffer:128*1024});
  console.log(label,result.status,result.stdout,result.stderr);
+ if(process.env.STUDY_PATCH_JAVA==="1"&&result.status!==0)throw Error("Patched native tools failed: "+label);
 }

@@ -19,6 +19,8 @@ jobs:
       - run: npm ci
         working-directory: desktop
       - run: node tests/desktop_postgres_probe.mjs
+        env:
+          STUDY_PATCH_POSTGRES: "1"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

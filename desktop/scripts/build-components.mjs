@@ -127,6 +127,7 @@ try {
 const postgres = path.join(build, "postgres");
 await fs.cp(path.join(os.homedir(), ".pg0/installation/18.1.0"), postgres, { recursive: true });
 await runtimeLibraries(path.join(postgres, "bin"));
+await run(path.join(core,"python.exe"),["desktop/scripts/patch-postgres.py",postgres]);
 await archive("postgres", postgres);
 
 console.log("Building video runtime and default model");

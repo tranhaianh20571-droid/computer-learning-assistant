@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {spawnSync} from "node:child_process";
 import {createRequire} from "node:module";
+import assert from "node:assert/strict";
 const require=createRequire(import.meta.url);
 const {validateManifest,download,extract}=require("../desktop/src/install.cjs");
 const {protectHome}=require("../desktop/src/paths.cjs");
@@ -14,6 +15,12 @@ await download(item,archive,()=>{});
 const work=await fs.mkdtemp(path.join(root,".backup/pg-probe-"));
 const runtime=path.join(work,"runtime");await fs.mkdir(runtime);
 await extract(archive,runtime,item.unpackedBytes);
+if(process.env.STUDY_PATCH_POSTGRES==="1"){
+ const result=spawnSync(process.env.TEST_PYTHON||"python",["desktop/scripts/patch-postgres.py",runtime],
+  {cwd:root,windowsHide:true,encoding:"utf8",timeout:60000});
+ if(result.status!==0)throw Error("PostgreSQL manifest patch failed: "+result.stderr);
+ console.log(result.stdout.trim());
+}
 const unicodeRuntime=path.join(work,"程序目录");
 await fs.cp(runtime,unicodeRuntime,{recursive:true});
 const results=[];
@@ -34,3 +41,4 @@ for(const [name,environment,program,protectedHome] of [
  console.log(JSON.stringify(results.at(-1)));
 }
 await fs.writeFile(path.join(root,".backup/postgres-probe-result.json"),JSON.stringify(results,null,2));
+if(process.env.STUDY_PATCH_POSTGRES==="1")assert(results.every(result=>result.status===0),"Patched PostgreSQL path checks failed");

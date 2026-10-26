@@ -22,7 +22,7 @@ try{
   await page.waitForTimeout(500);
  }
  const version=await application.evaluate(({app})=>app.getVersion());
- assert.equal(version,"0.1.4");checks.push("installed-version");
+ assert.equal(version,createRequire(import.meta.url)("../desktop/package.json").version);checks.push("installed-version");
  const origin=new URL(page.url()).origin;
  assert.equal((await fetch(origin+"/api/auth/me")).status,403);checks.push("gateway-isolation");
  const profile=await page.evaluate(()=>fetch("/api/auth/me").then(response=>({status:response.status})));

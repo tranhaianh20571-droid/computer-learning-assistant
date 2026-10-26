@@ -2,7 +2,7 @@
 
 ## 安装
 
-在 GitHub Releases 下载 `StudyCompanion-版本号-x64-Setup.exe`，选择安装目录后打开应用。首次启动会下载、校验并初始化独立的 Python、PostgreSQL、视频转写模型、个人记忆和课堂运行组件；中断后可以重试。无需另外安装 Conda、Python 或业务数据库，视频默认使用 CPU，不要求 CUDA。
+在 GitHub Releases 下载 `StudyCompanion-版本号-x64-Setup.exe`，选择安装目录后打开应用。支持 Windows 10 1903 及以上的 x64 系统。首次启动会下载、校验并初始化独立的 Python、PostgreSQL、视频转写模型、个人记忆和课堂运行组件；中断后可以重试。无需另外安装 Conda、Python 或业务数据库，视频默认使用 CPU，不要求 CUDA。
 
 首次组件下载约 1.9 GB，建议至少预留 8 GB 空间，课程与资料还会继续占用空间。模型服务地址、模型与 API Key 在应用设置填写；记忆还需兼容的 Embedding 与重排服务。外部服务费用由用户配置的供应商决定。
 
@@ -47,6 +47,11 @@ npm run dist
 手动构建可勾选 `rebuild_components` 重建运行组件。更改依赖或沙箱时必须重新构建并更新清单。
 
 运行组件和安装包输出到受忽略的 `.backup/`。组件版本、大小、SHA-256 和下载地址位于 `desktop/manifests/runtime.json`；不得发布与清单不符的组件。
+
+PostgreSQL 工具在构建时通过 `scripts/patch-postgres.py` 嵌入进程级 UTF-8 清单，
+避免英文 Windows 将中文程序/数据路径转换为问号。Windows SDK `mt.exe` 只用于构建，
+不改变用户的系统区域设置。`scripts/package-postgres.mjs` 可从已固定的原组件单独打包修复，
+保留其许可证，不重建其余运行组件；新组件使用独立版本与发布地址，旧资产保持不变。
 
 ## 验证与反馈
 

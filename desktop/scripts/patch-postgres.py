@@ -4,10 +4,10 @@ Only PE manifests are changed. Requires the Windows SDK at build time.
 """
 import argparse
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 ASM = "urn:schemas-microsoft-com:asm.v1"
 ASM3 = "urn:schemas-microsoft-com:asm.v3"

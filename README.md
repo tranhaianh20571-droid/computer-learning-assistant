@@ -8,7 +8,7 @@
 
 学习助手伙伴把**你的资料、学习路线、语音课堂、动手练习和复习录像**放进同一个桌面学习空间。从一份资料或一个目标开始，和 AI 聊清楚基础与时间安排，再按自己的节奏学下去。
 
-[**下载 Windows x64 桌面版**](https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/tag/v0.1.4) · [查看全部版本](https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases) · [反馈与建议](https://github.com/tranhaianh20571-droid/computer-learning-assistant/issues)
+[**下载 Windows x64 桌面版**](https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/tag/v0.1.5) · [查看全部版本](https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases) · [反馈与建议](https://github.com/tranhaianh20571-droid/computer-learning-assistant/issues)
 
 ![学习空间](assets/desktop-home.png)
 

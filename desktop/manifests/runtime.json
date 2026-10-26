@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "0.1.0",
+  "version": "0.1.5",
   "platform": "win32-x64",
   "components": [
     {
@@ -13,11 +13,11 @@
     },
     {
       "id": "postgres",
-      "version": "0.1.0",
-      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/v0.1.0/postgres-0.1.0-win32-x64.zip",
-      "bytes": 62425297,
-      "unpackedBytes": 176181173,
-      "sha256": "ea2394a6a9d9cee42176fa99f3ad74ff4cd34574ce11d34fbd13824e04a3fa4c"
+      "version": "18.1.0-utf8.1",
+      "url": "https://github.com/tranhaianh20571-droid/computer-learning-assistant/releases/download/runtime-postgres-18.1.0-utf8.1/postgres-18.1.0-utf8.1-win32-x64.zip",
+      "bytes": 62427919,
+      "unpackedBytes": 176184563,
+      "sha256": "56ebcbbfd48c0e97444d0854807c6824a97a046a7f9a14a6b787fd0d943ebaf6"
     },
     {
       "id": "video",

@@ -6,10 +6,12 @@ import { createReadStream } from "node:fs";
 const root = path.resolve(import.meta.dirname, "../..");
 const output = path.join(root, ".backup/desktop-dist/SHA256SUMS.txt");
 const files = [];
+const version=JSON.parse(await fs.readFile(path.join(root,"desktop/package.json"),"utf8")).version;
 const directories=process.argv.includes("--application-only")?[".backup/desktop-dist"]:
   [".backup/desktop-components", ".backup/desktop-dist"];
 for (const directory of directories) {
   for (const name of await fs.readdir(path.join(root, directory))) {
+    if(/Setup\.exe(?:\.blockmap)?$/.test(name)&&!name.includes(`-${version}-`))continue;
     if (/\.zip$|Setup\.exe$|\.blockmap$|^runtime\.json$|^latest\.yml$/.test(name))
       files.push({ name, file: path.join(root, directory, name) });
   }
